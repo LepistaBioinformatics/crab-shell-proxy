@@ -108,7 +108,7 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeScaleToZero, f)
 
-	tgt, err := m.EnsureRunning(context.Background(), agent, "hash1")
+	tgt, err := m.EnsureRunning(context.Background(), agent, "hash1", "test@x")
 	if err != nil {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestEnsureRunningSingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := m.EnsureRunning(context.Background(), agent, "same"); err != nil {
+			if _, err := m.EnsureRunning(context.Background(), agent, "same", "test@x"); err != nil {
 				t.Errorf("EnsureRunning: %v", err)
 			}
 		}()
@@ -177,11 +177,11 @@ func TestEnsureRunningSingleFlight(t *testing.T) {
 func TestEnsureRunningReusesRunning(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeContinuous, f)
-	if _, err := m.EnsureRunning(context.Background(), agent, "h"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
 		t.Fatal(err)
 	}
 	c1, s1 := f.createN, f.startN
-	if _, err := m.EnsureRunning(context.Background(), agent, "h"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
 		t.Fatal(err)
 	}
 	if f.createN != c1 {
@@ -195,7 +195,7 @@ func TestEnsureRunningReusesRunning(t *testing.T) {
 func TestScaleToZeroIdleStop(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeScaleToZero, f) // idleTimeout 50ms
-	if _, err := m.EnsureRunning(context.Background(), agent, "h"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
 		t.Fatal(err)
 	}
 	m.ArmIdle(agent, "h")
@@ -219,7 +219,7 @@ func TestScaleToZeroIdleStop(t *testing.T) {
 func TestContinuousDoesNotArmIdle(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeContinuous, f)
-	if _, err := m.EnsureRunning(context.Background(), agent, "h"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
 		t.Fatal(err)
 	}
 	m.ArmIdle(agent, "h")

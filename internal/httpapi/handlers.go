@@ -22,8 +22,8 @@ import (
 // Orchestrator is the container-lifecycle surface the handlers need
 // (satisfied by *docker.Manager).
 type Orchestrator interface {
-	EnsureRunning(ctx context.Context, agent config.Agent, userHash string) (docker.Target, error)
-	ArmIdle(agent config.Agent, userHash string)
+	EnsureRunning(ctx context.Context, agent config.Agent, userKey, ownerEmail string) (docker.Target, error)
+	ArmIdle(agent config.Agent, userKey string)
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -101,8 +101,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, errBody(msg))
 		return
 	}
-	email := s.Resolver.PrincipalEmail(r.Header.Get(identity.ProfileHeader))
-	if email == "" {
+	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized,
 			errBody("missing or invalid "+identity.ProfileHeader+" header"))
 		return
@@ -117,13 +117,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody(`"messages" is required`))
 		return
 	}
-	sessionKey := identity.SessionKey(email, req.SessionID)
+	sessionKey := identity.SessionKey(ident.AccID, req.SessionID)
 	if sessionKey == "" {
 		writeJSON(w, http.StatusBadRequest,
 			errBody(`"session_id" is required to isolate conversations for this account`))
 		return
 	}
-	userHash := identity.UserHash(email)
+	userKey := identity.SanitizeID(ident.AccID)
 	userContent := lastUserContent(req.Messages)
 	model := req.Model
 	if model == "" {
@@ -132,18 +132,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	id := "chatcmpl-" + randomHex(12)
 
 	if req.Stream {
-		s.streamTurn(w, r, agent, userHash, sessionKey, userContent, model, id)
+		s.streamTurn(w, r, agent, userKey, ident.Email, sessionKey, userContent, model, id)
 		return
 	}
 
-	tgt, err := s.Mgr.EnsureRunning(r.Context(), agent, userHash)
+	tgt, err := s.Mgr.EnsureRunning(r.Context(), agent, userKey, ident.Email)
 	if err != nil {
 		s.logf("ensure running failed: %v", err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
 	content, err := s.Pico.RunTurn(r.Context(), tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent, nil)
-	s.Mgr.ArmIdle(agent, userHash)
+	s.Mgr.ArmIdle(agent, userKey)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
@@ -177,18 +177,18 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, errBody(msg))
 		return
 	}
-	email := s.Resolver.PrincipalEmail(r.Header.Get(identity.ProfileHeader))
-	if email == "" {
+	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized,
 			errBody("missing or invalid "+identity.ProfileHeader+" header"))
 		return
 	}
-	sessionKey := identity.SessionKey(email, r.URL.Query().Get("session_id"))
+	sessionKey := identity.SessionKey(ident.AccID, r.URL.Query().Get("session_id"))
 	if sessionKey == "" {
 		writeJSON(w, http.StatusBadRequest, errBody(`"session_id" query parameter is required`))
 		return
 	}
-	sessionsDir := s.Cfg.SessionsDir(agent.Key, identity.UserHash(email))
+	sessionsDir := s.Cfg.SessionsDir(agent.Key, identity.SanitizeID(ident.AccID))
 	messages, err := history.Read(sessionsDir, sessionKey)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))

@@ -70,8 +70,8 @@ func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, logf func(
 }
 
 // ContainerName is the deterministic name for one (agent, user) container.
-func (m *Manager) ContainerName(agentKey, userHash string) string {
-	return fmt.Sprintf("%s-%s-%s", m.cfg.ContainerPrefix, agentKey, userHash)
+func (m *Manager) ContainerName(agentKey, userKey string) string {
+	return fmt.Sprintf("%s-%s-%s", m.cfg.ContainerPrefix, agentKey, userKey)
 }
 
 func (m *Manager) wsEndpoint(name string) string {
@@ -93,8 +93,8 @@ func (m *Manager) keyState(name string) *keyState {
 // is health-ready, then returns how to reach it. Concurrent calls for the same
 // container are serialized (single-flight cold start); the idle timer is
 // disarmed on entry so a pending scale-to-zero cannot fire mid-turn.
-func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHash string) (Target, error) {
-	name := m.ContainerName(agent.Key, userHash)
+func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey, ownerEmail string) (Target, error) {
+	name := m.ContainerName(agent.Key, userKey)
 	ks := m.keyState(name)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
@@ -102,9 +102,9 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHas
 	// Disarm any pending idle-stop for this container before we touch it.
 	m.disarmLocked(ks)
 
-	userDir := filepath.Join(m.cfg.ContainerDataRoot, agent.Key, userHash)
+	userDir := filepath.Join(m.cfg.ContainerDataRoot, agent.Key, userKey)
 	templateDir := filepath.Join(m.cfg.ContainerDataRoot, "templates", agent.Template)
-	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model)
+	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, ownerEmail)
 	if err != nil {
 		return Target{}, err
 	}
@@ -117,7 +117,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHas
 	createdNow := false
 	switch {
 	case !st.Exists:
-		if err := m.create(ctx, agent, userHash, name); err != nil {
+		if err := m.create(ctx, agent, userKey, name); err != nil {
 			return Target{}, err
 		}
 		createdNow = true
@@ -142,8 +142,8 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHas
 	return Target{Name: name, WSEndpoint: m.wsEndpoint(name), PicoToken: token}, nil
 }
 
-func (m *Manager) create(ctx context.Context, agent config.Agent, userHash, name string) error {
-	hostDir := filepath.Join(m.cfg.HostDataRoot, agent.Key, userHash)
+func (m *Manager) create(ctx context.Context, agent config.Agent, userKey, name string) error {
+	hostDir := filepath.Join(m.cfg.HostDataRoot, agent.Key, userKey)
 	// picoclaw keeps its config/workspace under $HOME/.picoclaw; mount the
 	// per-user dir there and set HOME so it works for a non-root user too (the
 	// image's own /root is 0700 and unusable by a non-root uid).
@@ -159,7 +159,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, userHash, name
 		Labels: map[string]string{
 			LabelManaged: "true",
 			LabelAgent:   agent.Key,
-			LabelUser:    userHash,
+			LabelUser:    userKey,
 			LabelMode:    string(agent.Mode),
 		},
 		Binds:   []string{hostDir + ":" + mountDest},
@@ -202,11 +202,11 @@ func (m *Manager) waitHealthy(ctx context.Context, name string) error {
 
 // ArmIdle re-arms the scale-to-zero idle timer for a container after a turn
 // completes. No-op for continuous-mode agents.
-func (m *Manager) ArmIdle(agent config.Agent, userHash string) {
+func (m *Manager) ArmIdle(agent config.Agent, userKey string) {
 	if agent.Mode != config.ModeScaleToZero {
 		return
 	}
-	name := m.ContainerName(agent.Key, userHash)
+	name := m.ContainerName(agent.Key, userKey)
 	ks := m.keyState(name)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()

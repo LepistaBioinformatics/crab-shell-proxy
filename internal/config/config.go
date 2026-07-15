@@ -266,8 +266,8 @@ func (c *Config) validate() error {
 // SessionsDir is the path INSIDE this proxy to a user's picoclaw session
 // transcripts (used by /v1/sessions/history). The same host dir is mounted into
 // the picoclaw container at /root/.picoclaw.
-func (c *Config) SessionsDir(agentKey, userHash string) string {
-	return filepath.Join(c.ContainerDataRoot, agentKey, userHash, "workspace", "sessions")
+func (c *Config) SessionsDir(agentKey, userKey string) string {
+	return filepath.Join(c.ContainerDataRoot, agentKey, userKey, "workspace", "sessions")
 }
 
 // AgentByServiceName returns the agent whose serviceName matches the value

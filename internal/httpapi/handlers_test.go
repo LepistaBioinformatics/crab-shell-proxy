@@ -19,7 +19,7 @@ type fakeOrch struct {
 	armed     int
 }
 
-func (f *fakeOrch) EnsureRunning(context.Context, config.Agent, string) (docker.Target, error) {
+func (f *fakeOrch) EnsureRunning(context.Context, config.Agent, string, string) (docker.Target, error) {
 	if f.ensureErr != nil {
 		return docker.Target{}, f.ensureErr
 	}
@@ -74,7 +74,7 @@ func goodHeaders(t *testing.T) map[string]string {
 	return map[string]string{
 		identity.ServiceNameHeader: "picoclaw-alpha",
 		"Authorization":            "Bearer bearer",
-		identity.ProfileHeader:     encodeProfile(t, `{"owners":[{"email":"alice@x","isPrincipal":true}]}`),
+		identity.ProfileHeader:     encodeProfile(t, `{"accId":"acc-alice","owners":[{"email":"alice@x","isPrincipal":true}]}`),
 	}
 }
 

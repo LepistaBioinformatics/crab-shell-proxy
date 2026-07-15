@@ -46,19 +46,22 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		if agent.Mode != config.ModeContinuous {
 			continue
 		}
-		for _, userHash := range m.existingUserDirs(agent.Key) {
-			if _, err := m.EnsureRunning(ctx, agent, userHash); err != nil {
-				m.logf("reconcile: continuous ensure %s/%s failed: %v", agent.Key, userHash, err)
+		for _, userKey := range m.existingUserDirs(agent.Key) {
+			// Owner email is unknown here (no request); the marker was already
+			// written on first provision, and the dir already exists so it isn't
+			// re-seeded, so passing "" is fine.
+			if _, err := m.EnsureRunning(ctx, agent, userKey, ""); err != nil {
+				m.logf("reconcile: continuous ensure %s/%s failed: %v", agent.Key, userKey, err)
 			} else {
-				m.logf("reconcile: continuous %s/%s ensured running", agent.Key, userHash)
+				m.logf("reconcile: continuous %s/%s ensured running", agent.Key, userKey)
 			}
 		}
 	}
 	return nil
 }
 
-// existingUserDirs lists the userHash sub-directories already materialized for
-// an agent (each corresponds to a provisioned per-user container).
+// existingUserDirs lists the per-user (accId) sub-directories already
+// materialized for an agent (each corresponds to a provisioned container).
 func (m *Manager) existingUserDirs(agentKey string) []string {
 	entries, err := os.ReadDir(filepath.Join(m.cfg.ContainerDataRoot, agentKey))
 	if err != nil {
