@@ -1,0 +1,4 @@
+/crab-shell-proxy
+/out/
+*.test
+.DS_Store
