@@ -104,7 +104,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHas
 
 	userDir := filepath.Join(m.cfg.ContainerDataRoot, agent.Key, userHash)
 	templateDir := filepath.Join(m.cfg.ContainerDataRoot, "templates", agent.Template)
-	token, err := provision(userDir, templateDir)
+	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser)
 	if err != nil {
 		return Target{}, err
 	}
@@ -144,17 +144,25 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHas
 
 func (m *Manager) create(ctx context.Context, agent config.Agent, userHash, name string) error {
 	hostDir := filepath.Join(m.cfg.HostDataRoot, agent.Key, userHash)
+	// picoclaw keeps its config/workspace under $HOME/.picoclaw; mount the
+	// per-user dir there and set HOME so it works for a non-root user too (the
+	// image's own /root is 0700 and unusable by a non-root uid).
+	mountDest := m.cfg.PicoclawHome + "/.picoclaw"
 	spec := CreateSpec{
 		Name:  name,
 		Image: m.cfg.PicoclawImage,
-		Env:   []string{"PICOCLAW_GATEWAY_HOST=0.0.0.0"},
+		User:  m.cfg.PicoclawUser,
+		Env: []string{
+			"PICOCLAW_GATEWAY_HOST=0.0.0.0",
+			"HOME=" + m.cfg.PicoclawHome,
+		},
 		Labels: map[string]string{
 			LabelManaged: "true",
 			LabelAgent:   agent.Key,
 			LabelUser:    userHash,
 			LabelMode:    string(agent.Mode),
 		},
-		Binds:   []string{hostDir + ":/root/.picoclaw"},
+		Binds:   []string{hostDir + ":" + mountDest},
 		Network: m.cfg.Network,
 		Init:    true,
 	}

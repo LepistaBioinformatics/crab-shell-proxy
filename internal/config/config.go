@@ -109,9 +109,17 @@ type Config struct {
 	// proxy, used to read history and write per-user config templates.
 	ContainerDataRoot string `yaml:"containerDataRoot"`
 	// Network is the docker network spawned containers join (compose-qualified).
-	Network         string   `yaml:"network"`
-	PicoclawImage   string   `yaml:"picoclawImage"`
-	PicoclawPort    int      `yaml:"picoclawPort"`
+	Network       string `yaml:"network"`
+	PicoclawImage string `yaml:"picoclawImage"`
+	PicoclawPort  int    `yaml:"picoclawPort"`
+	// PicoclawUser is the "uid:gid" the spawned picoclaw containers run as.
+	// Empty => root (the image default). Non-root requires relocating HOME
+	// (PicoclawHome) because the image's /root is 0700.
+	PicoclawUser string `yaml:"picoclawUser"`
+	// PicoclawHome is the in-container HOME for spawned picoclaw; the per-user
+	// data dir is mounted at <PicoclawHome>/.picoclaw and the config's workspace
+	// path is aligned to it. Must be a dir the PicoclawUser can write.
+	PicoclawHome string `yaml:"picoclawHome"`
 	StartupDeadline Duration `yaml:"startupDeadline"`
 	TurnTimeout     Duration `yaml:"turnTimeout"`
 	// ContainerPrefix prefixes every managed container name (default "picoclaw").
@@ -164,6 +172,12 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("CRAB_LISTEN"); v != "" {
 		c.Listen = v
 	}
+	if v := os.Getenv("CRAB_PICOCLAW_USER"); v != "" {
+		c.PicoclawUser = v
+	}
+	if v := os.Getenv("CRAB_PICOCLAW_HOME"); v != "" {
+		c.PicoclawHome = v
+	}
 }
 
 func (c *Config) applyDefaults() {
@@ -187,6 +201,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ContainerPrefix == "" {
 		c.ContainerPrefix = "picoclaw"
+	}
+	if c.PicoclawHome == "" {
+		// Default to a non-root-writable HOME so the default posture (non-root
+		// containers) works without the image's 0700 /root getting in the way.
+		c.PicoclawHome = "/data"
 	}
 }
 

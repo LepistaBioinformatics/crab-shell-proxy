@@ -1,11 +1,13 @@
 package docker
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -19,11 +21,22 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // provision ensures the per-user data dir (userDir, a path INSIDE this proxy)
 // is seeded from templateDir and returns the pico token to connect with. If the
 // dir already has config.json it is treated as a returning user and left as-is.
-func provision(userDir, templateDir string) (picoToken string, err error) {
+//
+// home is the in-container HOME the spawned picoclaw will use; the config's
+// workspace path is aligned to <home>/.picoclaw/workspace so it matches the
+// mount point. user ("uid:gid", may be empty) is the non-root owner the data
+// dir is chowned to so a non-root container can write it.
+func provision(userDir, templateDir, home, user string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	if _, statErr := os.Stat(configPath); statErr != nil {
 		if err := seedFromTemplate(userDir, templateDir); err != nil {
 			return "", err
+		}
+		if err := alignWorkspace(configPath, home); err != nil {
+			return "", fmt.Errorf("align workspace path: %w", err)
+		}
+		if err := chownTree(userDir, user); err != nil {
+			return "", fmt.Errorf("chown data dir to %q: %w", user, err)
 		}
 	}
 	tok, err := readPicoToken(filepath.Join(userDir, ".security.yml"))
@@ -34,6 +47,60 @@ func provision(userDir, templateDir string) (picoToken string, err error) {
 		return "", fmt.Errorf("no pico channel token found in %s/.security.yml", userDir)
 	}
 	return tok, nil
+}
+
+// alignWorkspace rewrites agents.defaults.workspace in config.json to
+// <home>/.picoclaw/workspace, so the path picoclaw writes matches where the
+// per-user dir is actually mounted (regardless of the HOME the template was
+// generated under). No-op if the structure is absent.
+func alignWorkspace(configPath, home string) error {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return err
+	}
+	agents, ok := cfg["agents"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	defaults, ok := agents["defaults"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	defaults["workspace"] = home + "/.picoclaw/workspace"
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, out, 0o600)
+}
+
+// chownTree recursively chowns dir to the given "uid:gid". No-op when user is
+// empty (containers run as root). Requires numeric uid:gid.
+func chownTree(dir, user string) error {
+	if user == "" {
+		return nil
+	}
+	parts := strings.SplitN(user, ":", 2)
+	uid, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return fmt.Errorf("picoclawUser uid must be numeric, got %q", user)
+	}
+	gid := uid
+	if len(parts) == 2 {
+		if gid, err = strconv.Atoi(parts[1]); err != nil {
+			return fmt.Errorf("picoclawUser gid must be numeric, got %q", user)
+		}
+	}
+	return filepath.Walk(dir, func(path string, _ os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		return os.Chown(path, uid, gid)
+	})
 }
 
 func seedFromTemplate(userDir, templateDir string) error {

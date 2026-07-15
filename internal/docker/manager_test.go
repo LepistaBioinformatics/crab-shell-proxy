@@ -97,6 +97,7 @@ func testManager(t *testing.T, mode config.Mode, dkr Docker) (*Manager, config.A
 		HostDataRoot: "/host/data", ContainerDataRoot: root, Network: "zombie_net",
 		PicoclawImage: "img", PicoclawPort: 18790, StartupDeadline: config.Duration(time.Second),
 		TurnTimeout: config.Duration(time.Second), ContainerPrefix: "picoclaw",
+		PicoclawUser: "1000:1000", PicoclawHome: "/data",
 		Agents: map[string]config.Agent{"alpha": agent},
 	}
 	healthy := func(context.Context, string, int) error { return nil }
@@ -123,12 +124,26 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	if f.createN != 1 || f.startN != 1 {
 		t.Errorf("create=%d start=%d, want 1/1", f.createN, f.startN)
 	}
-	// Labels + bind use the HOST path, not the container path.
+	// Labels + bind use the HOST path as source and <PicoclawHome>/.picoclaw as
+	// the mount destination.
 	if f.lastSpec.Labels[LabelAgent] != "alpha" || f.lastSpec.Labels[LabelManaged] != "true" {
 		t.Errorf("labels = %v", f.lastSpec.Labels)
 	}
-	if want := "/host/data/alpha/hash1:/root/.picoclaw"; f.lastSpec.Binds[0] != want {
+	if want := "/host/data/alpha/hash1:/data/.picoclaw"; f.lastSpec.Binds[0] != want {
 		t.Errorf("bind = %q, want %q", f.lastSpec.Binds[0], want)
+	}
+	// Non-root posture: User set and HOME relocated.
+	if f.lastSpec.User != "1000:1000" {
+		t.Errorf("user = %q, want 1000:1000", f.lastSpec.User)
+	}
+	hasHome := false
+	for _, e := range f.lastSpec.Env {
+		if e == "HOME=/data" {
+			hasHome = true
+		}
+	}
+	if !hasHome {
+		t.Errorf("env missing HOME=/data: %v", f.lastSpec.Env)
 	}
 	// Per-user data dir was seeded from template (config-only).
 	if _, err := os.Stat(filepath.Join(m.cfg.ContainerDataRoot, "alpha", "hash1", "config.json")); err != nil {

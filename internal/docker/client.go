@@ -35,6 +35,7 @@ type ContainerSummary struct {
 type CreateSpec struct {
 	Name    string
 	Image   string
+	User    string // optional "uid:gid"; empty => image default (root)
 	Cmd     []string // optional; nil => use the image's default command
 	Env     []string
 	Labels  map[string]string
@@ -135,6 +136,9 @@ func (c *HTTPClient) Create(ctx context.Context, spec CreateSpec) (string, error
 	}
 	if len(spec.Cmd) > 0 {
 		body["Cmd"] = spec.Cmd
+	}
+	if spec.User != "" {
+		body["User"] = spec.User
 	}
 	resp, err := c.do(ctx, http.MethodPost,
 		"/containers/create?name="+url.QueryEscape(spec.Name), body)

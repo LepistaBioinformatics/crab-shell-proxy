@@ -25,6 +25,15 @@ network: "zombie_net"
 picoclawImage: "docker.io/sipeed/picoclaw:latest"
 picoclawPort: 18790
 
+# Spawned picoclaw containers run as this non-root uid:gid (NOT root). The proxy
+# relocates the container HOME to picoclawHome, mounts the per-user data dir at
+# <picoclawHome>/.picoclaw, aligns the config workspace path, and chowns the
+# per-user dir to this uid so the non-root process can write it. Set
+# picoclawUser to "" to run as root instead. Override via CRAB_PICOCLAW_USER /
+# CRAB_PICOCLAW_HOME.
+picoclawUser: "1000:1000"
+picoclawHome: "/data"
+
 # Kept comfortably under mycelium's [api] gatewayTimeout (60s) so a cold start
 # never races the gateway's own 504.
 startupDeadline: 35s
