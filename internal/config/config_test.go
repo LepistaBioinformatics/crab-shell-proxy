@@ -130,6 +130,58 @@ func TestEnvOverride(t *testing.T) {
 	}
 }
 
+func TestModelAPIKeyFromEnv(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("DEEPSEEK_API_KEY", "sk-deepseek-123")
+	body := `
+hostDataRoot: "/d"
+network: "n"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+    model:
+      provider: "deepseek"
+      name: "deepseek-chat"
+      apiKeyEnv: "DEEPSEEK_API_KEY"
+`
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	m := cfg.Agents["alpha"].Model
+	if m == nil {
+		t.Fatal("model not parsed")
+	}
+	if m.Provider != "deepseek" || m.Name != "deepseek-chat" {
+		t.Errorf("provider/name = %q/%q", m.Provider, m.Name)
+	}
+	if m.APIKey != "sk-deepseek-123" {
+		t.Errorf("APIKey not resolved from env: %q", m.APIKey)
+	}
+}
+
+func TestModelRequiresProviderAndName(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	body := `
+hostDataRoot: "/d"
+network: "n"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+    model:
+      apiKeyEnv: "DEEPSEEK_API_KEY"
+`
+	if _, err := Load(writeConfig(t, body)); err == nil {
+		t.Error("model without provider/name must error")
+	}
+}
+
 func TestSessionsDir(t *testing.T) {
 	c := &Config{ContainerDataRoot: "/data/agents"}
 	want := "/data/agents/alpha/hash/workspace/sessions"

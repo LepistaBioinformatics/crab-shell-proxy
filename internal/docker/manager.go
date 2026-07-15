@@ -104,7 +104,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userHas
 
 	userDir := filepath.Join(m.cfg.ContainerDataRoot, agent.Key, userHash)
 	templateDir := filepath.Join(m.cfg.ContainerDataRoot, "templates", agent.Template)
-	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser)
+	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model)
 	if err != nil {
 		return Target{}, err
 	}

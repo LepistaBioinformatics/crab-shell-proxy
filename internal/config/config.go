@@ -77,6 +77,17 @@ func (s secret) resolve() (string, error) {
 	return s.Value, nil
 }
 
+// ModelConfig optionally pins the picoclaw LLM provider/model for an agent and
+// sources the API key from the environment, so the key lives in env (not on
+// disk / not in this file). When set, the proxy writes it into each user's
+// picoclaw config/.security.yml at provisioning time.
+type ModelConfig struct {
+	Provider  string `yaml:"provider"`
+	Name      string `yaml:"name"`      // must match a picoclaw model_list model_name
+	APIKeyEnv string `yaml:"apiKeyEnv"` // env var holding the API key
+	APIKey    string `yaml:"-"`         // resolved from APIKeyEnv at load
+}
+
 // Agent is one declared picoclaw agent (e.g. alpha, beta).
 type Agent struct {
 	// Key is the catalog key (map key), e.g. "alpha".
@@ -94,6 +105,9 @@ type Agent struct {
 	Mode Mode `yaml:"mode"`
 	// IdleTimeout is the scale-to-zero inactivity window (ignored when continuous).
 	IdleTimeout Duration `yaml:"idleTimeout"`
+	// Model optionally pins the picoclaw provider/model and injects the API key
+	// from the environment into each user's config at provisioning time.
+	Model *ModelConfig `yaml:"model"`
 
 	// ResolvedToken is filled by Load from Token.
 	ResolvedToken string `yaml:"-"`
@@ -150,6 +164,11 @@ func Load(path string) (*Config, error) {
 		}
 		agent.Key = key
 		agent.ResolvedToken = tok
+		if agent.Model != nil && agent.Model.APIKeyEnv != "" {
+			// Empty is allowed (e.g. structural tests) — picoclaw will surface an
+			// auth error on the first model call rather than failing to boot.
+			agent.Model.APIKey = os.Getenv(agent.Model.APIKeyEnv)
+		}
 		cfg.Agents[key] = agent
 	}
 	return &cfg, nil
@@ -234,6 +253,11 @@ func (c *Config) validate() error {
 		}
 		if agent.Mode == ModeScaleToZero && agent.IdleTimeout <= 0 {
 			return fmt.Errorf("agent %q: idleTimeout must be > 0 for %s", key, ModeScaleToZero)
+		}
+		if agent.Model != nil {
+			if agent.Model.Provider == "" || agent.Model.Name == "" {
+				return fmt.Errorf("agent %q: model requires both provider and name", key)
+			}
 		}
 	}
 	return nil

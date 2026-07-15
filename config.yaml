@@ -47,9 +47,23 @@ agents:
     template: "alpha" # <containerDataRoot>/templates/alpha/{config.json,.security.yml}
     mode: "scale-to-zero" # or "continuous"
     idleTimeout: 15m
+    # Pin the picoclaw provider/model and take the API key from the environment.
+    # The proxy enables the pico channel, sets provider/model, and writes the key
+    # (read from apiKeyEnv) into each user's .security.yml at provisioning time,
+    # so the key lives only in the env — never in this file or a template.
+    # `name` must match a picoclaw model_list model_name (e.g. deepseek-chat,
+    # openrouter-auto, gpt-5.4, glm-4.7...).
+    model:
+      provider: "deepseek"
+      name: "deepseek-chat"
+      apiKeyEnv: "DEEPSEEK_API_KEY"
   beta:
     serviceName: "picoclaw-beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }
     template: "beta"
     mode: "scale-to-zero"
     idleTimeout: 15m
+    model:
+      provider: "deepseek"
+      name: "deepseek-chat"
+      apiKeyEnv: "DEEPSEEK_API_KEY"
