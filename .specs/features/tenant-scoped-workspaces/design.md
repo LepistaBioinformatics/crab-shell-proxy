@@ -51,11 +51,15 @@ single `accId`).
 
 ## 2. Container identity & labels (TSW-06)
 
-- **Name:** `picoclaw-<role>-<subsAccId>-<userAccId>` (via `ContainerPrefix`).
-  `subsAccId` is a globally-unique mycelium account UUID, so `(role, subsAccId,
-  userAccId)` is unique without needing `tenantId` in the name. ~90 chars, within
-  Docker limits and debuggable. (Fallback if names prove unwieldy: a short
-  sha256 of the full tuple — noted, not chosen.)
+- **Name:** `picoclaw-<role>-<hash>` where `hash = sha256(tenant::subs::user)[:16]`
+  (via `ContainerPrefix`). **Corrected (2026-07-16):** the earlier scheme
+  `picoclaw-<role>-<subsAccId>-<userAccId>` produced an ~88-char name; the
+  health-wait dials the container by name, and a DNS label is capped at **63
+  chars**, so the two-UUID name was unresolvable (`dial: no such host`) and every
+  real chat 502'd. Hashing the isolation tuple keeps the name short + resolvable
+  and still unique; `role` stays readable for `docker ps`. The tenant /
+  subscription / user are recovered from the container labels and the
+  `.crab-owner.json` marker, never parsed from the name.
 - **Labels** (extend the current `crab-shell.*` set): `LabelAgent` (=role,
   unchanged), plus new `LabelTenant`, `LabelSubscription`, `LabelUser`
   (=userAccId), `LabelMode`, `LabelManaged`. These let `Reconcile` rebuild the

@@ -2,6 +2,8 @@ package docker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -85,9 +87,14 @@ func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, logf func(
 // <prefix>-<role>-<subsAccId>-<userAccId>. subsAccId is a globally-unique
 // mycelium account UUID, so the triple is unique without the tenant id.
 func (m *Manager) ContainerName(key WorkspaceKey) string {
-	return fmt.Sprintf("%s-%s-%s-%s", m.cfg.ContainerPrefix,
-		identity.SanitizeID(key.Role), identity.SanitizeID(key.SubsAccID),
-		identity.SanitizeID(key.UserAccID))
+	// <prefix>-<role>-<hash>. The full tuple has two UUIDs (~88 chars), which
+	// exceeds the 63-char DNS label limit and makes the container unresolvable
+	// by its own name on the docker network (health-wait dials it by name). Hash
+	// the isolation tuple instead; tenant/subscription/user are recovered from
+	// the container labels and the .crab-owner.json marker, not the name.
+	sum := sha256.Sum256([]byte(key.TenantID + "::" + key.SubsAccID + "::" + key.UserAccID))
+	return fmt.Sprintf("%s-%s-%s", m.cfg.ContainerPrefix,
+		identity.SanitizeID(key.Role), hex.EncodeToString(sum[:])[:16])
 }
 
 func (m *Manager) wsEndpoint(name string) string {

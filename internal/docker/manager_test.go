@@ -122,10 +122,11 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
-	if tgt.Name != "picoclaw-alpha-s1-hash1" {
-		t.Errorf("name = %q", tgt.Name)
+	name := m.ContainerName(wk("hash1"))
+	if tgt.Name != name {
+		t.Errorf("name = %q, want %q", tgt.Name, name)
 	}
-	if tgt.WSEndpoint != "ws://picoclaw-alpha-s1-hash1:18790/pico/ws" {
+	if tgt.WSEndpoint != "ws://"+name+":18790/pico/ws" {
 		t.Errorf("endpoint = %q", tgt.WSEndpoint)
 	}
 	if tgt.PicoToken != "secret-tok" {
@@ -305,7 +306,7 @@ func TestReconcileEnsuresContinuousWorkspaces(t *testing.T) {
 	if f.createN != 1 || f.startN != 1 {
 		t.Errorf("create=%d start=%d, want 1/1 (continuous workspace ensured)", f.createN, f.startN)
 	}
-	if !f.running["picoclaw-alpha-s1-u1"] {
+	if !f.running[m.ContainerName(wk("u1"))] {
 		t.Error("continuous workspace container not running after reconcile")
 	}
 }

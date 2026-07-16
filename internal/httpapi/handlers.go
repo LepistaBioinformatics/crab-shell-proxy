@@ -56,13 +56,61 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/sessions/history", s.handleSessionsHistory)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	return mux
+	return s.withLogging(mux)
 }
 
 func (s *Server) logf(format string, args ...any) {
 	if s.Logf != nil {
 		s.Logf(format, args...)
 	}
+}
+
+// statusRecorder captures the response status for access logging while
+// preserving http.Flusher (the SSE streaming path type-asserts the writer to
+// flush each chunk — a wrapper that drops Flusher would break streaming).
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if !r.wrote {
+		r.status = code
+		r.wrote = true
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wrote {
+		r.status = http.StatusOK
+		r.wrote = true
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// withLogging emits one access-log line per request (method, path, status,
+// duration, mycelium service-name). /healthz is skipped — the compose/gateway
+// health pollers hit it every few seconds and would drown the log.
+func (s *Server) withLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.logf("%s %s -> %d (%s) svc=%q", r.Method, r.URL.Path, rec.status,
+			time.Since(start).Round(time.Millisecond), r.Header.Get(identity.ServiceNameHeader))
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, obj any) {
@@ -164,12 +212,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		WithRoles([]string{agent.Key}).
 		OnAccount(subsAccID).
 		GetRelatedAccountOrError(); err != nil {
+		s.logf("chat: authz denied svc=%s tenant=%s subs=%s user=%s: %v",
+			agent.Key, tenantID, subsAccID, ident.AccID, err)
 		writeJSON(w, http.StatusForbidden,
 			errBody("not licensed to use this subscription for this agent"))
 		return
 	}
 	// Chat never creates the subscription root — only POST /v1/accounts does.
 	if !s.Mgr.SubscriptionScaffolded(tenantID.String(), subsAccID.String()) {
+		s.logf("chat: subscription not scaffolded tenant=%s subs=%s", tenantID, subsAccID)
 		writeJSON(w, http.StatusConflict,
 			errBody("subscription workspace has not been scaffolded yet"))
 		return
@@ -181,6 +232,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Role:      agent.Key,
 		UserAccID: ident.AccID,
 	}
+	s.logf("chat: authorized svc=%s tenant=%s subs=%s user=%s stream=%t",
+		agent.Key, tenantID, subsAccID, ident.AccID, req.Stream)
 	userContent := lastUserContent(req.Messages)
 	model := req.Model
 	if model == "" {
@@ -202,6 +255,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	content, err := s.Pico.RunTurn(r.Context(), tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent, nil)
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
+		s.logf("chat: turn failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
