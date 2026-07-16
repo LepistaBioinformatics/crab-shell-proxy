@@ -111,8 +111,12 @@ unsafe if unlicensed callers can.
    agent)` THEN each SHALL get a distinct container + dir keyed by their own
    `profile.accId`; neither can read the other's history or workspace.
 6. WHEN the subscription scaffold for `(tenant, subs_acc_id)` does not exist THEN
-   the system SHALL respond `409`/`404` (workspaces are not created on demand by
-   chat — only the `/v1/accounts` webhook creates the subscription root).
+   the system SHALL create it on demand and proceed — the authorization chain
+   above already proved the caller is licensed for this tenant+subscription+agent.
+   **Reversed 2026-07-16** (was `409`): the `/v1/accounts` webhook is now an
+   optional pre-warm, not a precondition. A subscription that predates the
+   webhook (its `.created` event `skipped`) is provisioned on first authorized
+   chat.
 
 **Independent Test**: two profiles licensed (write, verified, role=`alpha`) into
 `subs-X` under `tenant-T` chat with `{tenant_id:T, subs_acc_id:X}` → each hits
@@ -183,7 +187,7 @@ isolated workspace under the new layout.
 | TSW-05 | Chat: require tenant_id + subs_acc_id; SDK filtering chain (write+tenant+role+account) | Design | Pending |
 | TSW-06 | Chat: route to per-user isolated workspace; lazy leaf creation | Design | Pending |
 | TSW-07 | Chat: account-switching guard (accId==subs ⇒ 403) | Design | Pending |
-| TSW-08 | Chat: not-scaffolded ⇒ 409/404 (no on-demand subscription create) | Design | Pending |
+| TSW-08 | Chat: create subscription root on demand when authorized (REVERSED 2026-07-16 from 409/no-on-demand) | Design | Pending |
 | TSW-09 | Discovery GET from licensed_resources | Design | Pending |
 | TSW-10 | Session key 2-part sha256(accId::session_id); supersedes SW-09 | Design | Pending |
 | TSW-11 | History path moved to new layout (filtering deferred) | Design | Pending |
@@ -203,6 +207,7 @@ isolated workspace under the new layout.
 - [ ] A second member chatting the same subscription gets a separate dir/history;
       neither can read the other's.
 - [ ] Unlicensed / read-only / wrong-tenant / `accId==subs` callers get `403`.
-- [ ] Chatting a never-scaffolded subscription gets `409`/`404`.
+- [ ] Chatting an un-scaffolded subscription the caller is licensed for creates
+      it on demand and succeeds (webhook pre-warm optional; reversed from 409).
 - [ ] The discovery GET lists a caller's subscriptions from the profile alone.
 - [ ] `docker build --network=host .` passes `go vet` + `go test ./...`.

@@ -215,13 +215,18 @@ func TestChatOKJSON(t *testing.T) {
 	}
 }
 
-func TestChatUnscaffolded409(t *testing.T) {
-	// Authorized, but the subscription root was never scaffolded.
-	s := testServer(newFakeOrch(), &fakeTurner{content: "x"})
+func TestChatScaffoldsOnDemand(t *testing.T) {
+	// Authorized chat against a not-yet-scaffolded subscription: the root is
+	// created on demand (no 409), then the turn runs.
+	orch := newFakeOrch()
+	s := testServer(orch, &fakeTurner{content: "hi"})
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, chatReq(t, goodBody, goodHeaders(t)))
-	if w.Code != http.StatusConflict {
-		t.Errorf("status = %d, want 409", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if !orch.SubscriptionScaffolded(tenantT, subsX) {
+		t.Error("subscription was not scaffolded on demand")
 	}
 }
 

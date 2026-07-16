@@ -139,7 +139,7 @@ _, err := ident.Profile.
     GetRelatedAccountOrError()
 if err != nil: 403                                    # unlicensed / wrong tenant / read-only / no role (TSW-05.2)
 
-if !exists(SubscriptionRoot(tenantID, subsAccID)): 409  # not scaffolded (TSW-08)
+ScaffoldSubscription(tenantID, subsAccID)  # create the root on demand, idempotent (TSW-08, reversed 2026-07-16 from 409)
 
 userKey  := ident.Profile.AccID.String()
 route to UserWorkspace(tenantID, subsAccID, agent.Key, userKey)  # leaves created lazily
@@ -153,10 +153,14 @@ sessionK := SessionKey(userKey, body.session_id)      # 2-part (TSW-10)
   richer key — pass a small `WorkspaceKey{ TenantID, SubsAccID, Role, UserAccID }`
   (or the 4 strings) so the manager can build both the dir and the container
   name/labels. Streaming path (`sse.go`) threads the same key.
-- **`409` vs on-demand:** unlike today, chat NEVER creates the subscription root;
-  only `/v1/accounts` does. The manager gets an "ensure running, do not create the
-  subscription root" contract — it may create the lazy `<role>/users/<u>` leaf and
-  the container, but errors `409`-style if `SubscriptionRoot` is absent.
+- **On-demand creation (reversed 2026-07-16, was `409`):** chat now creates the
+  subscription root on demand via `ScaffoldSubscription` once the authorization
+  chain passes — a subscription that predates the webhook (or was never POSTed to
+  `/v1/accounts`) is provisioned on first authorized chat. Safe because the same
+  filter chain that authorizes the turn gates the creation; `/v1/accounts` is now
+  an optional pre-warm. (`EnsureRunning` still creates the lazy `<role>/users/<u>`
+  leaf + container; the manager's internal "root must exist" stat is satisfied by
+  the preceding `ScaffoldSubscription` call.)
 
 The old personal on-demand path (`SanitizeID(ident.AccID)` keyed on the caller's
 own account) is **removed** (TSW-13) — there is no fallback.

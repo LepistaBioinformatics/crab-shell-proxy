@@ -74,7 +74,14 @@ webhook trigger in mycelium (only 6 account-lifecycle triggers). So the webhook
 cannot know `<role_slug>` — the scaffold is the most it can create. Idempotent
 (retries re-fire `.created`): a repeat is a no-op `200` (`mkdir -p` semantics).
 
----
+**Reversed 2026-07-16 — chat also creates the scaffold on demand:** the webhook
+only fires for subscriptions created *after* it is registered (mycelium
+`skip`s the `.created` event otherwise), so pre-existing subscriptions were never
+scaffolded and 409'd forever. Since the chat authorization chain already proves
+the caller is licensed for the tenant+subscription+agent, `/v1/chat/completions`
+now creates the subscription root on demand (idempotent `ScaffoldSubscription`)
+instead of returning 409. The webhook becomes an **optional pre-warm**, no longer
+the sole creator. (Supersedes the old TSW-08 "no on-demand shared create".)
 
 ## CTX-TSW-04: `/v1/accounts` auth = configured webhook shared secret (not agent-token)
 

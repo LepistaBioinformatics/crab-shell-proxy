@@ -218,11 +218,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			errBody("not licensed to use this subscription for this agent"))
 		return
 	}
-	// Chat never creates the subscription root — only POST /v1/accounts does.
-	if !s.Mgr.SubscriptionScaffolded(tenantID.String(), subsAccID.String()) {
-		s.logf("chat: subscription not scaffolded tenant=%s subs=%s", tenantID, subsAccID)
-		writeJSON(w, http.StatusConflict,
-			errBody("subscription workspace has not been scaffolded yet"))
+	// Ensure the subscription root exists, creating it on demand. The filter
+	// chain above already proved the caller is licensed for this
+	// tenant+subscription+agent, so provisioning here is safe — a subscription
+	// that predates the webhook (or was never POSTed to /v1/accounts) still
+	// works. The /v1/accounts webhook is now an optional pre-warm, not a
+	// precondition. Idempotent (no-op when the root already exists).
+	if _, err := s.Mgr.ScaffoldSubscription(tenantID.String(), subsAccID.String()); err != nil {
+		s.logf("chat: scaffold subscription failed tenant=%s subs=%s: %v", tenantID, subsAccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
 
