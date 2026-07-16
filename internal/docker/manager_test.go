@@ -17,6 +17,7 @@ type fakeDocker struct {
 	mu         sync.Mutex
 	createN    int32
 	startN     int32
+	stopN      int32
 	running    map[string]bool
 	exists     map[string]bool
 	lastSpec   CreateSpec
@@ -57,6 +58,7 @@ func (f *fakeDocker) Start(_ context.Context, name string) error {
 }
 
 func (f *fakeDocker) Stop(_ context.Context, name string, _ time.Duration) error {
+	atomic.AddInt32(&f.stopN, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.running[name] = false
@@ -163,6 +165,67 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	leaf := config.UserWorkspace(m.cfg.ContainerDataRoot, "t1", "s1", "alpha", "hash1")
 	if _, err := os.Stat(filepath.Join(leaf, "config.json")); err != nil {
 		t.Errorf("config.json not provisioned: %v", err)
+	}
+}
+
+func TestCreateAddsReadOnlySecretsBind(t *testing.T) {
+	f := newFakeDocker()
+	m, agent := testManager(t, config.ModeScaleToZero, f)
+	if _, err := m.EnsureRunning(context.Background(), agent, wk("hash1"), "test@x"); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	// The per-(user, agent) store is bind-mounted READ-ONLY under the workspace.
+	want := "/host/data/user-secrets/hash1/alpha:/data/.picoclaw/workspace/.secrets:ro"
+	if len(f.lastSpec.Binds) < 2 || f.lastSpec.Binds[1] != want {
+		t.Errorf("secrets bind = %v, want [_, %q]", f.lastSpec.Binds, want)
+	}
+	// The store dir (container-side view) is ensured before create so the mount
+	// source exists.
+	if _, err := os.Stat(config.StoreDir(m.cfg.ContainerDataRoot, "hash1", "alpha")); err != nil {
+		t.Errorf("store dir not ensured before create: %v", err)
+	}
+}
+
+func TestRestartWorkspaceRestartsAndRearms(t *testing.T) {
+	f := newFakeDocker()
+	m, agent := testManager(t, config.ModeScaleToZero, f)
+	if _, err := m.EnsureRunning(context.Background(), agent, wk("h"), "test@x"); err != nil {
+		t.Fatal(err)
+	}
+	name := m.ContainerName(wk("h"))
+	startsBefore, stopsBefore := f.startN, f.stopN
+
+	if err := m.RestartWorkspace(wk("h")); err != nil {
+		t.Fatalf("RestartWorkspace: %v", err)
+	}
+	if f.stopN != stopsBefore+1 || f.startN != startsBefore+1 {
+		t.Errorf("restart stop/start = %d/%d, want +1/+1", f.stopN-stopsBefore, f.startN-startsBefore)
+	}
+	if !f.running[name] {
+		t.Error("container not running after restart")
+	}
+	// Scale-to-zero: the idle timer is re-armed so it can scale back down.
+	m.mu.Lock()
+	ks := m.keys[name]
+	m.mu.Unlock()
+	ks.mu.Lock()
+	armed := ks.timer != nil
+	ks.mu.Unlock()
+	if !armed {
+		t.Error("idle timer not re-armed after restart (scale-to-zero)")
+	}
+}
+
+func TestRestartWorkspaceNoopWhenNotRunning(t *testing.T) {
+	f := newFakeDocker()
+	m, _ := testManager(t, config.ModeScaleToZero, f)
+	// A container that was never created: restart is a pure no-op (the next chat
+	// cold-starts with the new secret already in the store).
+	if err := m.RestartWorkspace(wk("ghost")); err != nil {
+		t.Fatalf("no-op restart should not error: %v", err)
+	}
+	if f.startN != 0 || f.stopN != 0 {
+		t.Errorf("start/stop = %d/%d, want 0/0 (no container to restart)", f.startN, f.stopN)
 	}
 }
 

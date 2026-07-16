@@ -311,6 +311,22 @@ func SessionsDir(root, tenantID, subsAccID, role, userAccID string) string {
 		"workspace", "sessions")
 }
 
+// StoreDir is the per-(user, agent) secret store, kept OUTSIDE the
+// tenant/subscription tree so the same secret reaches every workspace of that
+// pair (CTX-AC-03): <root>/user-secrets/<u>/<role>. Keyed only by the user
+// account id and the role (agent key), never the subscription.
+func StoreDir(root, userAccID, role string) string {
+	return filepath.Join(root, "user-secrets",
+		identity.SanitizeID(userAccID), identity.SanitizeID(role))
+}
+
+// WorkspaceSeed is the allowlist of agent template workspace files copied into a
+// fresh user workspace on first provision (recursive for directories). CRITICAL:
+// sessions/ (conversation history), logs/, and .picoclaw.pid (runtime state) are
+// NEVER copied — the isolation invariant that keeps the shared template's
+// sessions out of every new user's container.
+var WorkspaceSeed = []string{"AGENT.md", "SOUL.md", "USER.md", "memory/", "skills/"}
+
 // AgentByServiceName returns the agent whose serviceName matches the value
 // mycelium injected as x-mycelium-service-name, and whether it was found.
 func (c *Config) AgentByServiceName(serviceName string) (Agent, bool) {

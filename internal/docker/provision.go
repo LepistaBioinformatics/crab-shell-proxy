@@ -31,7 +31,7 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // workspace path is aligned to <home>/.picoclaw/workspace so it matches the
 // mount point. user ("uid:gid", may be empty) is the non-root owner the data
 // dir is chowned to so a non-root container can write it.
-func provision(userDir, templateDir, home, user string, model *config.ModelConfig, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
+func provision(userDir, templateDir, storeDir, home, user string, model *config.ModelConfig, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -49,6 +49,12 @@ func provision(userDir, templateDir, home, user string, model *config.ModelConfi
 				return "", fmt.Errorf("apply model config: %w", err)
 			}
 		}
+		// Seed the allowlisted agent template workspace files (persona/skills/
+		// memory) so the agent starts customized. Only on first provision, so a
+		// returning user's evolved files are never clobbered (AC-01).
+		if err := seedWorkspace(userDir, templateDir); err != nil {
+			return "", fmt.Errorf("seed workspace files: %w", err)
+		}
 		// Traceability: the dir is named by accId (not email), so drop a small
 		// marker recording the full workspace tuple + owner email, for finding
 		// the user later.
@@ -58,6 +64,13 @@ func provision(userDir, templateDir, home, user string, model *config.ModelConfi
 		if err := chownTree(userDir, user); err != nil {
 			return "", fmt.Errorf("chown data dir to %q: %w", user, err)
 		}
+	}
+	// Merge any per-(user, agent) native secrets into this workspace's
+	// .security.yml on EVERY ensure (not just first provision), so a brand-new
+	// workspace of an existing pair — e.g. a second subscription — picks up the
+	// already-stored secrets (AC-04/AC-05, CTX-AC-03). No-op when none are set.
+	if err := applyNativeSecrets(secPath, storeDir, user); err != nil {
+		return "", fmt.Errorf("apply native secrets: %w", err)
 	}
 	tok, err := readPicoToken(secPath)
 	if err != nil {
@@ -217,6 +230,59 @@ func seedFromTemplate(userDir, templateDir string) error {
 		}
 	}
 	return nil
+}
+
+// seedWorkspace copies the config.WorkspaceSeed allowlist from the template's
+// workspace/ into the user's workspace/ (files verbatim, directories
+// recursively). Absent entries are skipped without error (partial templates are
+// valid, AC-01.3). sessions/, logs/ and .picoclaw.pid are never in the allowlist
+// so they can never leak.
+func seedWorkspace(userDir, templateDir string) error {
+	srcRoot := filepath.Join(templateDir, "workspace")
+	dstRoot := filepath.Join(userDir, "workspace")
+	for _, entry := range config.WorkspaceSeed {
+		src := filepath.Join(srcRoot, entry)
+		info, err := os.Stat(src)
+		if err != nil {
+			continue // absent entry: skip (partial templates OK)
+		}
+		dst := filepath.Join(dstRoot, entry)
+		if info.IsDir() {
+			if err := copyTree(src, dst); err != nil {
+				return fmt.Errorf("seed workspace %s: %w", entry, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return err
+		}
+		if err := copyFile(src, dst); err != nil {
+			return fmt.Errorf("seed workspace %s: %w", entry, err)
+		}
+	}
+	return nil
+}
+
+// copyTree recursively copies the directory src to dst, creating directories as
+// needed.
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		return copyFile(path, target)
+	})
 }
 
 func copyFile(src, dst string) error {

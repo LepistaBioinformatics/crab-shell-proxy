@@ -228,6 +228,40 @@ func TestWebhookSecretFromEnv(t *testing.T) {
 	}
 }
 
+func TestStoreDir(t *testing.T) {
+	if got, want := StoreDir("/data", "u1", "alpha"), "/data/user-secrets/u1/alpha"; got != want {
+		t.Errorf("StoreDir = %q, want %q", got, want)
+	}
+	// Host and container roots build the same relative tree under user-secrets.
+	if got, want := StoreDir("/host/data", "u1", "alpha"),
+		"/host/data/user-secrets/u1/alpha"; got != want {
+		t.Errorf("StoreDir(host) = %q, want %q", got, want)
+	}
+	// Both dynamic segments are sanitized so neither can escape the store tree.
+	if got, want := StoreDir("/data", "u/../evil", "al/pha"),
+		"/data/user-secrets/u-..-evil/al-pha"; got != want {
+		t.Errorf("StoreDir sanitize = %q, want %q", got, want)
+	}
+}
+
+func TestWorkspaceSeedAllowlist(t *testing.T) {
+	want := []string{"AGENT.md", "SOUL.md", "USER.md", "memory/", "skills/"}
+	if len(WorkspaceSeed) != len(want) {
+		t.Fatalf("WorkspaceSeed = %v, want %v", WorkspaceSeed, want)
+	}
+	for i := range want {
+		if WorkspaceSeed[i] != want[i] {
+			t.Errorf("WorkspaceSeed[%d] = %q, want %q", i, WorkspaceSeed[i], want[i])
+		}
+	}
+	// The isolation invariant: runtime state / history is NEVER in the allowlist.
+	for _, e := range WorkspaceSeed {
+		if e == "sessions/" || e == "logs/" || e == ".picoclaw.pid" {
+			t.Errorf("WorkspaceSeed must never contain %q", e)
+		}
+	}
+}
+
 func TestWebhookSecretUnsetIsEmpty(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "x")
 	cfg, err := Load(writeConfig(t, sample))

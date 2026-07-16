@@ -29,9 +29,46 @@ type fakeOrch struct {
 	armed      int
 	scaffolded map[string]bool
 	keys       []docker.WorkspaceKey
+
+	writeErr   error
+	deleteErr  error
+	writes     []secretWrite
+	deletes    []secretWrite
+	restarts   []docker.WorkspaceKey
+	listResult docker.SecretNames
+}
+
+type secretWrite struct {
+	key                 docker.WorkspaceKey
+	format, name, value string
 }
 
 func newFakeOrch() *fakeOrch { return &fakeOrch{scaffolded: map[string]bool{}} }
+
+func (f *fakeOrch) WriteSecret(_ config.Agent, key docker.WorkspaceKey, format, name, value string) error {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
+	f.writes = append(f.writes, secretWrite{key, format, name, value})
+	return nil
+}
+
+func (f *fakeOrch) ListSecrets(docker.WorkspaceKey) (docker.SecretNames, error) {
+	return f.listResult, nil
+}
+
+func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deletes = append(f.deletes, secretWrite{key: key, format: format, name: name})
+	return nil
+}
+
+func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
+	f.restarts = append(f.restarts, key)
+	return nil
+}
 
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }
 
@@ -539,6 +576,191 @@ func TestModelsRequiresAuth(t *testing.T) {
 	s.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "picoclaw") {
 		t.Errorf("models: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func secretBody(format, name, value string) string {
+	return `{"tenant_id":"` + tenantT + `","subs_acc_id":"` + subsX +
+		`","format":"` + format + `","name":"` + name + `","value":"` + value + `"}`
+}
+
+func secretsPostReq(t *testing.T, body string, headers map[string]string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/v1/secrets", strings.NewReader(body))
+	for k, v := range headers {
+		r.Header.Set(k, v)
+	}
+	return r
+}
+
+func secretsReq(t *testing.T, method, query string, headers map[string]string) *http.Request {
+	r := httptest.NewRequest(method, "/v1/secrets?"+query, nil)
+	for k, v := range headers {
+		r.Header.Set(k, v)
+	}
+	return r
+}
+
+func TestSecretsPostEachFormat(t *testing.T) {
+	for _, format := range []string{"dotenv", "json", "file", "native"} {
+		t.Run(format, func(t *testing.T) {
+			orch := scaffoldedOrch()
+			s := testServer(orch, &fakeTurner{})
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody(format, "web.brave", "sekret"), goodHeaders(t)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+			}
+			if len(orch.writes) != 1 || orch.writes[0].format != format {
+				t.Errorf("write not recorded: %+v", orch.writes)
+			}
+			// Routed to alice's own (user, agent) store, not the subscription.
+			if orch.writes[0].key.UserAccID != accAlice || orch.writes[0].key.Role != "alpha" ||
+				orch.writes[0].key.SubsAccID != subsX || orch.writes[0].key.TenantID != tenantT {
+				t.Errorf("routed key = %+v", orch.writes[0].key)
+			}
+			if len(orch.restarts) != 1 {
+				t.Errorf("restart invoked %d times, want 1", len(orch.restarts))
+			}
+		})
+	}
+}
+
+func TestSecretsPostValidationMapsTo400(t *testing.T) {
+	for _, sentinel := range []error{docker.ErrInvalidSecretName, docker.ErrUnknownNativeSlot} {
+		orch := scaffoldedOrch()
+		orch.writeErr = sentinel
+		s := testServer(orch, &fakeTurner{})
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("native", "bad.slot", "v"), goodHeaders(t)))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("sentinel %v: status = %d, want 400", sentinel, w.Code)
+		}
+		if len(orch.restarts) != 0 {
+			t.Errorf("sentinel %v: restart must not run when write is rejected", sentinel)
+		}
+	}
+}
+
+func TestSecretsPostUnknownFormat400(t *testing.T) {
+	orch := scaffoldedOrch()
+	s := testServer(orch, &fakeTurner{})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("yaml", "X", "v"), goodHeaders(t)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for unknown format", w.Code)
+	}
+	if len(orch.writes) != 0 {
+		t.Error("write ran for an unknown format")
+	}
+}
+
+func TestSecretsPostNoProfile401(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := goodHeaders(t)
+	delete(h, identity.ProfileHeader)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("dotenv", "A", "v"), h))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestSecretsPostForbidden(t *testing.T) {
+	cases := []struct{ name, profile string }{
+		{"unlicensed", `{"accId":"` + accAlice + `","owners":[{"email":"u@x","isPrincipal":true}]}`},
+		{"read-only", licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true)},
+		{"wrong-tenant", licensedProfile(accAlice, tenantU, subsX, "alpha", "write", true)},
+		{"missing-role", licensedProfile(accAlice, tenantT, subsX, "beta", "write", true)},
+		{"acc-equals-subs", licensedProfile(subsX, tenantT, subsX, "alpha", "write", true)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orch := scaffoldedOrch()
+			s := testServer(orch, &fakeTurner{})
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("dotenv", "A", "v"), headersFor(t, tc.profile)))
+			if w.Code != http.StatusForbidden {
+				t.Errorf("%s: status = %d, want 403", tc.name, w.Code)
+			}
+			if len(orch.writes) != 0 {
+				t.Errorf("%s: write ran despite a 403", tc.name)
+			}
+		})
+	}
+}
+
+func TestSecretsGetNamesOnly(t *testing.T) {
+	orch := scaffoldedOrch()
+	orch.listResult = docker.SecretNames{
+		Dotenv: []string{"BRAVE_KEY"},
+		JSON:   []string{"OPENAI_KEY"},
+		Native: []string{"web.brave"},
+		File:   []string{"token.pem"},
+	}
+	s := testServer(orch, &fakeTurner{})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsReq(t, http.MethodGet, "tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, name := range []string{"BRAVE_KEY", "OPENAI_KEY", "web.brave", "token.pem"} {
+		if !strings.Contains(body, name) {
+			t.Errorf("missing name %q in listing: %s", name, body)
+		}
+	}
+	for _, group := range []string{`"dotenv"`, `"json"`, `"native"`, `"file"`} {
+		if !strings.Contains(body, group) {
+			t.Errorf("missing format group %q: %s", group, body)
+		}
+	}
+	// The response shape (SecretNames) carries names only; a value can never be
+	// present. This sentinel is a value never placed into any name field.
+	if strings.Contains(body, "SECRET-VALUE") {
+		t.Errorf("listing leaked a value: %s", body)
+	}
+}
+
+func TestSecretsGetForbidden(t *testing.T) {
+	orch := scaffoldedOrch()
+	s := testServer(orch, &fakeTurner{})
+	// read-only grant -> 403 (same chain as chat).
+	h := headersFor(t, licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsReq(t, http.MethodGet, "tenant_id="+tenantT+"&subs_acc_id="+subsX, h))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestSecretsDelete(t *testing.T) {
+	orch := scaffoldedOrch()
+	s := testServer(orch, &fakeTurner{})
+	q := "tenant_id=" + tenantT + "&subs_acc_id=" + subsX + "&format=dotenv&name=BRAVE_KEY"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsReq(t, http.MethodDelete, q, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if len(orch.deletes) != 1 || orch.deletes[0].name != "BRAVE_KEY" || orch.deletes[0].format != "dotenv" {
+		t.Errorf("delete not recorded: %+v", orch.deletes)
+	}
+	if len(orch.restarts) != 1 {
+		t.Errorf("restart after delete invoked %d times, want 1", len(orch.restarts))
+	}
+}
+
+func TestSecretsDeleteUnknownFormat400(t *testing.T) {
+	orch := scaffoldedOrch()
+	s := testServer(orch, &fakeTurner{})
+	q := "tenant_id=" + tenantT + "&subs_acc_id=" + subsX + "&format=yaml&name=X"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsReq(t, http.MethodDelete, q, goodHeaders(t)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	if len(orch.deletes) != 0 {
+		t.Error("delete ran for an unknown format")
 	}
 }
 

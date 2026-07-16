@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -137,7 +138,8 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
-	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, key, ownerEmail)
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	token, err := provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, key, ownerEmail)
 	if err != nil {
 		return Target{}, err
 	}
@@ -181,6 +183,22 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// per-user dir there and set HOME so it works for a non-root user too (the
 	// image's own /root is 0700 and unusable by a non-root uid).
 	mountDest := m.cfg.PicoclawHome + "/.picoclaw"
+	// The per-(user, agent) secret store is bind-mounted READ-ONLY into every
+	// container of that pair (AC-10): the non-root agent can read the generic
+	// sinks (.env / secrets.json / secrets/) but the kernel blocks any write,
+	// delete or replace. The store dir MUST exist before create or the mount
+	// source is missing; MkdirAll it (container-side view) and chown it so the
+	// non-root agent can read the files (CTX-AC-03 persistence is free — the same
+	// host dir is mounted into every workspace of the pair).
+	storeHost := config.StoreDir(m.cfg.HostDataRoot, key.UserAccID, key.Role)
+	storeContainer := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	if err := os.MkdirAll(storeContainer, 0o700); err != nil {
+		return fmt.Errorf("create secret store dir: %w", err)
+	}
+	if err := chownTree(storeContainer, m.cfg.PicoclawUser); err != nil {
+		return fmt.Errorf("chown secret store dir: %w", err)
+	}
+	secretsMount := storeHost + ":" + mountDest + "/workspace/.secrets:ro"
 	spec := CreateSpec{
 		Name:  name,
 		Image: m.cfg.PicoclawImage,
@@ -197,7 +215,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds:   []string{hostDir + ":" + mountDest},
+		Binds:   []string{hostDir + ":" + mountDest, secretsMount},
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -270,6 +288,106 @@ func (m *Manager) ArmIdle(agent config.Agent, key WorkspaceKey) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	m.armLocked(ks, name, agent.IdleTimeout.Std())
+}
+
+// RestartWorkspace stops and restarts the user's agent container so picoclaw
+// re-reads its just-injected secrets (CTX-AC-04). It takes the per-container
+// lock (serializing with ensure/turn/idle), disarms the idle timer, and — only
+// if the container exists and is running — Stop+Start+waits-healthy, then
+// re-arms the idle timer for scale-to-zero. When the container isn't running
+// (scaled to zero / never created) it is a no-op: the next chat cold-starts with
+// the new secret already applied (spec edge case).
+func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
+	name := m.ContainerName(key)
+	ks := m.keyState(name)
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	m.disarmLocked(ks)
+
+	ctx := context.Background()
+	st, err := m.docker.Inspect(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !st.Exists || !st.Running {
+		return nil // scaled to zero / never created: next chat cold-starts with it
+	}
+	if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
+		return err
+	}
+	if err := m.docker.Start(ctx, name); err != nil {
+		return err
+	}
+	if err := m.waitHealthy(ctx, name); err != nil {
+		return fmt.Errorf("picoclaw %s did not become ready after restart: %w", name, err)
+	}
+	if agent, ok := m.cfg.Agents[key.Role]; ok && agent.Mode == config.ModeScaleToZero {
+		m.armLocked(ks, name, agent.IdleTimeout.Std())
+	}
+	m.logf("restarted container %s (secret injection)", name)
+	return nil
+}
+
+// WriteSecret validates and persists one secret into the per-(user, agent)
+// store under the chosen format, then — for native — merges it into the caller's
+// current workspace .security.yml. agent supplies the template used to validate a
+// native slot when the workspace has not been provisioned yet. Returns
+// ErrInvalidSecretName / ErrUnknownNativeSlot for a bad name or slot (the handler
+// maps these to 400).
+func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name, value string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	secPath := m.workspaceSecurityPath(agent, key)
+	if err := writeSecret(storeDir, secPath, format, name, value); err != nil {
+		return err
+	}
+	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
+		return fmt.Errorf("chown secret store: %w", err)
+	}
+	if format == FormatNative {
+		// Apply immediately to the current workspace when it exists; otherwise the
+		// overlay is picked up at the next provision/ensure (design §6).
+		if _, err := os.Stat(secPath); err == nil {
+			if err := applyNativeSecrets(secPath, storeDir, m.cfg.PicoclawUser); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ListSecrets returns the set secret names per format for the caller's store,
+// parsed server-side. It NEVER returns a stored value.
+func (m *Manager) ListSecrets(key WorkspaceKey) (SecretNames, error) {
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	return listSecretNames(storeDir)
+}
+
+// DeleteSecret removes one secret from the store (and, for native, unsets the
+// slot in the caller's current workspace .security.yml).
+func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	secPath := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
+	if err := deleteSecret(storeDir, secPath, m.cfg.PicoclawUser, format, name); err != nil {
+		return err
+	}
+	return chownTree(storeDir, m.cfg.PicoclawUser)
+}
+
+// workspaceSecurityPath returns the .security.yml to validate/merge native
+// secrets into: the caller's provisioned workspace when it exists, else the
+// agent template (so a native slot can be validated before the first chat).
+func (m *Manager) workspaceSecurityPath(agent config.Agent, key WorkspaceKey) string {
+	ws := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
+	if _, err := os.Stat(ws); err == nil {
+		return ws
+	}
+	return filepath.Join(config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template), ".security.yml")
 }
 
 // armLocked schedules an idle stop. Caller holds ks.mu.

@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -31,6 +32,16 @@ type Orchestrator interface {
 	ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
 	// SubscriptionScaffolded reports whether the subscription root exists.
 	SubscriptionScaffolded(tenantID, subsAccID string) bool
+	// WriteSecret validates and persists one secret into the caller's
+	// per-(user, agent) store, merging native secrets into the current workspace.
+	WriteSecret(agent config.Agent, key docker.WorkspaceKey, format, name, value string) error
+	// ListSecrets returns the set secret names per format (never values).
+	ListSecrets(key docker.WorkspaceKey) (docker.SecretNames, error)
+	// DeleteSecret removes one secret from the caller's store.
+	DeleteSecret(key docker.WorkspaceKey, format, name string) error
+	// RestartWorkspace restarts the caller's container so an injected secret
+	// takes effect immediately.
+	RestartWorkspace(key docker.WorkspaceKey) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -55,6 +66,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/sessions/history", s.handleSessionsHistory)
+	mux.HandleFunc("POST /v1/secrets", s.handleSecretsPost)
+	mux.HandleFunc("GET /v1/secrets", s.handleSecretsList)
+	mux.HandleFunc("DELETE /v1/secrets", s.handleSecretsDelete)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }
@@ -415,6 +429,192 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
+}
+
+// secretRequest is the POST /v1/secrets body: the targeted subscription, the
+// sink format, the name/slot, and the (write-only) value.
+type secretRequest struct {
+	TenantID  string `json:"tenant_id"`
+	SubsAccID string `json:"subs_acc_id"`
+	Format    string `json:"format"`
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+}
+
+var knownSecretFormats = map[string]bool{
+	docker.FormatDotenv: true, docker.FormatJSON: true,
+	docker.FormatFile: true, docker.FormatNative: true,
+}
+
+// authorizeSecret runs the same authorization as chat over the given
+// tenant/subscription (account-switching guard + the write-access chain) and, on
+// success, returns the caller's WorkspaceKey. It writes the error response and
+// returns ok=false on any failure.
+func (s *Server) authorizeSecret(w http.ResponseWriter, agent config.Agent, ident identity.Identity, tenantID, subsAccID uuid.UUID) (docker.WorkspaceKey, bool) {
+	if ident.Profile.AccID == subsAccID {
+		writeJSON(w, http.StatusForbidden,
+			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
+		return docker.WorkspaceKey{}, false
+	}
+	if _, err := ident.Profile.
+		WithWriteAccess().
+		OnTenant(tenantID).
+		WithRoles([]string{agent.Key}).
+		OnAccount(subsAccID).
+		GetRelatedAccountOrError(); err != nil {
+		s.logf("secrets: authz denied svc=%s tenant=%s subs=%s user=%s: %v",
+			agent.Key, tenantID, subsAccID, ident.AccID, err)
+		writeJSON(w, http.StatusForbidden,
+			errBody("not licensed to use this subscription for this agent"))
+		return docker.WorkspaceKey{}, false
+	}
+	return docker.WorkspaceKey{
+		TenantID:  tenantID.String(),
+		SubsAccID: subsAccID.String(),
+		Role:      agent.Key,
+		UserAccID: ident.AccID,
+	}, true
+}
+
+// resolveSecretCaller resolves the agent + profile shared by all /v1/secrets
+// handlers, writing the error response and returning ok=false on failure.
+func (s *Server) resolveSecretCaller(w http.ResponseWriter, r *http.Request) (config.Agent, identity.Identity, bool) {
+	agent, status, msg := s.resolveAgent(r)
+	if status != 0 {
+		writeJSON(w, status, errBody(msg))
+		return config.Agent{}, identity.Identity{}, false
+	}
+	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized,
+			errBody("missing or invalid "+identity.ProfileHeader+" header"))
+		return config.Agent{}, identity.Identity{}, false
+	}
+	return agent, ident, true
+}
+
+// handleSecretsPost injects/updates one secret for the caller's (user, agent)
+// pair and restarts the container so picoclaw re-reads it (AC-02, CTX-AC-04).
+func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	var req secretRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
+		return
+	}
+	if !knownSecretFormats[req.Format] {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`"format" must be one of dotenv, json, file, native`))
+		return
+	}
+	tenantID, err := uuid.Parse(req.TenantID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(req.SubsAccID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.WriteSecret(agent, key, req.Format, req.Name, req.Value); err != nil {
+		if errors.Is(err, docker.ErrInvalidSecretName) || errors.Is(err, docker.ErrUnknownNativeSlot) {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		s.logf("secrets: write failed svc=%s user=%s format=%s: %v", agent.Key, ident.AccID, req.Format, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if err := s.Mgr.RestartWorkspace(key); err != nil {
+		s.logf("secrets: restart failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	s.logf("secrets: injected svc=%s tenant=%s subs=%s user=%s format=%s",
+		agent.Key, tenantID, subsAccID, ident.AccID, req.Format)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "format": req.Format, "name": req.Name})
+}
+
+// handleSecretsList returns the set secret names grouped by format — never a
+// value (write-only-over-API store, AC-08).
+func (s *Server) handleSecretsList(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	names, err := s.Mgr.ListSecrets(key)
+	if err != nil {
+		s.logf("secrets: list failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"secrets": names})
+}
+
+// handleSecretsDelete removes one secret and restarts the container (AC-08).
+func (s *Server) handleSecretsDelete(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	format := r.URL.Query().Get("format")
+	name := r.URL.Query().Get("name")
+	if !knownSecretFormats[format] {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`"format" query parameter must be one of dotenv, json, file, native`))
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.DeleteSecret(key, format, name); err != nil {
+		if errors.Is(err, docker.ErrInvalidSecretName) || errors.Is(err, docker.ErrUnknownNativeSlot) {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		s.logf("secrets: delete failed svc=%s user=%s format=%s: %v", agent.Key, ident.AccID, format, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if err := s.Mgr.RestartWorkspace(key); err != nil {
+		s.logf("secrets: restart after delete failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "format": format, "name": name})
 }
 
 // handleHealthz is unauthenticated (mycelium's health dispatcher issues a plain
