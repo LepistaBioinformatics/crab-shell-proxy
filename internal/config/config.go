@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sgelias/crab-shell-proxy/internal/identity"
 	"gopkg.in/yaml.v3"
 )
 
@@ -133,12 +134,19 @@ type Config struct {
 	// PicoclawHome is the in-container HOME for spawned picoclaw; the per-user
 	// data dir is mounted at <PicoclawHome>/.picoclaw and the config's workspace
 	// path is aligned to it. Must be a dir the PicoclawUser can write.
-	PicoclawHome string `yaml:"picoclawHome"`
+	PicoclawHome    string   `yaml:"picoclawHome"`
 	StartupDeadline Duration `yaml:"startupDeadline"`
 	TurnTimeout     Duration `yaml:"turnTimeout"`
 	// ContainerPrefix prefixes every managed container name (default "picoclaw").
-	ContainerPrefix string           `yaml:"containerPrefix"`
-	Agents          map[string]Agent `yaml:"agents"`
+	ContainerPrefix string `yaml:"containerPrefix"`
+	// WebhookSecret authenticates POST /v1/accounts (the mycelium
+	// subscriptionAccount.created webhook); env-resolvable like agent tokens so
+	// it lives in the environment, never in this file.
+	WebhookSecret secret           `yaml:"webhookSecret"`
+	Agents        map[string]Agent `yaml:"agents"`
+
+	// ResolvedWebhookSecret is filled by Load from WebhookSecret.
+	ResolvedWebhookSecret string `yaml:"-"`
 }
 
 // Load reads, validates, and env-resolves the config at path.
@@ -171,6 +179,11 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Agents[key] = agent
 	}
+	sec, err := cfg.WebhookSecret.resolve()
+	if err != nil {
+		return nil, fmt.Errorf("webhookSecret: %w", err)
+	}
+	cfg.ResolvedWebhookSecret = sec
 	return &cfg, nil
 }
 
@@ -204,7 +217,7 @@ func (c *Config) applyDefaults() {
 		c.Listen = ":8080"
 	}
 	if c.ContainerDataRoot == "" {
-		c.ContainerDataRoot = "/data/agents"
+		c.ContainerDataRoot = "/data"
 	}
 	if c.PicoclawImage == "" {
 		c.PicoclawImage = "docker.io/sipeed/picoclaw:latest"
@@ -263,11 +276,39 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// SessionsDir is the path INSIDE this proxy to a user's picoclaw session
-// transcripts (used by /v1/sessions/history). The same host dir is mounted into
-// the picoclaw container at /root/.picoclaw.
-func (c *Config) SessionsDir(agentKey, userKey string) string {
-	return filepath.Join(c.ContainerDataRoot, agentKey, userKey, "workspace", "sessions")
+// The layout builders below are the single source of truth for the on-disk
+// tenant→subscription→agent→user tree. Each is a free function taking the data
+// root as its first argument so the same relative tree is built under both the
+// host root (bind-mount source handed to Docker) and the container root (this
+// proxy's view); only the prefix differs. Every dynamic segment passes through
+// identity.SanitizeID before it reaches the filesystem or a container name.
+
+// TemplatesDir is the config-only seed dir for an agent template, under
+// <root>/templates/<template>.
+func TemplatesDir(root, template string) string {
+	return filepath.Join(root, "templates", template)
+}
+
+// SubscriptionRoot is the subscription scaffold the /v1/accounts webhook
+// creates: <root>/tenants/<t>/subscriptions/<s>/agents. The lazy
+// <role>/users/<u> leaves are created on first chat under it.
+func SubscriptionRoot(root, tenantID, subsAccID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"subscriptions", identity.SanitizeID(subsAccID), "agents")
+}
+
+// UserWorkspace is one user's fully isolated workspace under a subscription's
+// agent: SubscriptionRoot/<role>/users/<u>.
+func UserWorkspace(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(SubscriptionRoot(root, tenantID, subsAccID),
+		identity.SanitizeID(role), "users", identity.SanitizeID(userAccID))
+}
+
+// SessionsDir is the path to a user's picoclaw session transcripts (used by
+// /v1/sessions/history), under UserWorkspace/workspace/sessions.
+func SessionsDir(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		"workspace", "sessions")
 }
 
 // AgentByServiceName returns the agent whose serviceName matches the value

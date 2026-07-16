@@ -31,7 +31,7 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // workspace path is aligned to <home>/.picoclaw/workspace so it matches the
 // mount point. user ("uid:gid", may be empty) is the non-root owner the data
 // dir is chowned to so a non-root container can write it.
-func provision(userDir, templateDir, home, user string, model *config.ModelConfig, ownerEmail string) (picoToken string, err error) {
+func provision(userDir, templateDir, home, user string, model *config.ModelConfig, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -50,8 +50,9 @@ func provision(userDir, templateDir, home, user string, model *config.ModelConfi
 			}
 		}
 		// Traceability: the dir is named by accId (not email), so drop a small
-		// marker recording which email/account owns it, for finding the user later.
-		if err := writeOwnerFile(userDir, ownerEmail); err != nil {
+		// marker recording the full workspace tuple + owner email, for finding
+		// the user later.
+		if err := writeOwnerFile(userDir, key, ownerEmail); err != nil {
 			return "", fmt.Errorf("write owner marker: %w", err)
 		}
 		if err := chownTree(userDir, user); err != nil {
@@ -123,14 +124,17 @@ func applyModel(configPath, secPath string, model *config.ModelConfig) error {
 	return os.WriteFile(secPath, secBytes, 0o600)
 }
 
-// writeOwnerFile drops a small JSON marker in the user's data dir mapping the
-// accId (the dir name / isolation key) to the owner email, so an operator can
-// find which human a container belongs to. Lives next to config.json (a
-// dotfile picoclaw ignores).
-func writeOwnerFile(userDir, email string) error {
+// writeOwnerFile drops a small JSON marker in the user's data dir recording the
+// full workspace tuple and the owner email, so an operator can find which human
+// a container belongs to. Lives next to config.json (a dotfile picoclaw
+// ignores).
+func writeOwnerFile(userDir string, key WorkspaceKey, email string) error {
 	info := map[string]string{
-		"accId": filepath.Base(userDir),
-		"email": email,
+		"tenantId":  key.TenantID,
+		"subsAccId": key.SubsAccID,
+		"role":      key.Role,
+		"userAccId": key.UserAccID,
+		"email":     email,
 	}
 	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {

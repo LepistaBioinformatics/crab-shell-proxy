@@ -4,20 +4,32 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"path/filepath"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/sgelias/crab-shell-proxy/internal/config"
+	"github.com/sgelias/crab-shell-proxy/internal/identity"
 )
 
 // Reconciliation labels stamped on every managed container.
 const (
-	LabelManaged = "crab-shell.managed"
-	LabelAgent   = "crab-shell.agent"
-	LabelUser    = "crab-shell.user"
-	LabelMode    = "crab-shell.mode"
+	LabelManaged      = "crab-shell.managed"
+	LabelAgent        = "crab-shell.agent" // = role (agent key)
+	LabelTenant       = "crab-shell.tenant"
+	LabelSubscription = "crab-shell.subscription"
+	LabelUser         = "crab-shell.user" // = user account id
+	LabelMode         = "crab-shell.mode"
 )
+
+// WorkspaceKey identifies one fully isolated per-user workspace/container under
+// the tenant→subscription→agent→user layout. Role is the agent key.
+type WorkspaceKey struct {
+	TenantID  string
+	SubsAccID string
+	Role      string
+	UserAccID string
+}
 
 // Docker is the subset of the Engine API the manager needs (interface at the
 // consumer so tests can supply a fake).
@@ -69,9 +81,13 @@ func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, logf func(
 	return &Manager{cfg: cfg, docker: dkr, health: health, logf: logf, keys: map[string]*keyState{}}
 }
 
-// ContainerName is the deterministic name for one (agent, user) container.
-func (m *Manager) ContainerName(agentKey, userKey string) string {
-	return fmt.Sprintf("%s-%s-%s", m.cfg.ContainerPrefix, agentKey, userKey)
+// ContainerName is the deterministic name for one workspace's container:
+// <prefix>-<role>-<subsAccId>-<userAccId>. subsAccId is a globally-unique
+// mycelium account UUID, so the triple is unique without the tenant id.
+func (m *Manager) ContainerName(key WorkspaceKey) string {
+	return fmt.Sprintf("%s-%s-%s-%s", m.cfg.ContainerPrefix,
+		identity.SanitizeID(key.Role), identity.SanitizeID(key.SubsAccID),
+		identity.SanitizeID(key.UserAccID))
 }
 
 func (m *Manager) wsEndpoint(name string) string {
@@ -89,12 +105,16 @@ func (m *Manager) keyState(name string) *keyState {
 	return ks
 }
 
-// EnsureRunning guarantees the (agent, user) container exists, is running, and
-// is health-ready, then returns how to reach it. Concurrent calls for the same
+// EnsureRunning guarantees the workspace's container exists, is running, and is
+// health-ready, then returns how to reach it. Concurrent calls for the same
 // container are serialized (single-flight cold start); the idle timer is
 // disarmed on entry so a pending scale-to-zero cannot fire mid-turn.
-func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey, ownerEmail string) (Target, error) {
-	name := m.ContainerName(agent.Key, userKey)
+//
+// It NEVER creates the subscription scaffold (only POST /v1/accounts does);
+// when SubscriptionRoot is absent it errors without touching any container. It
+// MAY create the lazy <role>/users/<u> leaf and the container.
+func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key WorkspaceKey, ownerEmail string) (Target, error) {
+	name := m.ContainerName(key)
 	ks := m.keyState(name)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
@@ -102,9 +122,15 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey
 	// Disarm any pending idle-stop for this container before we touch it.
 	m.disarmLocked(ks)
 
-	userDir := filepath.Join(m.cfg.ContainerDataRoot, agent.Key, userKey)
-	templateDir := filepath.Join(m.cfg.ContainerDataRoot, "templates", agent.Template)
-	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, ownerEmail)
+	subsRoot := config.SubscriptionRoot(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
+	if _, err := os.Stat(subsRoot); err != nil {
+		return Target{}, fmt.Errorf("subscription %s/%s not scaffolded (POST /v1/accounts first): %w",
+			key.TenantID, key.SubsAccID, err)
+	}
+
+	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
+	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, key, ownerEmail)
 	if err != nil {
 		return Target{}, err
 	}
@@ -117,7 +143,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey
 	createdNow := false
 	switch {
 	case !st.Exists:
-		if err := m.create(ctx, agent, userKey, name); err != nil {
+		if err := m.create(ctx, agent, key, name); err != nil {
 			return Target{}, err
 		}
 		createdNow = true
@@ -142,8 +168,8 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey
 	return Target{Name: name, WSEndpoint: m.wsEndpoint(name), PicoToken: token}, nil
 }
 
-func (m *Manager) create(ctx context.Context, agent config.Agent, userKey, name string) error {
-	hostDir := filepath.Join(m.cfg.HostDataRoot, agent.Key, userKey)
+func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceKey, name string) error {
+	hostDir := config.UserWorkspace(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	// picoclaw keeps its config/workspace under $HOME/.picoclaw; mount the
 	// per-user dir there and set HOME so it works for a non-root user too (the
 	// image's own /root is 0700 and unusable by a non-root uid).
@@ -157,10 +183,12 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, userKey, name 
 			"HOME=" + m.cfg.PicoclawHome,
 		},
 		Labels: map[string]string{
-			LabelManaged: "true",
-			LabelAgent:   agent.Key,
-			LabelUser:    userKey,
-			LabelMode:    string(agent.Mode),
+			LabelManaged:      "true",
+			LabelAgent:        key.Role,
+			LabelTenant:       key.TenantID,
+			LabelSubscription: key.SubsAccID,
+			LabelUser:         key.UserAccID,
+			LabelMode:         string(agent.Mode),
 		},
 		Binds:   []string{hostDir + ":" + mountDest},
 		Network: m.cfg.Network,
@@ -200,13 +228,37 @@ func (m *Manager) waitHealthy(ctx context.Context, name string) error {
 	}
 }
 
+// ScaffoldSubscription idempotently creates the subscription scaffold
+// (SubscriptionRoot) for the /v1/accounts webhook and chowns it to picoclawUser
+// so lazy per-user provisioning under it can write. It reports whether the
+// scaffold was created now (true) or already existed (false).
+func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error) {
+	dir := config.SubscriptionRoot(m.cfg.ContainerDataRoot, tenantID, subsAccID)
+	_, statErr := os.Stat(dir)
+	existed := statErr == nil
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	if err := chownTree(dir, m.cfg.PicoclawUser); err != nil {
+		return false, err
+	}
+	return !existed, nil
+}
+
+// SubscriptionScaffolded reports whether the subscription scaffold exists on
+// disk (used to 409 an un-scaffolded chat and to annotate discovery).
+func (m *Manager) SubscriptionScaffolded(tenantID, subsAccID string) bool {
+	_, err := os.Stat(config.SubscriptionRoot(m.cfg.ContainerDataRoot, tenantID, subsAccID))
+	return err == nil
+}
+
 // ArmIdle re-arms the scale-to-zero idle timer for a container after a turn
 // completes. No-op for continuous-mode agents.
-func (m *Manager) ArmIdle(agent config.Agent, userKey string) {
+func (m *Manager) ArmIdle(agent config.Agent, key WorkspaceKey) {
 	if agent.Mode != config.ModeScaleToZero {
 		return
 	}
-	name := m.ContainerName(agent.Key, userKey)
+	name := m.ContainerName(key)
 	ks := m.keyState(name)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()

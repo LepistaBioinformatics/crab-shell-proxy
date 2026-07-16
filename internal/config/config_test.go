@@ -182,10 +182,59 @@ agents:
 	}
 }
 
-func TestSessionsDir(t *testing.T) {
-	c := &Config{ContainerDataRoot: "/data/agents"}
-	want := "/data/agents/alpha/hash/workspace/sessions"
-	if got := c.SessionsDir("alpha", "hash"); got != want {
+func TestLayoutBuilders(t *testing.T) {
+	root := "/data"
+	if got, want := TemplatesDir(root, "alpha"), "/data/templates/alpha"; got != want {
+		t.Errorf("TemplatesDir = %q, want %q", got, want)
+	}
+	if got, want := SubscriptionRoot(root, "t1", "s1"),
+		"/data/tenants/t1/subscriptions/s1/agents"; got != want {
+		t.Errorf("SubscriptionRoot = %q, want %q", got, want)
+	}
+	if got, want := UserWorkspace(root, "t1", "s1", "alpha", "u1"),
+		"/data/tenants/t1/subscriptions/s1/agents/alpha/users/u1"; got != want {
+		t.Errorf("UserWorkspace = %q, want %q", got, want)
+	}
+	if got, want := SessionsDir(root, "t1", "s1", "alpha", "u1"),
+		"/data/tenants/t1/subscriptions/s1/agents/alpha/users/u1/workspace/sessions"; got != want {
 		t.Errorf("SessionsDir = %q, want %q", got, want)
+	}
+	// Host and container roots build the same relative tree; only the prefix differs.
+	if got, want := UserWorkspace("/host/data", "t1", "s1", "alpha", "u1"),
+		"/host/data/tenants/t1/subscriptions/s1/agents/alpha/users/u1"; got != want {
+		t.Errorf("UserWorkspace(host) = %q, want %q", got, want)
+	}
+}
+
+func TestLayoutBuildersSanitizeSegments(t *testing.T) {
+	// A dynamic segment with a path separator must not escape the tree.
+	got := UserWorkspace("/data", "t/../evil", "s1", "alpha", "u1")
+	want := "/data/tenants/t-..-evil/subscriptions/s1/agents/alpha/users/u1"
+	if got != want {
+		t.Errorf("UserWorkspace with unsafe tenant = %q, want %q", got, want)
+	}
+}
+
+func TestWebhookSecretFromEnv(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("CRAB_WEBHOOK_SECRET", "wh-secret-123")
+	body := sample + "webhookSecret: { env: \"CRAB_WEBHOOK_SECRET\" }\n"
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResolvedWebhookSecret != "wh-secret-123" {
+		t.Errorf("webhookSecret not resolved from env: %q", cfg.ResolvedWebhookSecret)
+	}
+}
+
+func TestWebhookSecretUnsetIsEmpty(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	cfg, err := Load(writeConfig(t, sample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResolvedWebhookSecret != "" {
+		t.Errorf("webhookSecret should be empty when unset, got %q", cfg.ResolvedWebhookSecret)
 	}
 }

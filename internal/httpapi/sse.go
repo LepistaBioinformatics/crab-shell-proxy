@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sgelias/crab-shell-proxy/internal/config"
+	"github.com/sgelias/crab-shell-proxy/internal/docker"
 )
 
 // streamTurn serves a streaming (SSE) chat completion.
@@ -17,7 +18,7 @@ import (
 // on Docker. Once headers are sent the HTTP status can no longer change, so a
 // cold-start or turn failure is surfaced by closing the stream cleanly (a
 // [DONE] with no content) and logging — same as server.js.
-func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, userKey, ownerEmail, sessionKey, userContent, model, id string) {
+func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, ownerEmail, sessionKey, userContent, model, id string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, errBody("streaming unsupported"))
@@ -51,7 +52,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	// Open the stream immediately so the connection survives the cold start.
 	writeChunk(map[string]any{"role": "assistant", "content": ""}, nil)
 
-	tgt, err := s.Mgr.EnsureRunning(r.Context(), agent, userKey, ownerEmail)
+	tgt, err := s.Mgr.EnsureRunning(r.Context(), agent, key, ownerEmail)
 	if err != nil {
 		s.logf("stream: ensure running failed: %v", err)
 		done()
@@ -60,7 +61,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 
 	_, err = s.Pico.RunTurn(r.Context(), tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent,
 		func(delta string) { writeChunk(map[string]any{"content": delta}, nil) })
-	s.Mgr.ArmIdle(agent, userKey)
+	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("stream: turn failed: %v", err)
 	}

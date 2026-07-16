@@ -21,6 +21,7 @@ type fakeDocker struct {
 	exists     map[string]bool
 	lastSpec   CreateSpec
 	createHook func() // called inside Create to widen the single-flight race window
+	listResult []ContainerSummary
 }
 
 func newFakeDocker() *fakeDocker {
@@ -71,11 +72,17 @@ func (f *fakeDocker) Remove(_ context.Context, name string) error {
 }
 
 func (f *fakeDocker) List(_ context.Context, _ string) ([]ContainerSummary, error) {
-	return nil, nil
+	return f.listResult, nil
+}
+
+// wk builds a WorkspaceKey under the tenant/subscription testManager scaffolds.
+func wk(user string) WorkspaceKey {
+	return WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: user}
 }
 
 // testManager wires a manager with a fake docker, an always-healthy checker,
-// and a temp data root seeded with an alpha template.
+// and a temp data root seeded with an alpha template and the t1/s1 subscription
+// scaffold (so EnsureRunning, which never creates the scaffold, can proceed).
 func testManager(t *testing.T, mode config.Mode, dkr Docker) (*Manager, config.Agent) {
 	t.Helper()
 	root := t.TempDir()
@@ -88,6 +95,9 @@ func testManager(t *testing.T, mode config.Mode, dkr Docker) (*Manager, config.A
 	}
 	sec := "channels:\n  pico:\n    settings:\n      token: \"secret-tok\"\n"
 	if err := os.WriteFile(filepath.Join(tmpl, ".security.yml"), []byte(sec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(config.SubscriptionRoot(root, "t1", "s1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -108,14 +118,14 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeScaleToZero, f)
 
-	tgt, err := m.EnsureRunning(context.Background(), agent, "hash1", "test@x")
+	tgt, err := m.EnsureRunning(context.Background(), agent, wk("hash1"), "test@x")
 	if err != nil {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
-	if tgt.Name != "picoclaw-alpha-hash1" {
+	if tgt.Name != "picoclaw-alpha-s1-hash1" {
 		t.Errorf("name = %q", tgt.Name)
 	}
-	if tgt.WSEndpoint != "ws://picoclaw-alpha-hash1:18790/pico/ws" {
+	if tgt.WSEndpoint != "ws://picoclaw-alpha-s1-hash1:18790/pico/ws" {
 		t.Errorf("endpoint = %q", tgt.WSEndpoint)
 	}
 	if tgt.PicoToken != "secret-tok" {
@@ -124,12 +134,15 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	if f.createN != 1 || f.startN != 1 {
 		t.Errorf("create=%d start=%d, want 1/1", f.createN, f.startN)
 	}
-	// Labels + bind use the HOST path as source and <PicoclawHome>/.picoclaw as
-	// the mount destination.
-	if f.lastSpec.Labels[LabelAgent] != "alpha" || f.lastSpec.Labels[LabelManaged] != "true" {
-		t.Errorf("labels = %v", f.lastSpec.Labels)
+	// Labels carry the full workspace tuple (role/tenant/subscription/user).
+	l := f.lastSpec.Labels
+	if l[LabelAgent] != "alpha" || l[LabelManaged] != "true" ||
+		l[LabelTenant] != "t1" || l[LabelSubscription] != "s1" || l[LabelUser] != "hash1" {
+		t.Errorf("labels = %v", l)
 	}
-	if want := "/host/data/alpha/hash1:/data/.picoclaw"; f.lastSpec.Binds[0] != want {
+	// Bind uses the HOST path (nested layout) as source and <PicoclawHome>/.picoclaw
+	// as the mount destination.
+	if want := "/host/data/tenants/t1/subscriptions/s1/agents/alpha/users/hash1:/data/.picoclaw"; f.lastSpec.Binds[0] != want {
 		t.Errorf("bind = %q, want %q", f.lastSpec.Binds[0], want)
 	}
 	// Non-root posture: User set and HOME relocated.
@@ -145,9 +158,26 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	if !hasHome {
 		t.Errorf("env missing HOME=/data: %v", f.lastSpec.Env)
 	}
-	// Per-user data dir was seeded from template (config-only).
-	if _, err := os.Stat(filepath.Join(m.cfg.ContainerDataRoot, "alpha", "hash1", "config.json")); err != nil {
+	// Per-user workspace leaf was created lazily and seeded from template.
+	leaf := config.UserWorkspace(m.cfg.ContainerDataRoot, "t1", "s1", "alpha", "hash1")
+	if _, err := os.Stat(filepath.Join(leaf, "config.json")); err != nil {
 		t.Errorf("config.json not provisioned: %v", err)
+	}
+}
+
+func TestEnsureRunningErrorsWhenNotScaffolded(t *testing.T) {
+	f := newFakeDocker()
+	m, agent := testManager(t, config.ModeScaleToZero, f)
+	// A subscription that was never scaffolded (no SubscriptionRoot on disk).
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s-missing", Role: "alpha", UserAccID: "u1"}
+	if _, err := m.EnsureRunning(context.Background(), agent, key, "test@x"); err == nil {
+		t.Fatal("expected error for un-scaffolded subscription")
+	}
+	if f.createN != 0 {
+		t.Errorf("createN = %d, want 0 (no container for un-scaffolded subscription)", f.createN)
+	}
+	if _, err := os.Stat(config.UserWorkspace(m.cfg.ContainerDataRoot, "t1", "s-missing", "alpha", "u1")); err == nil {
+		t.Error("user leaf must not be created for un-scaffolded subscription")
 	}
 }
 
@@ -163,7 +193,7 @@ func TestEnsureRunningSingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := m.EnsureRunning(context.Background(), agent, "same", "test@x"); err != nil {
+			if _, err := m.EnsureRunning(context.Background(), agent, wk("same"), "test@x"); err != nil {
 				t.Errorf("EnsureRunning: %v", err)
 			}
 		}()
@@ -177,11 +207,11 @@ func TestEnsureRunningSingleFlight(t *testing.T) {
 func TestEnsureRunningReusesRunning(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeContinuous, f)
-	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, wk("h"), "test@x"); err != nil {
 		t.Fatal(err)
 	}
 	c1, s1 := f.createN, f.startN
-	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, wk("h"), "test@x"); err != nil {
 		t.Fatal(err)
 	}
 	if f.createN != c1 {
@@ -195,11 +225,11 @@ func TestEnsureRunningReusesRunning(t *testing.T) {
 func TestScaleToZeroIdleStop(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeScaleToZero, f) // idleTimeout 50ms
-	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, wk("h"), "test@x"); err != nil {
 		t.Fatal(err)
 	}
-	m.ArmIdle(agent, "h")
-	name := m.ContainerName("alpha", "h")
+	m.ArmIdle(agent, wk("h"))
+	name := m.ContainerName(wk("h"))
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -219,15 +249,63 @@ func TestScaleToZeroIdleStop(t *testing.T) {
 func TestContinuousDoesNotArmIdle(t *testing.T) {
 	f := newFakeDocker()
 	m, agent := testManager(t, config.ModeContinuous, f)
-	if _, err := m.EnsureRunning(context.Background(), agent, "h", "test@x"); err != nil {
+	if _, err := m.EnsureRunning(context.Background(), agent, wk("h"), "test@x"); err != nil {
 		t.Fatal(err)
 	}
-	m.ArmIdle(agent, "h")
-	name := m.ContainerName("alpha", "h")
+	m.ArmIdle(agent, wk("h"))
+	name := m.ContainerName(wk("h"))
 	time.Sleep(120 * time.Millisecond) // well past the 50ms idle window
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.running[name] {
 		t.Error("continuous container must not be idle-stopped")
+	}
+}
+
+func TestReconcileAdoptsRunningByLabels(t *testing.T) {
+	f := newFakeDocker()
+	m, _ := testManager(t, config.ModeScaleToZero, f)
+	name := "picoclaw-alpha-s1-u1"
+	f.listResult = []ContainerSummary{{
+		Names: []string{"/" + name}, State: "running",
+		Labels: map[string]string{
+			LabelManaged: "true", LabelAgent: "alpha", LabelTenant: "t1",
+			LabelSubscription: "s1", LabelUser: "u1", LabelMode: "scale-to-zero",
+		},
+	}}
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	// A scale-to-zero container found running must have its idle timer re-armed.
+	m.mu.Lock()
+	ks := m.keys[name]
+	m.mu.Unlock()
+	if ks == nil {
+		t.Fatal("running container was not adopted")
+	}
+	ks.mu.Lock()
+	armed := ks.timer != nil
+	ks.mu.Unlock()
+	if !armed {
+		t.Error("adopted scale-to-zero container did not get an idle timer")
+	}
+}
+
+func TestReconcileEnsuresContinuousWorkspaces(t *testing.T) {
+	f := newFakeDocker()
+	m, _ := testManager(t, config.ModeContinuous, f)
+	// A pre-existing user workspace for the continuous agent must be started.
+	leaf := config.UserWorkspace(m.cfg.ContainerDataRoot, "t1", "s1", "alpha", "u1")
+	if err := os.MkdirAll(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if f.createN != 1 || f.startN != 1 {
+		t.Errorf("create=%d start=%d, want 1/1 (continuous workspace ensured)", f.createN, f.startN)
+	}
+	if !f.running["picoclaw-alpha-s1-u1"] {
+		t.Error("continuous workspace container not running after reconcile")
 	}
 }
