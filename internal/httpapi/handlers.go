@@ -340,6 +340,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			subs = append(subs, map[string]any{
 				"tenantId":   res.TenantID.String(),
 				"subsAccId":  res.AccID.String(),
+				"accName":    res.AccName,
 				"role":       res.Role,
 				"perm":       res.Perm.String(),
 				"verified":   res.Verified,
