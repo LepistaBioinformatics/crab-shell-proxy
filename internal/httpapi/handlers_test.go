@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,6 +69,11 @@ func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) er
 func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
 	f.restarts = append(f.restarts, key)
 	return nil
+}
+
+func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error) {
+	n, _ := io.Copy(io.Discard, r)
+	return docker.StoredMedia{Path: "uploads/test-" + rawName, Name: rawName, Size: n}, nil
 }
 
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }

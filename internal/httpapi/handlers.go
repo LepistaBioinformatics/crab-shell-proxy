@@ -11,7 +11,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +45,9 @@ type Orchestrator interface {
 	// RestartWorkspace restarts the caller's container so an injected secret
 	// takes effect immediately.
 	RestartWorkspace(key docker.WorkspaceKey) error
+	// StoreMedia writes an uploaded file into the caller's workspace uploads
+	// dir and returns its workspace-relative path.
+	StoreMedia(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -69,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/secrets", s.handleSecretsPost)
 	mux.HandleFunc("GET /v1/secrets", s.handleSecretsList)
 	mux.HandleFunc("DELETE /v1/secrets", s.handleSecretsDelete)
+	mux.HandleFunc("POST /v1/media", s.handleMediaPost)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }
@@ -615,6 +622,82 @@ func (s *Server) handleSecretsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "format": format, "name": name})
+}
+
+// handleMediaPost stores an uploaded file in the caller's agent-readable
+// workspace (media-upload). Authorized with the same chat write chain as
+// secrets. The whole request body is capped by MaxBytesReader so an oversized
+// upload is rejected (413) without buffering it all; the extension allowlist
+// guards the type (400); the manager sanitizes the name and keeps the file
+// inside the workspace. The turn later references the returned `path`.
+func (s *Server) handleMediaPost(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+
+	// Cap the body; ParseMultipartForm fails once MaxBytesReader trips -> 413.
+	r.Body = http.MaxBytesReader(w, r.Body, s.Cfg.MediaMaxBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge,
+			errBody(fmt.Sprintf("file exceeds the %d-byte limit", s.Cfg.MediaMaxBytes)))
+		return
+	}
+
+	tenantID, err := uuid.Parse(r.FormValue("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.FormValue("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("a `file` part is required"))
+		return
+	}
+	defer file.Close()
+
+	if !s.mediaExtAllowed(header.Filename) {
+		writeJSON(w, http.StatusBadRequest,
+			errBody("file type not allowed (allowed: "+strings.Join(s.Cfg.MediaAllowedExts, ", ")+")"))
+		return
+	}
+
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+
+	stored, err := s.Mgr.StoreMedia(key, header.Filename, file)
+	if err != nil {
+		if errors.Is(err, docker.ErrMediaName) {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		s.logf("media: store failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	s.logf("media: stored svc=%s tenant=%s subs=%s user=%s path=%s size=%d",
+		agent.Key, tenantID, subsAccID, ident.AccID, stored.Path, stored.Size)
+	writeJSON(w, http.StatusOK, stored)
+}
+
+// mediaExtAllowed reports whether a filename's (lowercased) extension is in the
+// configured upload allowlist.
+func (s *Server) mediaExtAllowed(name string) bool {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
+	for _, allowed := range s.Cfg.MediaAllowedExts {
+		if allowed == ext {
+			return true
+		}
+	}
+	return false
 }
 
 // handleHealthz is unauthenticated (mycelium's health dispatcher issues a plain

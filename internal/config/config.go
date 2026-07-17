@@ -145,6 +145,11 @@ type Config struct {
 	WebhookSecret secret           `yaml:"webhookSecret"`
 	Agents        map[string]Agent `yaml:"agents"`
 
+	// Media upload caps (media-upload feature). MediaMaxBytes bounds an
+	// uploaded file; MediaAllowedExts is the lowercase extension allowlist.
+	MediaMaxBytes    int64    `yaml:"mediaMaxBytes"`
+	MediaAllowedExts []string `yaml:"mediaAllowedExts"`
+
 	// ResolvedWebhookSecret is filled by Load from WebhookSecret.
 	ResolvedWebhookSecret string `yaml:"-"`
 }
@@ -239,6 +244,12 @@ func (c *Config) applyDefaults() {
 		// containers) works without the image's 0700 /root getting in the way.
 		c.PicoclawHome = "/data"
 	}
+	if c.MediaMaxBytes == 0 {
+		c.MediaMaxBytes = 10 << 20 // 10 MiB
+	}
+	if len(c.MediaAllowedExts) == 0 {
+		c.MediaAllowedExts = []string{"png", "jpg", "jpeg", "webp", "gif", "pdf", "txt", "md", "csv"}
+	}
 }
 
 func (c *Config) validate() error {
@@ -309,6 +320,14 @@ func UserWorkspace(root, tenantID, subsAccID, role, userAccID string) string {
 func SessionsDir(root, tenantID, subsAccID, role, userAccID string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
 		"workspace", "sessions")
+}
+
+// UploadsDir is where user-uploaded media lands, inside the agent-readable
+// workspace (UserWorkspace/workspace/uploads) so a vision model / reader skill
+// can open it by the returned "uploads/<file>" path.
+func UploadsDir(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		"workspace", "uploads")
 }
 
 // StoreDir is the per-(user, agent) secret store, kept OUTSIDE the
