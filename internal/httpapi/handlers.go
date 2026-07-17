@@ -346,6 +346,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
+		s.logf("chat: sync durable history failed: %v", syncErr)
+	}
 	writeJSON(w, http.StatusOK, completionResponse(id, model, content))
 }
 
@@ -492,6 +496,11 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID)
+	// Fold in any just-completed turn before reading, then serve the durable
+	// transcript (survives picoclaw's live-file rewrites across restarts).
+	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
+		s.logf("history: sync durable failed: %v", syncErr)
+	}
 	messages, err := history.Read(sessionsDir, sessionKey)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))

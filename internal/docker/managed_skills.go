@@ -7,22 +7,26 @@ import (
 	"path/filepath"
 )
 
-// managedSkillName is the single operator-managed skill directory bind-mounted
-// read-only into every container's workspace skills dir.
-const managedSkillName = "shared-content"
+// Operator-managed workspace content, bind-mounted read-only into every
+// container so the agent can neither alter it nor keep an edit past a restart.
+// Relative to the container-side ManagedSkillsDir:
+//   skills/<managedSkillName>/  -> workspace/skills/<managedSkillName> (guidance)
+//   memory/<managedMemoryFile>  -> workspace/memory/<managedMemoryFile> (recovery)
+const (
+	managedSkillRel  = "skills/shared-content"
+	managedMemoryRel = "memory/CONTEXT_RECOVERY.md"
+)
 
-//go:embed managed/skills
-var managedSkillsFS embed.FS
+//go:embed managed
+var managedFS embed.FS
 
-// materializeManagedSkills writes the embedded managed-skills tree into dst (the
+// materializeManagedContent writes the embedded managed tree into dst (the
 // container-side ManagedSkillsDir), overwriting any prior copy so the canonical
 // operator version is what gets bind-mounted, and chowns it to the agent user so
-// the read-only bind is readable by the non-root process. Because the source is
-// root-owned and mounted read-only, the agent can neither alter it nor keep any
-// edit past a restart.
-func materializeManagedSkills(dst, user string) error {
-	const root = "managed/skills"
-	err := fs.WalkDir(managedSkillsFS, root, func(p string, d fs.DirEntry, walkErr error) error {
+// the read-only binds are readable by the non-root process.
+func materializeManagedContent(dst, user string) error {
+	const root = "managed"
+	err := fs.WalkDir(managedFS, root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -34,7 +38,7 @@ func materializeManagedSkills(dst, user string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		b, err := managedSkillsFS.ReadFile(p)
+		b, err := managedFS.ReadFile(p)
 		if err != nil {
 			return err
 		}

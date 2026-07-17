@@ -226,19 +226,23 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		":" + mountDest + "/workspace/.shared/tenant:ro"
 	subsSharedMount := config.SubscriptionSharedFilesDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
 		":" + mountDest + "/workspace/.shared/subscription:ro"
-	// The operator-managed skill (guidance on where shared files/secrets are and
-	// the rule never to copy secrets) is bind-mounted READ-ONLY into the workspace
-	// skills dir. Its source is materialized once from the proxy's embedded copy;
-	// being a root-owned read-only bind, the agent can neither alter it nor keep
-	// any edit past a restart (the canonical copy is remounted every start).
+	// Operator-managed content bind-mounted READ-ONLY into the workspace: the
+	// shared-content skill (where shared files/secrets are + never copy secrets)
+	// and the context-recovery note (how to read the durable transcript back).
+	// Materialized once from the proxy's embedded copy; being a root-owned
+	// read-only bind, the agent can neither alter them nor keep an edit past a
+	// restart (the canonical copy is remounted every start).
 	m.managedOnce.Do(func() {
-		m.managedErr = materializeManagedSkills(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), m.cfg.PicoclawUser)
+		m.managedErr = materializeManagedContent(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), m.cfg.PicoclawUser)
 	})
 	if m.managedErr != nil {
-		return fmt.Errorf("materialize managed skills: %w", m.managedErr)
+		return fmt.Errorf("materialize managed content: %w", m.managedErr)
 	}
-	managedSkillMount := filepath.Join(config.ManagedSkillsDir(m.cfg.HostDataRoot), managedSkillName) +
-		":" + mountDest + "/workspace/skills/" + managedSkillName + ":ro"
+	managedBase := config.ManagedSkillsDir(m.cfg.HostDataRoot)
+	managedSkillMount := filepath.Join(managedBase, managedSkillRel) +
+		":" + mountDest + "/workspace/" + managedSkillRel + ":ro"
+	managedMemoryMount := filepath.Join(managedBase, managedMemoryRel) +
+		":" + mountDest + "/workspace/" + managedMemoryRel + ":ro"
 	env := []string{
 		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
 		"HOME=" + m.cfg.PicoclawHome,
@@ -256,7 +260,8 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds:   []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount, managedSkillMount},
+		Binds: []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount,
+			managedSkillMount, managedMemoryMount},
 		Network: m.cfg.Network,
 		Init:    true,
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sgelias/crab-shell-proxy/internal/config"
 	"github.com/sgelias/crab-shell-proxy/internal/docker"
+	"github.com/sgelias/crab-shell-proxy/internal/history"
 )
 
 // turnTimeout bounds a picoclaw turn once it is decoupled from the client
@@ -87,6 +88,13 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("stream: turn failed: %v", err)
+	}
+	// Fold the just-written turn into the durable transcript now — while the live
+	// file still holds it — so a later restart that rewrites the live file can't
+	// erase the history.
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
+		s.logf("stream: sync durable history failed: %v", syncErr)
 	}
 	if clientCtx.Err() == nil {
 		done()
