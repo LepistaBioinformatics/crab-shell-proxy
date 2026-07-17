@@ -80,6 +80,10 @@ func (f *fakeOrch) ListMedia(docker.WorkspaceKey) ([]docker.StoredMedia, error) 
 	return nil, nil
 }
 
+func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string) error {
+	return nil
+}
+
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }
 
 func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.WorkspaceKey, _ string) (docker.Target, error) {

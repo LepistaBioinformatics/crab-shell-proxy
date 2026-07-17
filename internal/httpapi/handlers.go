@@ -50,6 +50,8 @@ type Orchestrator interface {
 	StoreMedia(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
 	// ListMedia returns the files in the caller's workspace uploads dir.
 	ListMedia(key docker.WorkspaceKey) ([]docker.StoredMedia, error)
+	// DeleteMedia removes one uploaded file (by its stored filename).
+	DeleteMedia(key docker.WorkspaceKey, storedName string) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -79,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/secrets", s.handleSecretsDelete)
 	mux.HandleFunc("POST /v1/media", s.handleMediaPost)
 	mux.HandleFunc("GET /v1/media", s.handleMediaList)
+	mux.HandleFunc("DELETE /v1/media", s.handleMediaDelete)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }
@@ -719,6 +722,46 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"files": files})
+}
+
+// handleMediaDelete removes one uploaded file from the caller's workspace,
+// identified by its `path` (the "uploads/<file>" from the list). Authorized
+// like the upload/list.
+func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"path" query parameter is required`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	// The stored filename is the last path segment ("uploads/<uid>-<name>").
+	if err := s.Mgr.DeleteMedia(key, filepath.Base(path)); err != nil {
+		if errors.Is(err, docker.ErrMediaName) {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		s.logf("media: delete failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "path": path})
 }
 
 // mediaExtAllowed reports whether a filename's (lowercased) extension is in the

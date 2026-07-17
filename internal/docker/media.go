@@ -100,6 +100,26 @@ func mediaUID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// DeleteMedia removes one uploaded file (by its stored filename, i.e. the
+// uid-prefixed name from the list) from the caller's uploads dir. The name is
+// validated to a safe base name so it can never escape the dir. Missing file =
+// success (idempotent).
+func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
+	base := filepath.Base(storedName)
+	if base != storedName || base == "." || base == ".." ||
+		strings.Contains(base, "..") || !secretNameRe.MatchString(base) {
+		return ErrMediaName
+	}
+	full := filepath.Join(
+		config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
+		base,
+	)
+	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 var uidPrefixRe = regexp.MustCompile(`^[0-9a-f]{8}-`)
 
 // ListMedia returns the files currently in the caller's workspace uploads dir
