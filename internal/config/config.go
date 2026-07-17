@@ -341,6 +341,36 @@ func UploadsDir(root, tenantID, subsAccID, role, userAccID string) string {
 		"workspace", "uploads")
 }
 
+// TenantSharedFilesDir is the tenant-scope shared-files store, cascaded
+// read-only into every user container under the tenant:
+// <root>/tenants/<t>/shared/files.
+func TenantSharedFilesDir(root, tenantID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID), "shared", "files")
+}
+
+// TenantSharedSecretsDir is the tenant-scope shared-secret store (sink formats),
+// cascaded as env into every user container under the tenant:
+// <root>/tenants/<t>/shared/secrets.
+func TenantSharedSecretsDir(root, tenantID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID), "shared", "secrets")
+}
+
+// SubscriptionSharedFilesDir is the subscription-scope shared-files store,
+// cascaded read-only into every user container under the subscription:
+// <root>/tenants/<t>/subscriptions/<s>/shared/files.
+func SubscriptionSharedFilesDir(root, tenantID, subsAccID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"subscriptions", identity.SanitizeID(subsAccID), "shared", "files")
+}
+
+// SubscriptionSharedSecretsDir is the subscription-scope shared-secret store
+// (sink formats), cascaded as env into every user container under the
+// subscription: <root>/tenants/<t>/subscriptions/<s>/shared/secrets.
+func SubscriptionSharedSecretsDir(root, tenantID, subsAccID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"subscriptions", identity.SanitizeID(subsAccID), "shared", "secrets")
+}
+
 // StoreDir is the per-(user, agent) secret store, kept OUTSIDE the
 // tenant/subscription tree so the same secret reaches every workspace of that
 // pair (CTX-AC-03): <root>/user-secrets/<u>/<role>. Keyed only by the user
@@ -348,6 +378,26 @@ func UploadsDir(root, tenantID, subsAccID, role, userAccID string) string {
 func StoreDir(root, userAccID, role string) string {
 	return filepath.Join(root, "user-secrets",
 		identity.SanitizeID(userAccID), identity.SanitizeID(role))
+}
+
+// EffectiveSecretsDir is the per-(user, agent) MERGED secret view bind-mounted
+// read-only at workspace/.secrets: tenant- and subscription-shared secrets
+// (dotenv/json) cascaded with the user's own store on top (user wins). Keyed by
+// user + role like StoreDir so the same merge reaches every workspace of the
+// pair: <root>/effective-secrets/<u>/<role>. Rebuilt whenever a user or shared
+// secret changes so shared secrets are delivered live (via the mount) without a
+// container recreate.
+func EffectiveSecretsDir(root, userAccID, role string) string {
+	return filepath.Join(root, "effective-secrets",
+		identity.SanitizeID(userAccID), identity.SanitizeID(role))
+}
+
+// ManagedSkillsDir is the operator-managed, read-only skills root the proxy
+// materializes from its embedded copy and bind-mounts into each container's
+// workspace skills dir. It lives outside the tenant tree (shared, static
+// content) at <root>/managed-skills.
+func ManagedSkillsDir(root string) string {
+	return filepath.Join(root, "managed-skills")
 }
 
 // WorkspaceSeed is the allowlist of agent template workspace files copied into a

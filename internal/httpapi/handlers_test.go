@@ -37,6 +37,18 @@ type fakeOrch struct {
 	deletes    []secretWrite
 	restarts   []docker.WorkspaceKey
 	listResult docker.SecretNames
+	memory     string
+
+	// admin-shared-content recording + canned results.
+	sharedFiles     []docker.FileMeta
+	userFiles       []docker.FileMeta
+	users           []docker.UserRef
+	tenants         []string
+	tenantSubs      []string
+	sharedWrites    []docker.Scope
+	sharedDeletes   []docker.Scope
+	userFileDeletes []docker.WorkspaceKey
+	restartScopes   []docker.Scope
 }
 
 type secretWrite struct {
@@ -81,6 +93,83 @@ func (f *fakeOrch) ListMedia(docker.WorkspaceKey) ([]docker.StoredMedia, error) 
 }
 
 func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string) error {
+	return nil
+}
+
+func (f *fakeOrch) OpenMedia(docker.WorkspaceKey, string) (io.ReadCloser, string, error) {
+	return io.NopCloser(strings.NewReader("data")), "file.txt", nil
+}
+
+func (f *fakeOrch) ReadMemory(docker.WorkspaceKey) (string, error) {
+	return f.memory, nil
+}
+
+func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, content string) error {
+	f.memory = content
+	return nil
+}
+
+// --- admin-shared-content fakes: record calls, return canned results ---
+
+func (f *fakeOrch) ListSharedFiles(docker.Scope) ([]docker.FileMeta, error) {
+	return f.sharedFiles, nil
+}
+
+func (f *fakeOrch) WriteSharedFile(scope docker.Scope, rawName string, r io.Reader) (docker.StoredMedia, error) {
+	n, _ := io.Copy(io.Discard, r)
+	f.sharedWrites = append(f.sharedWrites, scope)
+	return docker.StoredMedia{Path: rawName, Name: rawName, Size: n}, nil
+}
+
+func (f *fakeOrch) ReadSharedFile(_ docker.Scope, name string) (io.ReadCloser, docker.FileMeta, error) {
+	return io.NopCloser(strings.NewReader("bytes")), docker.FileMeta{Name: name, Size: 5}, nil
+}
+
+func (f *fakeOrch) DeleteSharedFile(scope docker.Scope, _ string) error {
+	f.sharedDeletes = append(f.sharedDeletes, scope)
+	return nil
+}
+
+func (f *fakeOrch) WriteSharedSecret(scope docker.Scope, format, _, _ string) error {
+	if format != docker.FormatDotenv && format != docker.FormatJSON {
+		return docker.ErrInvalidSecretName
+	}
+	f.sharedWrites = append(f.sharedWrites, scope)
+	return nil
+}
+
+func (f *fakeOrch) ListSharedSecrets(docker.Scope) (docker.SecretNames, error) {
+	return f.listResult, nil
+}
+
+func (f *fakeOrch) DeleteSharedSecret(scope docker.Scope, _, _ string) error {
+	f.sharedDeletes = append(f.sharedDeletes, scope)
+	return nil
+}
+
+func (f *fakeOrch) ListTenants() ([]string, error) {
+	return f.tenants, nil
+}
+
+func (f *fakeOrch) ListTenantSubscriptions(_ string) ([]string, error) {
+	return f.tenantSubs, nil
+}
+
+func (f *fakeOrch) ListSubscriptionUsers(_, _ string) ([]docker.UserRef, error) {
+	return f.users, nil
+}
+
+func (f *fakeOrch) ListUserFiles(docker.WorkspaceKey) ([]docker.FileMeta, error) {
+	return f.userFiles, nil
+}
+
+func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _ string) error {
+	f.userFileDeletes = append(f.userFileDeletes, key)
+	return nil
+}
+
+func (f *fakeOrch) RestartScope(scope docker.Scope) error {
+	f.restartScopes = append(f.restartScopes, scope)
 	return nil
 }
 

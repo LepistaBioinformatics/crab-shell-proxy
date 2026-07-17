@@ -71,6 +71,11 @@ type Manager struct {
 
 	mu   sync.Mutex
 	keys map[string]*keyState
+
+	// The embedded operator-managed skills are materialized once per process to
+	// the read-only bind source shared by every container.
+	managedOnce sync.Once
+	managedErr  error
 }
 
 // NewManager builds a Manager. If health is nil, an HTTP /health poller is used.
@@ -185,12 +190,9 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	mountDest := m.cfg.PicoclawHome + "/.picoclaw"
 	// The per-(user, agent) secret store is bind-mounted READ-ONLY into every
 	// container of that pair (AC-10): the non-root agent can read the generic
-	// sinks (.env / secrets.json / secrets/) but the kernel blocks any write,
-	// delete or replace. The store dir MUST exist before create or the mount
-	// source is missing; MkdirAll it (container-side view) and chown it so the
-	// non-root agent can read the files (CTX-AC-03 persistence is free — the same
-	// host dir is mounted into every workspace of the pair).
-	storeHost := config.StoreDir(m.cfg.HostDataRoot, key.UserAccID, key.Role)
+	// sinks (.env / secrets.json / secrets/) but the kernel blocks any write.
+	// Ensure the per-user store exists (it is the source of the effective merge)
+	// and chown it so the non-root agent can read the files.
 	storeContainer := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
 	if err := os.MkdirAll(storeContainer, 0o700); err != nil {
 		return fmt.Errorf("create secret store dir: %w", err)
@@ -198,15 +200,54 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	if err := chownTree(storeContainer, m.cfg.PicoclawUser); err != nil {
 		return fmt.Errorf("chown secret store dir: %w", err)
 	}
-	secretsMount := storeHost + ":" + mountDest + "/workspace/.secrets:ro"
+	// Mount the EFFECTIVE secret view (shared cascade + user's own, user wins) at
+	// .secrets, so shared secrets arrive as sink files like the user's own — live
+	// via the mount, no env baking, no recreate needed (FR-5).
+	if _, err := m.syncEffectiveSecrets(key); err != nil {
+		return err
+	}
+	effHost := config.EffectiveSecretsDir(m.cfg.HostDataRoot, key.UserAccID, key.Role)
+	secretsMount := effHost + ":" + mountDest + "/workspace/.secrets:ro"
+	// Cascade the tenant- and subscription-scope shared files READ-ONLY into the
+	// workspace (FR-4/NFR-3). Ensure the container-side dirs exist and are
+	// readable by the non-root agent, mirroring the secret store above, so the
+	// bind source is always present (they are normally pre-created on scaffold).
+	tenantSharedContainer := config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID)
+	subsSharedContainer := config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
+	for _, d := range []string{tenantSharedContainer, subsSharedContainer} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("create shared files dir: %w", err)
+		}
+		if err := chownTree(d, m.cfg.PicoclawUser); err != nil {
+			return fmt.Errorf("chown shared files dir: %w", err)
+		}
+	}
+	tenantSharedMount := config.TenantSharedFilesDir(m.cfg.HostDataRoot, key.TenantID) +
+		":" + mountDest + "/workspace/.shared/tenant:ro"
+	subsSharedMount := config.SubscriptionSharedFilesDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
+		":" + mountDest + "/workspace/.shared/subscription:ro"
+	// The operator-managed skill (guidance on where shared files/secrets are and
+	// the rule never to copy secrets) is bind-mounted READ-ONLY into the workspace
+	// skills dir. Its source is materialized once from the proxy's embedded copy;
+	// being a root-owned read-only bind, the agent can neither alter it nor keep
+	// any edit past a restart (the canonical copy is remounted every start).
+	m.managedOnce.Do(func() {
+		m.managedErr = materializeManagedSkills(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), m.cfg.PicoclawUser)
+	})
+	if m.managedErr != nil {
+		return fmt.Errorf("materialize managed skills: %w", m.managedErr)
+	}
+	managedSkillMount := filepath.Join(config.ManagedSkillsDir(m.cfg.HostDataRoot), managedSkillName) +
+		":" + mountDest + "/workspace/skills/" + managedSkillName + ":ro"
+	env := []string{
+		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
+		"HOME=" + m.cfg.PicoclawHome,
+	}
 	spec := CreateSpec{
 		Name:  name,
 		Image: m.cfg.PicoclawImage,
 		User:  m.cfg.PicoclawUser,
-		Env: []string{
-			"PICOCLAW_GATEWAY_HOST=0.0.0.0",
-			"HOME=" + m.cfg.PicoclawHome,
-		},
+		Env:   env,
 		Labels: map[string]string{
 			LabelManaged:      "true",
 			LabelAgent:        key.Role,
@@ -215,7 +256,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds:   []string{hostDir + ":" + mountDest, secretsMount},
+		Binds:   []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount, managedSkillMount},
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -261,11 +302,23 @@ func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
 	dir := config.SubscriptionRoot(m.cfg.ContainerDataRoot, tenantID, subsAccID)
 	_, statErr := os.Stat(dir)
 	existed := statErr == nil
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return false, err
+	// Create the subscription root plus the tenant-scope and subscription-scope
+	// shared dirs, so the cascade bind sources always exist (empty) before any
+	// container is created (design "Both created (empty) on scaffold").
+	dirs := []string{
+		dir,
+		config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, tenantID),
+		config.TenantSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID),
+		config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+		config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 	}
-	if err := chownTree(dir, m.cfg.PicoclawUser); err != nil {
-		return false, err
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return false, err
+		}
+		if err := chownTree(d, m.cfg.PicoclawUser); err != nil {
+			return false, err
+		}
 	}
 	return !existed, nil
 }
@@ -355,7 +408,10 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 			}
 		}
 	}
-	return nil
+	// Refresh the mounted effective view so the new secret is picked up on the
+	// caller's next stop/start (RestartWorkspace).
+	_, err := m.syncEffectiveSecrets(key)
+	return err
 }
 
 // ListSecrets returns the set secret names per format for the caller's store,
@@ -376,7 +432,11 @@ func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
 	if err := deleteSecret(storeDir, secPath, m.cfg.PicoclawUser, format, name); err != nil {
 		return err
 	}
-	return chownTree(storeDir, m.cfg.PicoclawUser)
+	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
+		return err
+	}
+	_, err := m.syncEffectiveSecrets(key)
+	return err
 }
 
 // workspaceSecurityPath returns the .security.yml to validate/merge native

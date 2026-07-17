@@ -39,14 +39,19 @@ type jsonlEntry struct {
 // under sessionsDir (<per-user-data>/workspace/sessions). Missing dir or file
 // yields an empty slice, never an error (parity with server.js).
 func Read(sessionsDir, sessionKey string) ([]Message, error) {
-	basename := findMeta(sessionsDir, sessionKey)
+	basename := FindSessionFile(sessionsDir, sessionKey)
 	if basename == "" {
 		return []Message{}, nil
 	}
 	return readMessages(sessionsDir, basename)
 }
 
-func findMeta(sessionsDir, sessionKey string) string {
+// FindSessionFile resolves the picoclaw on-disk file basename (without
+// extension) for the conversation whose session key is sessionKey, by scanning
+// the *.meta.json files under sessionsDir for the scope.values.chat marker
+// picoclaw wrote. It returns "" when the sessions dir is missing or no file
+// matches yet (picoclaw hasn't persisted the transcript).
+func FindSessionFile(sessionsDir, sessionKey string) string {
 	marker := "direct:pico:" + sessionKey
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {

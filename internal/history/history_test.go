@@ -48,6 +48,26 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 	}
 }
 
+func TestFindSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	key := "abc123def456"
+
+	writeFile(t, dir, "sk_v1_match.meta.json",
+		`{"scope":{"values":{"chat":"direct:pico:`+key+`"}}}`)
+	writeFile(t, dir, "sk_v1_other.meta.json",
+		`{"scope":{"values":{"chat":"direct:pico:zzzzzzzzzzzz"}}}`)
+
+	if got := FindSessionFile(dir, key); got != "sk_v1_match" {
+		t.Errorf("FindSessionFile = %q, want %q", got, "sk_v1_match")
+	}
+	if got := FindSessionFile(dir, "nomatch"); got != "" {
+		t.Errorf("FindSessionFile (no match) = %q, want empty", got)
+	}
+	if got := FindSessionFile(filepath.Join(dir, "does-not-exist"), key); got != "" {
+		t.Errorf("FindSessionFile (missing dir) = %q, want empty", got)
+	}
+}
+
 func TestReadMissingDir(t *testing.T) {
 	msgs, err := Read(filepath.Join(t.TempDir(), "does-not-exist"), "whatever")
 	if err != nil {

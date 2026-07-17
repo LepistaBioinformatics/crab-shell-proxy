@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,11 @@ import (
 	"github.com/sgelias/crab-shell-proxy/internal/config"
 	"github.com/sgelias/crab-shell-proxy/internal/docker"
 )
+
+// turnTimeout bounds a picoclaw turn once it is decoupled from the client
+// request. It must be generous enough for a long tool-using turn, but stops a
+// stuck turn from running forever after the client has gone.
+const turnTimeout = 10 * time.Minute
 
 // streamTurn serves a streaming (SSE) chat completion.
 //
@@ -52,18 +58,37 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	// Open the stream immediately so the connection survives the cold start.
 	writeChunk(map[string]any{"role": "assistant", "content": ""}, nil)
 
-	tgt, err := s.Mgr.EnsureRunning(r.Context(), agent, key, ownerEmail)
+	// The turn must complete even if the client disconnects (page reload /
+	// navigation). Tying it to r.Context() would cancel the picoclaw WebSocket
+	// mid-turn on disconnect, and picoclaw would persist a truncated transcript
+	// (the "initial messages disappear after reload" bug). So run it on a
+	// background context with its own bound; we only stop *writing* to the client
+	// once it goes away, while the turn keeps draining to completion.
+	turnCtx, cancel := context.WithTimeout(context.Background(), turnTimeout)
+	defer cancel()
+	clientCtx := r.Context()
+
+	tgt, err := s.Mgr.EnsureRunning(turnCtx, agent, key, ownerEmail)
 	if err != nil {
 		s.logf("stream: ensure running failed: %v", err)
-		done()
+		if clientCtx.Err() == nil {
+			done()
+		}
 		return
 	}
 
-	_, err = s.Pico.RunTurn(r.Context(), tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent,
-		func(delta string) { writeChunk(map[string]any{"content": delta}, nil) })
+	_, err = s.Pico.RunTurn(turnCtx, tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent,
+		func(delta string) {
+			if clientCtx.Err() != nil {
+				return // client gone — keep draining so picoclaw finishes its write
+			}
+			writeChunk(map[string]any{"content": delta}, nil)
+		})
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("stream: turn failed: %v", err)
 	}
-	done()
+	if clientCtx.Err() == nil {
+		done()
+	}
 }

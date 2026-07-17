@@ -1,8 +1,6 @@
 package docker
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +15,9 @@ import (
 // ErrMediaName is returned when an uploaded filename can't be sanitized into a
 // safe, non-empty name.
 var ErrMediaName = errors.New("invalid file name")
+
+// ErrMediaNotFound is returned when a requested upload doesn't exist.
+var ErrMediaNotFound = errors.New("file not found")
 
 // StoredMedia is the result of a successful upload: the workspace-relative path
 // the agent can open, plus the stored name and byte size.
@@ -44,11 +45,22 @@ func sanitizeFilename(raw string) (string, error) {
 	return base, nil
 }
 
+// safeStoredName validates a stored filename (from list/delete/download) as a
+// bare, traversal-free base name.
+func safeStoredName(name string) (string, error) {
+	base := filepath.Base(name)
+	if base != name || base == "." || base == ".." ||
+		strings.Contains(base, "..") || !secretNameRe.MatchString(base) {
+		return "", ErrMediaName
+	}
+	return base, nil
+}
+
 // StoreMedia writes an uploaded file into the caller's agent-readable workspace
-// uploads dir under a sanitized, uid-prefixed (unique) name, chowned to the
-// picoclaw user. The size cap and type allowlist are enforced by the caller
-// (the handler) before this is reached. Returns the "uploads/<file>" path the
-// turn references.
+// uploads dir, keyed by the sanitized filename so re-uploading the same name
+// OVERWRITES (one file per name — no accumulating duplicates), chowned to the
+// picoclaw user. The size cap + type allowlist are enforced by the caller
+// before this is reached. Returns the "uploads/<name>" path the turn references.
 func (m *Manager) StoreMedia(key WorkspaceKey, rawName string, r io.Reader) (StoredMedia, error) {
 	name, err := sanitizeFilename(rawName)
 	if err != nil {
@@ -59,14 +71,9 @@ func (m *Manager) StoreMedia(key WorkspaceKey, rawName string, r io.Reader) (Sto
 		return StoredMedia{}, fmt.Errorf("mkdir uploads: %w", err)
 	}
 
-	uid, err := mediaUID()
-	if err != nil {
-		return StoredMedia{}, err
-	}
-	stored := uid + "-" + name
-	full := filepath.Join(dir, stored)
-
-	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	full := filepath.Join(dir, name)
+	// O_TRUNC: a re-upload of the same name replaces the previous file.
+	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return StoredMedia{}, fmt.Errorf("create upload: %w", err)
 	}
@@ -86,29 +93,18 @@ func (m *Manager) StoreMedia(key WorkspaceKey, rawName string, r io.Reader) (Sto
 	}
 
 	return StoredMedia{
-		Path: filepath.ToSlash(filepath.Join("uploads", stored)),
+		Path: filepath.ToSlash(filepath.Join("uploads", name)),
 		Name: name,
 		Size: n,
 	}, nil
 }
 
-func mediaUID() (string, error) {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// DeleteMedia removes one uploaded file (by its stored filename, i.e. the
-// uid-prefixed name from the list) from the caller's uploads dir. The name is
-// validated to a safe base name so it can never escape the dir. Missing file =
-// success (idempotent).
+// DeleteMedia removes one uploaded file (by its stored filename from the list)
+// from the caller's uploads dir. Missing file = success (idempotent).
 func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
-	base := filepath.Base(storedName)
-	if base != storedName || base == "." || base == ".." ||
-		strings.Contains(base, "..") || !secretNameRe.MatchString(base) {
-		return ErrMediaName
+	base, err := safeStoredName(storedName)
+	if err != nil {
+		return err
 	}
 	full := filepath.Join(
 		config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
@@ -120,11 +116,34 @@ func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
 	return nil
 }
 
+// OpenMedia opens one uploaded file for download and returns the reader plus its
+// display name. The caller must Close the reader.
+func (m *Manager) OpenMedia(key WorkspaceKey, storedName string) (io.ReadCloser, string, error) {
+	base, err := safeStoredName(storedName)
+	if err != nil {
+		return nil, "", err
+	}
+	full := filepath.Join(
+		config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
+		base,
+	)
+	f, err := os.Open(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", ErrMediaNotFound
+		}
+		return nil, "", err
+	}
+	return f, uidPrefixRe.ReplaceAllString(base, ""), nil
+}
+
+// Legacy uploads (before overwrite-by-name) carried an 8-hex uid prefix; strip
+// it for display so those files show a clean name too.
 var uidPrefixRe = regexp.MustCompile(`^[0-9a-f]{8}-`)
 
 // ListMedia returns the files currently in the caller's workspace uploads dir
-// (never their contents). Name drops the storage uid prefix for display; Path
-// is the workspace-relative path the turn references. An absent dir is empty.
+// (never their contents). Path is the workspace-relative path the turn
+// references; Name is the display name. An absent dir is empty.
 func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
 	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	entries, err := os.ReadDir(dir)

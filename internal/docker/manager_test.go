@@ -174,15 +174,19 @@ func TestCreateAddsReadOnlySecretsBind(t *testing.T) {
 	if _, err := m.EnsureRunning(context.Background(), agent, wk("hash1"), "test@x"); err != nil {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
-	// The per-(user, agent) store is bind-mounted READ-ONLY under the workspace.
-	want := "/host/data/user-secrets/hash1/alpha:/data/.picoclaw/workspace/.secrets:ro"
+	// The per-(user, agent) EFFECTIVE secret view (shared cascade + user's own) is
+	// bind-mounted READ-ONLY under the workspace.
+	want := "/host/data/effective-secrets/hash1/alpha:/data/.picoclaw/workspace/.secrets:ro"
 	if len(f.lastSpec.Binds) < 2 || f.lastSpec.Binds[1] != want {
 		t.Errorf("secrets bind = %v, want [_, %q]", f.lastSpec.Binds, want)
 	}
-	// The store dir (container-side view) is ensured before create so the mount
-	// source exists.
+	// The store dir (container-side view) is ensured before create so the merge
+	// source exists, and the effective view is materialized as the mount source.
 	if _, err := os.Stat(config.StoreDir(m.cfg.ContainerDataRoot, "hash1", "alpha")); err != nil {
 		t.Errorf("store dir not ensured before create: %v", err)
+	}
+	if _, err := os.Stat(config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, "hash1", "alpha")); err != nil {
+		t.Errorf("effective secrets dir not materialized before create: %v", err)
 	}
 }
 

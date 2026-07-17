@@ -52,6 +52,41 @@ type Orchestrator interface {
 	ListMedia(key docker.WorkspaceKey) ([]docker.StoredMedia, error)
 	// DeleteMedia removes one uploaded file (by its stored filename).
 	DeleteMedia(key docker.WorkspaceKey, storedName string) error
+	// OpenMedia opens one uploaded file for download (reader + display name).
+	OpenMedia(key docker.WorkspaceKey, storedName string) (io.ReadCloser, string, error)
+	// ReadMemory returns the caller's workspace MEMORY_CUSTOM.md (empty if unset).
+	ReadMemory(key docker.WorkspaceKey) (string, error)
+	// WriteMemory replaces the caller's workspace MEMORY_CUSTOM.md.
+	WriteMemory(key docker.WorkspaceKey, content string) error
+
+	// --- admin-shared-content (authority-over-target; gated in internal/authz) ---
+
+	// ListSharedFiles returns the metadata (never bytes) of a scope's shared files.
+	ListSharedFiles(scope docker.Scope) ([]docker.FileMeta, error)
+	// WriteSharedFile stores an uploaded shared file at a scope (latest-write-wins).
+	WriteSharedFile(scope docker.Scope, rawName string, r io.Reader) (docker.StoredMedia, error)
+	// ReadSharedFile opens a scope's shared file for download plus its metadata.
+	ReadSharedFile(scope docker.Scope, name string) (io.ReadCloser, docker.FileMeta, error)
+	// DeleteSharedFile removes one shared file from a scope.
+	DeleteSharedFile(scope docker.Scope, name string) error
+	// WriteSharedSecret upserts one shared secret at a scope (dotenv/json only).
+	WriteSharedSecret(scope docker.Scope, format, name, value string) error
+	// ListSharedSecrets returns a scope's shared-secret names per format (never values).
+	ListSharedSecrets(scope docker.Scope) (docker.SecretNames, error)
+	// DeleteSharedSecret removes one shared secret from a scope.
+	DeleteSharedSecret(scope docker.Scope, format, name string) error
+	// ListTenants returns the tenant ids present on disk (scope discovery, Instance).
+	ListTenants() ([]string, error)
+	// ListTenantSubscriptions returns the subscription ids under a tenant on disk.
+	ListTenantSubscriptions(tenantID string) ([]string, error)
+	// ListSubscriptionUsers enumerates the end users under a subscription.
+	ListSubscriptionUsers(tenantID, subsAccID string) ([]docker.UserRef, error)
+	// ListUserFiles returns a user's private-file metadata only (no bytes — FR-7).
+	ListUserFiles(key docker.WorkspaceKey) ([]docker.FileMeta, error)
+	// DeleteUserFile removes one of a user's private files (never reads it — FR-7).
+	DeleteUserFile(key docker.WorkspaceKey, name string) error
+	// RestartScope best-effort recreates running containers under a scope (NFR-4).
+	RestartScope(scope docker.Scope) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -76,12 +111,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/sessions/history", s.handleSessionsHistory)
+	mux.HandleFunc("GET /v1/sessions/resolve", s.handleSessionsResolve)
 	mux.HandleFunc("POST /v1/secrets", s.handleSecretsPost)
 	mux.HandleFunc("GET /v1/secrets", s.handleSecretsList)
 	mux.HandleFunc("DELETE /v1/secrets", s.handleSecretsDelete)
 	mux.HandleFunc("POST /v1/media", s.handleMediaPost)
 	mux.HandleFunc("GET /v1/media", s.handleMediaList)
 	mux.HandleFunc("DELETE /v1/media", s.handleMediaDelete)
+	mux.HandleFunc("GET /v1/memory", s.handleMemoryGet)
+	mux.HandleFunc("PUT /v1/memory", s.handleMemoryPut)
+	// admin-shared-content: authority-over-target ops, gated in-proxy via
+	// internal/authz. There is deliberately NO users/files/content route and no
+	// user-file write route (FR-7 privacy invariant).
+	mux.HandleFunc("GET /v1/admin/scopes", s.handleAdminScopes)
+	mux.HandleFunc("GET /v1/admin/shared", s.handleAdminSharedList)
+	mux.HandleFunc("POST /v1/admin/shared", s.handleAdminSharedPost)
+	mux.HandleFunc("GET /v1/admin/shared/content", s.handleAdminSharedContent)
+	mux.HandleFunc("DELETE /v1/admin/shared", s.handleAdminSharedDelete)
+	mux.HandleFunc("POST /v1/admin/shared-secrets", s.handleAdminSharedSecretsPost)
+	mux.HandleFunc("GET /v1/admin/shared-secrets", s.handleAdminSharedSecretsList)
+	mux.HandleFunc("DELETE /v1/admin/shared-secrets", s.handleAdminSharedSecretsDelete)
+	mux.HandleFunc("GET /v1/admin/users", s.handleAdminUsersList)
+	mux.HandleFunc("GET /v1/admin/users/files", s.handleAdminUserFilesList)
+	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }
@@ -277,13 +329,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tgt, err := s.Mgr.EnsureRunning(r.Context(), agent, key, ident.Email)
+	// Decoupled from r.Context() so a client disconnect can't cut the picoclaw
+	// turn mid-write and leave a truncated transcript (see streamTurn).
+	turnCtx, cancel := context.WithTimeout(context.Background(), turnTimeout)
+	defer cancel()
+	tgt, err := s.Mgr.EnsureRunning(turnCtx, agent, key, ident.Email)
 	if err != nil {
 		s.logf("ensure running failed: %v", err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	content, err := s.Pico.RunTurn(r.Context(), tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent, nil)
+	content, err := s.Pico.RunTurn(turnCtx, tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent, nil)
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("chat: turn failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
@@ -442,6 +498,49 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
+}
+
+// handleSessionsResolve resolves the session identifiers behind a conversation:
+// the deterministic sessionKey (known immediately) and picoclaw's on-disk file
+// basename (sessionFile, "" until picoclaw persists the transcript). Same
+// resolveAgent + profile + account-switching guard + params as
+// handleSessionsHistory; read-only metadata, never a transcript.
+func (s *Server) handleSessionsResolve(w http.ResponseWriter, r *http.Request) {
+	agent, status, msg := s.resolveAgent(r)
+	if status != 0 {
+		writeJSON(w, status, errBody(msg))
+		return
+	}
+	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized,
+			errBody("missing or invalid "+identity.ProfileHeader+" header"))
+		return
+	}
+	sessionKey := identity.SessionKey(ident.AccID, r.URL.Query().Get("session_id"))
+	if sessionKey == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"session_id" query parameter is required`))
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	// Account-switching guard (full authz filtering is deferred — CTX-TSW-09).
+	if ident.Profile.AccID == subsAccID {
+		writeJSON(w, http.StatusForbidden,
+			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
+		return
+	}
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID)
+	sessionFile := history.FindSessionFile(sessionsDir, sessionKey)
+	writeJSON(w, http.StatusOK, map[string]any{"sessionKey": sessionKey, "sessionFile": sessionFile})
 }
 
 // secretRequest is the POST /v1/secrets body: the targeted subscription, the
@@ -715,6 +814,12 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// GET /v1/media?path=uploads/<file> downloads that file; without `path` it
+	// lists the uploads dir.
+	if path := r.URL.Query().Get("path"); path != "" {
+		s.serveMediaFile(w, key, agent, ident, path)
+		return
+	}
 	files, err := s.Mgr.ListMedia(key)
 	if err != nil {
 		s.logf("media: list failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
@@ -722,6 +827,27 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"files": files})
+}
+
+// serveMediaFile streams one uploaded file back as a download attachment.
+func (s *Server) serveMediaFile(w http.ResponseWriter, key docker.WorkspaceKey, agent config.Agent, ident identity.Identity, path string) {
+	rc, display, err := s.Mgr.OpenMedia(key, filepath.Base(path))
+	if err != nil {
+		switch {
+		case errors.Is(err, docker.ErrMediaName):
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+		case errors.Is(err, docker.ErrMediaNotFound):
+			writeJSON(w, http.StatusNotFound, errBody("file not found"))
+		default:
+			s.logf("media: open failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+			writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		}
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+display+`"`)
+	_, _ = io.Copy(w, rc)
 }
 
 // handleMediaDelete removes one uploaded file from the caller's workspace,
@@ -762,6 +888,87 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "path": path})
+}
+
+// memoryMaxBytes bounds the user-editable workspace memory document so a single
+// PUT can't write an unbounded file into the workspace.
+const memoryMaxBytes = 256 << 10 // 256 KiB
+
+// handleMemoryGet returns the caller's workspace MEMORY_CUSTOM.md, authorized
+// with the same write chain as media (a read-only member can't edit memory, so
+// the editor is gated the same as the files panel). An unset file reads as "".
+func (s *Server) handleMemoryGet(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	content, err := s.Mgr.ReadMemory(key)
+	if err != nil {
+		s.logf("memory: read failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": content})
+}
+
+// handleMemoryPut replaces the caller's workspace MEMORY_CUSTOM.md. No restart:
+// the agent reads the file at turn time, so the new content takes effect on the
+// next message without re-provisioning the container.
+func (s *Server) handleMemoryPut(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TenantID  string `json:"tenant_id"`
+		SubsAccID string `json:"subs_acc_id"`
+		Content   string `json:"content"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, memoryMaxBytes+(1<<10))).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body (or content exceeds the size limit)"))
+		return
+	}
+	if len(req.Content) > memoryMaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge,
+			errBody(fmt.Sprintf("content exceeds the %d-byte limit", memoryMaxBytes)))
+		return
+	}
+	tenantID, err := uuid.Parse(req.TenantID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(req.SubsAccID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.WriteMemory(key, req.Content); err != nil {
+		s.logf("memory: write failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	s.logf("memory: wrote svc=%s tenant=%s subs=%s user=%s bytes=%d",
+		agent.Key, tenantID, subsAccID, ident.AccID, len(req.Content))
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 // mediaExtAllowed reports whether a filename's (lowercased) extension is in the
