@@ -99,3 +99,36 @@ func mediaUID() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+var uidPrefixRe = regexp.MustCompile(`^[0-9a-f]{8}-`)
+
+// ListMedia returns the files currently in the caller's workspace uploads dir
+// (never their contents). Name drops the storage uid prefix for display; Path
+// is the workspace-relative path the turn references. An absent dir is empty.
+func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
+	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []StoredMedia{}, nil
+		}
+		return nil, err
+	}
+	out := make([]StoredMedia, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		stored := e.Name()
+		out = append(out, StoredMedia{
+			Path: filepath.ToSlash(filepath.Join("uploads", stored)),
+			Name: uidPrefixRe.ReplaceAllString(stored, ""),
+			Size: info.Size(),
+		})
+	}
+	return out, nil
+}

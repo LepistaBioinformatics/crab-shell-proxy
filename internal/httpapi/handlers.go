@@ -48,6 +48,8 @@ type Orchestrator interface {
 	// StoreMedia writes an uploaded file into the caller's workspace uploads
 	// dir and returns its workspace-relative path.
 	StoreMedia(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
+	// ListMedia returns the files in the caller's workspace uploads dir.
+	ListMedia(key docker.WorkspaceKey) ([]docker.StoredMedia, error)
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -76,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/secrets", s.handleSecretsList)
 	mux.HandleFunc("DELETE /v1/secrets", s.handleSecretsDelete)
 	mux.HandleFunc("POST /v1/media", s.handleMediaPost)
+	mux.HandleFunc("GET /v1/media", s.handleMediaList)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }
@@ -686,6 +689,36 @@ func (s *Server) handleMediaPost(w http.ResponseWriter, r *http.Request) {
 	s.logf("media: stored svc=%s tenant=%s subs=%s user=%s path=%s size=%d",
 		agent.Key, tenantID, subsAccID, ident.AccID, stored.Path, stored.Size)
 	writeJSON(w, http.StatusOK, stored)
+}
+
+// handleMediaList returns the files in the caller's workspace uploads dir
+// (names + sizes, never contents), authorized like the upload.
+func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return
+	}
+	files, err := s.Mgr.ListMedia(key)
+	if err != nil {
+		s.logf("media: list failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
 
 // mediaExtAllowed reports whether a filename's (lowercased) extension is in the

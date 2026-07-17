@@ -76,6 +76,10 @@ func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, rawName string, r io.Reader
 	return docker.StoredMedia{Path: "uploads/test-" + rawName, Name: rawName, Size: n}, nil
 }
 
+func (f *fakeOrch) ListMedia(docker.WorkspaceKey) ([]docker.StoredMedia, error) {
+	return nil, nil
+}
+
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }
 
 func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.WorkspaceKey, _ string) (docker.Target, error) {
