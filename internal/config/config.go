@@ -248,7 +248,18 @@ func (c *Config) applyDefaults() {
 		c.MediaMaxBytes = 10 << 20 // 10 MiB
 	}
 	if len(c.MediaAllowedExts) == 0 {
-		c.MediaAllowedExts = []string{"png", "jpg", "jpeg", "webp", "gif", "pdf", "txt", "md", "csv"}
+		c.MediaAllowedExts = []string{
+			// images
+			"png", "jpg", "jpeg", "webp", "gif",
+			// documents (incl. MS Word + OpenDocument)
+			"pdf", "txt", "md", "csv", "doc", "docx", "odt",
+			// spreadsheets (MS Excel + OpenDocument)
+			"xls", "xlsx", "ods",
+			// presentations (MS PowerPoint + OpenDocument)
+			"ppt", "pptx", "odp",
+			// archives
+			"zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar",
+		}
 	}
 }
 
