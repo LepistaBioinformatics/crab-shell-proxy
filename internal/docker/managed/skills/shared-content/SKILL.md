@@ -1,6 +1,6 @@
 ---
 name: shared-content
-description: Where operator-provided shared files and secrets live in this workspace, how to read them, and the rule to never copy secrets elsewhere. Consult before using any shared file or secret.
+description: Where operator-provided shared files and secrets and the user's own custom memory notes live in this workspace, how to read them, and the rule to never copy secrets elsewhere. Consult before using any shared file or secret, and re-read the user's custom memory when it is relevant.
 ---
 
 # Shared content: files and secrets
@@ -20,6 +20,24 @@ Cascaded from the levels above you, most-specific last:
 They are mounted **read-only**: read them like any workspace file (open, read,
 reference by path). You cannot modify, rename, or delete them. If you need a
 changed version, ask a manager — do not attempt to write there.
+
+## User custom memory (`workspace/memory/MEMORY_CUSTOM.md`)
+
+The user maintains their own standing notes for you at
+`workspace/memory/MEMORY_CUSTOM.md` — preferences, context, and instructions they
+want you to keep in mind. It sits in your `workspace/memory/` dir alongside your
+own memory. It may be absent if the user hasn't written anything yet.
+
+**This file changes frequently** — the user edits it directly, at any time,
+between turns. So:
+
+- **Re-read the current file** whenever it's relevant to the task. Do **not**
+  rely on something you read in an earlier turn or session, and do not cache its
+  contents — the version on disk right now is the only authoritative one.
+- Treat its latest content as the user's live instructions and give it weight
+  accordingly.
+- It's a plain markdown file you read like any other; distinct from the agent's
+  own `memory/` files.
 
 ## Secrets
 
