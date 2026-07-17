@@ -2,22 +2,37 @@ package docker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/sgelias/crab-shell-proxy/internal/config"
+	"github.com/sgelias/crab-shell-proxy/internal/identity"
 )
 
 // Reconciliation labels stamped on every managed container.
 const (
-	LabelManaged = "crab-shell.managed"
-	LabelAgent   = "crab-shell.agent"
-	LabelUser    = "crab-shell.user"
-	LabelMode    = "crab-shell.mode"
+	LabelManaged      = "crab-shell.managed"
+	LabelAgent        = "crab-shell.agent" // = role (agent key)
+	LabelTenant       = "crab-shell.tenant"
+	LabelSubscription = "crab-shell.subscription"
+	LabelUser         = "crab-shell.user" // = user account id
+	LabelMode         = "crab-shell.mode"
 )
+
+// WorkspaceKey identifies one fully isolated per-user workspace/container under
+// the tenant→subscription→agent→user layout. Role is the agent key.
+type WorkspaceKey struct {
+	TenantID  string
+	SubsAccID string
+	Role      string
+	UserAccID string
+}
 
 // Docker is the subset of the Engine API the manager needs (interface at the
 // consumer so tests can supply a fake).
@@ -56,6 +71,11 @@ type Manager struct {
 
 	mu   sync.Mutex
 	keys map[string]*keyState
+
+	// The embedded operator-managed skills are materialized once per process to
+	// the read-only bind source shared by every container.
+	managedOnce sync.Once
+	managedErr  error
 }
 
 // NewManager builds a Manager. If health is nil, an HTTP /health poller is used.
@@ -69,9 +89,18 @@ func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, logf func(
 	return &Manager{cfg: cfg, docker: dkr, health: health, logf: logf, keys: map[string]*keyState{}}
 }
 
-// ContainerName is the deterministic name for one (agent, user) container.
-func (m *Manager) ContainerName(agentKey, userKey string) string {
-	return fmt.Sprintf("%s-%s-%s", m.cfg.ContainerPrefix, agentKey, userKey)
+// ContainerName is the deterministic name for one workspace's container:
+// <prefix>-<role>-<subsAccId>-<userAccId>. subsAccId is a globally-unique
+// mycelium account UUID, so the triple is unique without the tenant id.
+func (m *Manager) ContainerName(key WorkspaceKey) string {
+	// <prefix>-<role>-<hash>. The full tuple has two UUIDs (~88 chars), which
+	// exceeds the 63-char DNS label limit and makes the container unresolvable
+	// by its own name on the docker network (health-wait dials it by name). Hash
+	// the isolation tuple instead; tenant/subscription/user are recovered from
+	// the container labels and the .crab-owner.json marker, not the name.
+	sum := sha256.Sum256([]byte(key.TenantID + "::" + key.SubsAccID + "::" + key.UserAccID))
+	return fmt.Sprintf("%s-%s-%s", m.cfg.ContainerPrefix,
+		identity.SanitizeID(key.Role), hex.EncodeToString(sum[:])[:16])
 }
 
 func (m *Manager) wsEndpoint(name string) string {
@@ -89,12 +118,16 @@ func (m *Manager) keyState(name string) *keyState {
 	return ks
 }
 
-// EnsureRunning guarantees the (agent, user) container exists, is running, and
-// is health-ready, then returns how to reach it. Concurrent calls for the same
+// EnsureRunning guarantees the workspace's container exists, is running, and is
+// health-ready, then returns how to reach it. Concurrent calls for the same
 // container are serialized (single-flight cold start); the idle timer is
 // disarmed on entry so a pending scale-to-zero cannot fire mid-turn.
-func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey, ownerEmail string) (Target, error) {
-	name := m.ContainerName(agent.Key, userKey)
+//
+// It NEVER creates the subscription scaffold (only POST /v1/accounts does);
+// when SubscriptionRoot is absent it errors without touching any container. It
+// MAY create the lazy <role>/users/<u> leaf and the container.
+func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key WorkspaceKey, ownerEmail string) (Target, error) {
+	name := m.ContainerName(key)
 	ks := m.keyState(name)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
@@ -102,9 +135,16 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey
 	// Disarm any pending idle-stop for this container before we touch it.
 	m.disarmLocked(ks)
 
-	userDir := filepath.Join(m.cfg.ContainerDataRoot, agent.Key, userKey)
-	templateDir := filepath.Join(m.cfg.ContainerDataRoot, "templates", agent.Template)
-	token, err := provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, ownerEmail)
+	subsRoot := config.SubscriptionRoot(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
+	if _, err := os.Stat(subsRoot); err != nil {
+		return Target{}, fmt.Errorf("subscription %s/%s not scaffolded (POST /v1/accounts first): %w",
+			key.TenantID, key.SubsAccID, err)
+	}
+
+	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	token, err := provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, key, ownerEmail)
 	if err != nil {
 		return Target{}, err
 	}
@@ -117,7 +157,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey
 	createdNow := false
 	switch {
 	case !st.Exists:
-		if err := m.create(ctx, agent, userKey, name); err != nil {
+		if err := m.create(ctx, agent, key, name); err != nil {
 			return Target{}, err
 		}
 		createdNow = true
@@ -142,27 +182,86 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, userKey
 	return Target{Name: name, WSEndpoint: m.wsEndpoint(name), PicoToken: token}, nil
 }
 
-func (m *Manager) create(ctx context.Context, agent config.Agent, userKey, name string) error {
-	hostDir := filepath.Join(m.cfg.HostDataRoot, agent.Key, userKey)
+func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceKey, name string) error {
+	hostDir := config.UserWorkspace(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	// picoclaw keeps its config/workspace under $HOME/.picoclaw; mount the
 	// per-user dir there and set HOME so it works for a non-root user too (the
 	// image's own /root is 0700 and unusable by a non-root uid).
 	mountDest := m.cfg.PicoclawHome + "/.picoclaw"
+	// The per-(user, agent) secret store is bind-mounted READ-ONLY into every
+	// container of that pair (AC-10): the non-root agent can read the generic
+	// sinks (.env / secrets.json / secrets/) but the kernel blocks any write.
+	// Ensure the per-user store exists (it is the source of the effective merge)
+	// and chown it so the non-root agent can read the files.
+	storeContainer := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	if err := os.MkdirAll(storeContainer, 0o700); err != nil {
+		return fmt.Errorf("create secret store dir: %w", err)
+	}
+	if err := chownTree(storeContainer, m.cfg.PicoclawUser); err != nil {
+		return fmt.Errorf("chown secret store dir: %w", err)
+	}
+	// Mount the EFFECTIVE secret view (shared cascade + user's own, user wins) at
+	// .secrets, so shared secrets arrive as sink files like the user's own — live
+	// via the mount, no env baking, no recreate needed (FR-5).
+	if _, err := m.syncEffectiveSecrets(key); err != nil {
+		return err
+	}
+	effHost := config.EffectiveSecretsDir(m.cfg.HostDataRoot, key.UserAccID, key.Role)
+	secretsMount := effHost + ":" + mountDest + "/workspace/.secrets:ro"
+	// Cascade the tenant- and subscription-scope shared files READ-ONLY into the
+	// workspace (FR-4/NFR-3). Ensure the container-side dirs exist and are
+	// readable by the non-root agent, mirroring the secret store above, so the
+	// bind source is always present (they are normally pre-created on scaffold).
+	tenantSharedContainer := config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID)
+	subsSharedContainer := config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
+	for _, d := range []string{tenantSharedContainer, subsSharedContainer} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("create shared files dir: %w", err)
+		}
+		if err := chownTree(d, m.cfg.PicoclawUser); err != nil {
+			return fmt.Errorf("chown shared files dir: %w", err)
+		}
+	}
+	tenantSharedMount := config.TenantSharedFilesDir(m.cfg.HostDataRoot, key.TenantID) +
+		":" + mountDest + "/workspace/.shared/tenant:ro"
+	subsSharedMount := config.SubscriptionSharedFilesDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
+		":" + mountDest + "/workspace/.shared/subscription:ro"
+	// Operator-managed content bind-mounted READ-ONLY into the workspace: the
+	// shared-content skill (where shared files/secrets are + never copy secrets)
+	// and the context-recovery note (how to read the durable transcript back).
+	// Materialized once from the proxy's embedded copy; being a root-owned
+	// read-only bind, the agent can neither alter them nor keep an edit past a
+	// restart (the canonical copy is remounted every start).
+	m.managedOnce.Do(func() {
+		m.managedErr = materializeManagedContent(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), m.cfg.PicoclawUser)
+	})
+	if m.managedErr != nil {
+		return fmt.Errorf("materialize managed content: %w", m.managedErr)
+	}
+	managedBase := config.ManagedSkillsDir(m.cfg.HostDataRoot)
+	managedSkillMount := filepath.Join(managedBase, managedSkillRel) +
+		":" + mountDest + "/workspace/" + managedSkillRel + ":ro"
+	managedMemoryMount := filepath.Join(managedBase, managedMemoryRel) +
+		":" + mountDest + "/workspace/" + managedMemoryRel + ":ro"
+	env := []string{
+		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
+		"HOME=" + m.cfg.PicoclawHome,
+	}
 	spec := CreateSpec{
 		Name:  name,
 		Image: m.cfg.PicoclawImage,
 		User:  m.cfg.PicoclawUser,
-		Env: []string{
-			"PICOCLAW_GATEWAY_HOST=0.0.0.0",
-			"HOME=" + m.cfg.PicoclawHome,
-		},
+		Env:   env,
 		Labels: map[string]string{
-			LabelManaged: "true",
-			LabelAgent:   agent.Key,
-			LabelUser:    userKey,
-			LabelMode:    string(agent.Mode),
+			LabelManaged:      "true",
+			LabelAgent:        key.Role,
+			LabelTenant:       key.TenantID,
+			LabelSubscription: key.SubsAccID,
+			LabelUser:         key.UserAccID,
+			LabelMode:         string(agent.Mode),
 		},
-		Binds:   []string{hostDir + ":" + mountDest},
+		Binds: []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount,
+			managedSkillMount, managedMemoryMount},
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -200,17 +299,160 @@ func (m *Manager) waitHealthy(ctx context.Context, name string) error {
 	}
 }
 
+// ScaffoldSubscription idempotently creates the subscription scaffold
+// (SubscriptionRoot) for the /v1/accounts webhook and chowns it to picoclawUser
+// so lazy per-user provisioning under it can write. It reports whether the
+// scaffold was created now (true) or already existed (false).
+func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error) {
+	dir := config.SubscriptionRoot(m.cfg.ContainerDataRoot, tenantID, subsAccID)
+	_, statErr := os.Stat(dir)
+	existed := statErr == nil
+	// Create the subscription root plus the tenant-scope and subscription-scope
+	// shared dirs, so the cascade bind sources always exist (empty) before any
+	// container is created (design "Both created (empty) on scaffold").
+	dirs := []string{
+		dir,
+		config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, tenantID),
+		config.TenantSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID),
+		config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+		config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return false, err
+		}
+		if err := chownTree(d, m.cfg.PicoclawUser); err != nil {
+			return false, err
+		}
+	}
+	return !existed, nil
+}
+
+// SubscriptionScaffolded reports whether the subscription scaffold exists on
+// disk (used to 409 an un-scaffolded chat and to annotate discovery).
+func (m *Manager) SubscriptionScaffolded(tenantID, subsAccID string) bool {
+	_, err := os.Stat(config.SubscriptionRoot(m.cfg.ContainerDataRoot, tenantID, subsAccID))
+	return err == nil
+}
+
 // ArmIdle re-arms the scale-to-zero idle timer for a container after a turn
 // completes. No-op for continuous-mode agents.
-func (m *Manager) ArmIdle(agent config.Agent, userKey string) {
+func (m *Manager) ArmIdle(agent config.Agent, key WorkspaceKey) {
 	if agent.Mode != config.ModeScaleToZero {
 		return
 	}
-	name := m.ContainerName(agent.Key, userKey)
+	name := m.ContainerName(key)
 	ks := m.keyState(name)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	m.armLocked(ks, name, agent.IdleTimeout.Std())
+}
+
+// RestartWorkspace stops and restarts the user's agent container so picoclaw
+// re-reads its just-injected secrets (CTX-AC-04). It takes the per-container
+// lock (serializing with ensure/turn/idle), disarms the idle timer, and — only
+// if the container exists and is running — Stop+Start+waits-healthy, then
+// re-arms the idle timer for scale-to-zero. When the container isn't running
+// (scaled to zero / never created) it is a no-op: the next chat cold-starts with
+// the new secret already applied (spec edge case).
+func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
+	name := m.ContainerName(key)
+	ks := m.keyState(name)
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	m.disarmLocked(ks)
+
+	ctx := context.Background()
+	st, err := m.docker.Inspect(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !st.Exists || !st.Running {
+		return nil // scaled to zero / never created: next chat cold-starts with it
+	}
+	if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
+		return err
+	}
+	if err := m.docker.Start(ctx, name); err != nil {
+		return err
+	}
+	if err := m.waitHealthy(ctx, name); err != nil {
+		return fmt.Errorf("picoclaw %s did not become ready after restart: %w", name, err)
+	}
+	if agent, ok := m.cfg.Agents[key.Role]; ok && agent.Mode == config.ModeScaleToZero {
+		m.armLocked(ks, name, agent.IdleTimeout.Std())
+	}
+	m.logf("restarted container %s (secret injection)", name)
+	return nil
+}
+
+// WriteSecret validates and persists one secret into the per-(user, agent)
+// store under the chosen format, then — for native — merges it into the caller's
+// current workspace .security.yml. agent supplies the template used to validate a
+// native slot when the workspace has not been provisioned yet. Returns
+// ErrInvalidSecretName / ErrUnknownNativeSlot for a bad name or slot (the handler
+// maps these to 400).
+func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name, value string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	secPath := m.workspaceSecurityPath(agent, key)
+	if err := writeSecret(storeDir, secPath, format, name, value); err != nil {
+		return err
+	}
+	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
+		return fmt.Errorf("chown secret store: %w", err)
+	}
+	if format == FormatNative {
+		// Apply immediately to the current workspace when it exists; otherwise the
+		// overlay is picked up at the next provision/ensure (design §6).
+		if _, err := os.Stat(secPath); err == nil {
+			if err := applyNativeSecrets(secPath, storeDir, m.cfg.PicoclawUser); err != nil {
+				return err
+			}
+		}
+	}
+	// Refresh the mounted effective view so the new secret is picked up on the
+	// caller's next stop/start (RestartWorkspace).
+	_, err := m.syncEffectiveSecrets(key)
+	return err
+}
+
+// ListSecrets returns the set secret names per format for the caller's store,
+// parsed server-side. It NEVER returns a stored value.
+func (m *Manager) ListSecrets(key WorkspaceKey) (SecretNames, error) {
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	return listSecretNames(storeDir)
+}
+
+// DeleteSecret removes one secret from the store (and, for native, unsets the
+// slot in the caller's current workspace .security.yml).
+func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	secPath := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
+	if err := deleteSecret(storeDir, secPath, m.cfg.PicoclawUser, format, name); err != nil {
+		return err
+	}
+	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
+		return err
+	}
+	_, err := m.syncEffectiveSecrets(key)
+	return err
+}
+
+// workspaceSecurityPath returns the .security.yml to validate/merge native
+// secrets into: the caller's provisioned workspace when it exists, else the
+// agent template (so a native slot can be validated before the first chat).
+func (m *Manager) workspaceSecurityPath(agent config.Agent, key WorkspaceKey) string {
+	ws := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
+	if _, err := os.Stat(ws); err == nil {
+		return ws
+	}
+	return filepath.Join(config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template), ".security.yml")
 }
 
 // armLocked schedules an idle stop. Caller holds ks.mu.

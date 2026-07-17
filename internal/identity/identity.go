@@ -5,19 +5,21 @@
 // NOT the email — the email is mutable, while accId is the canonical account
 // primary key mycelium propagates. The principal owner's email is still read,
 // but only for human-facing traceability (written next to the user's config),
-// never as the isolation key. Mirrors picoclaw-openai-proxy/server.js's decode
-// (base64 -> zstd -> JSON), but on the profile's accId/owners fields.
+// never as the isolation key. Decoding is delegated to the official mycelium Go
+// SDK (github.com/LepistaBioinformatics/mycelium-sdk-go), which owns the wire
+// contract (base64 -> zstd -> JSON, and the licensedResources records/urls
+// enum); the resolved *mycelium.Profile is carried on Identity so handlers can
+// apply the SDK's fluent authorization filters.
 package identity
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"regexp"
 	"strings"
 
-	"github.com/klauspost/compress/zstd"
+	mycelium "github.com/LepistaBioinformatics/mycelium-sdk-go"
+	"github.com/google/uuid"
 )
 
 // ProfileHeader is the header mycelium injects with the compressed profile.
@@ -33,13 +35,16 @@ type Identity struct {
 	AccID string
 	// Email is the principal owner's email — for traceability only, may be "".
 	Email string
+	// Profile is the full decoded mycelium profile, carried so handlers can run
+	// the SDK's fluent authorization filters (WithReadAccess/OnAccount/…).
+	Profile *mycelium.Profile
 }
 
 // Resolver decodes the mycelium profile header into an Identity.
 //
-// It is an interface so the parallel Go mycelium SDK can be dropped in later
-// without touching callers; FallbackResolver is the self-contained default so
-// this feature is not blocked on the SDK.
+// It is an interface so an alternative decoder (or a fake, in tests) can be
+// substituted without touching callers; SDKResolver is the default,
+// backed by the official mycelium Go SDK.
 type Resolver interface {
 	// Resolve returns the caller identity and true, or a zero value and false
 	// when the header is absent/undecodable or carries no accId (callers map
@@ -47,60 +52,36 @@ type Resolver interface {
 	Resolve(profileHeader string) (Identity, bool)
 }
 
-// owner mirrors the subset of a mycelium Profile owner we read (camelCase, per
-// the Profile's `#[serde(rename_all = "camelCase")]`).
-type owner struct {
-	Email       string `json:"email"`
-	IsPrincipal bool   `json:"isPrincipal"`
-}
+// SDKResolver decodes the profile header via the official mycelium Go SDK.
+type SDKResolver struct{}
 
-type profile struct {
-	AccID  string  `json:"accId"`
-	Owners []owner `json:"owners"`
-}
+// NewSDKResolver builds a resolver. The SDK's zstd decoder is a package-level
+// singleton safe for concurrent use, so the resolver holds no state.
+func NewSDKResolver() *SDKResolver { return &SDKResolver{} }
 
-// FallbackResolver decodes the profile with no external SDK dependency.
-type FallbackResolver struct {
-	dec *zstd.Decoder
-}
-
-// NewFallbackResolver builds a reusable resolver. The zstd decoder is safe for
-// concurrent use across requests.
-func NewFallbackResolver() (*FallbackResolver, error) {
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, err
-	}
-	return &FallbackResolver{dec: dec}, nil
-}
-
-// Resolve implements Resolver.
-func (r *FallbackResolver) Resolve(header string) (Identity, bool) {
-	if header == "" {
-		return Identity{}, false
-	}
-	compressed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(header))
+// Resolve implements Resolver. Decoding is strict (the gateway always
+// compresses); a decode failure or an empty/nil account id yields false, which
+// callers map to HTTP 401 — the fail-safe posture (a mis-decode never grants
+// access).
+func (r *SDKResolver) Resolve(header string) (Identity, bool) {
+	p, err := mycelium.DecodeAndDecompressProfileFromBase64(header)
 	if err != nil {
 		return Identity{}, false
 	}
-	jsonBytes, err := r.dec.DecodeAll(compressed, nil)
-	if err != nil {
-		return Identity{}, false
-	}
-	var p profile
-	if err := json.Unmarshal(jsonBytes, &p); err != nil {
-		return Identity{}, false
-	}
-	if p.AccID == "" {
+	if p.AccID == uuid.Nil {
 		return Identity{}, false // no account id => cannot isolate
 	}
-	return Identity{AccID: p.AccID, Email: principalEmail(p.Owners)}, true
+	return Identity{
+		AccID:   p.AccID.String(),
+		Email:   principalEmail(p.Owners),
+		Profile: p,
+	}, true
 }
 
 // principalEmail returns the principal owner's email (or the first owner's), or
 // "" — parity with server.js's owners.find(isPrincipal) || owners[0].
-func principalEmail(owners []owner) string {
-	var chosen *owner
+func principalEmail(owners []mycelium.Owner) string {
+	var chosen *mycelium.Owner
 	for i := range owners {
 		if owners[i].IsPrincipal {
 			chosen = &owners[i]

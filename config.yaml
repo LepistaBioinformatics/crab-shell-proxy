@@ -7,15 +7,16 @@
 
 listen: ":8080"
 
-# Absolute HOST path of the per-agent data root. This is the bind-mount SOURCE
-# handed to the Docker daemon for spawned picoclaw containers, so it must be a
-# path the daemon sees (host path), NOT a path inside this proxy. Override with
-# CRAB_HOST_DATA_ROOT (compose sets it to <project>/data/agents).
-hostDataRoot: "/data/agents"
+# Absolute HOST path of the data root. This is the bind-mount SOURCE handed to
+# the Docker daemon for spawned picoclaw containers, so it must be a path the
+# daemon sees (host path), NOT a path inside this proxy. The tenant tree lives
+# under <root>/tenants/… and agent templates under <root>/templates/…. Override
+# with CRAB_HOST_DATA_ROOT (compose sets it to <project>/data).
+hostDataRoot: "/data"
 
 # Where that same directory is mounted INSIDE this proxy (for reading history
 # and seeding per-user config). Override with CRAB_CONTAINER_DATA_ROOT.
-containerDataRoot: "/data/agents"
+containerDataRoot: "/data"
 
 # Docker network spawned containers join. The compose file pins this network's
 # real name to "zombie_net" (network `name:`), so it is stable regardless of the
@@ -40,13 +41,24 @@ startupDeadline: 35s
 turnTimeout: 120s
 containerPrefix: "picoclaw"
 
+# Shared secret authenticating the mycelium subscriptionAccount.created webhook
+# at POST /v1/accounts. Sourced from the environment so it never lives in this
+# file; register the same value with mycelium's webhook (Authorization: Bearer).
+webhookSecret: { env: "CRAB_WEBHOOK_SECRET" }
+
 agents:
   alpha:
     serviceName: "picoclaw-alpha" # matches x-mycelium-service-name mycelium injects
     token: { env: "MYC_PICOCLAW_ALPHA_TOKEN" }
     template: "alpha" # <containerDataRoot>/templates/alpha/{config.json,.security.yml}
-    mode: "scale-to-zero" # or "continuous"
-    idleTimeout: 15s
+    # data now lives under <containerDataRoot>/tenants/<t>/subscriptions/<s>/agents/alpha/users/<u>
+    # "continuous" keeps the container running: picoclaw holds each direct session
+    # in an in-memory store (SQLite :memory:) and does NOT reload it on restart —
+    # so a scale-to-zero stop would reset the conversation and overwrite its
+    # transcript on the next turn. Staying up preserves history during use.
+    # (idleTimeout is ignored in continuous mode; kept for a quick switch back.)
+    mode: "continuous" # or "scale-to-zero"
+    idleTimeout: 15m
     # Pin the picoclaw provider/model and take the API key from the environment.
     # The proxy enables the pico channel, sets provider/model, and writes the key
     # (read from apiKeyEnv) into each user's .security.yml at provisioning time,
@@ -62,8 +74,8 @@ agents:
     serviceName: "picoclaw-beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }
     template: "beta"
-    mode: "scale-to-zero"
-    idleTimeout: 15s
+    mode: "continuous" # keep alive so picoclaw's in-memory session isn't reset (see alpha)
+    idleTimeout: 15m
     model:
       provider: "deepseek"
       name: "deepseek-chat"

@@ -41,39 +41,57 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		m.logf("reconcile: adopted running %s, re-armed idle timer", name)
 	}
 
-	// Ensure continuous containers are up for every existing per-user data dir.
+	// Ensure continuous containers are up for every existing per-user workspace
+	// under tenants/*/subscriptions/*/agents/<role>/users/*.
 	for _, agent := range m.cfg.Agents {
 		if agent.Mode != config.ModeContinuous {
 			continue
 		}
-		for _, userKey := range m.existingUserDirs(agent.Key) {
+		for _, key := range m.existingWorkspaces(agent.Key) {
 			// Owner email is unknown here (no request); the marker was already
 			// written on first provision, and the dir already exists so it isn't
 			// re-seeded, so passing "" is fine.
-			if _, err := m.EnsureRunning(ctx, agent, userKey, ""); err != nil {
-				m.logf("reconcile: continuous ensure %s/%s failed: %v", agent.Key, userKey, err)
+			if _, err := m.EnsureRunning(ctx, agent, key, ""); err != nil {
+				m.logf("reconcile: continuous ensure %s/%s/%s/%s failed: %v",
+					key.TenantID, key.SubsAccID, key.Role, key.UserAccID, err)
 			} else {
-				m.logf("reconcile: continuous %s/%s ensured running", agent.Key, userKey)
+				m.logf("reconcile: continuous %s/%s/%s/%s ensured running",
+					key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 			}
 		}
 	}
 	return nil
 }
 
-// existingUserDirs lists the per-user (accId) sub-directories already
-// materialized for an agent (each corresponds to a provisioned container).
-func (m *Manager) existingUserDirs(agentKey string) []string {
-	entries, err := os.ReadDir(filepath.Join(m.cfg.ContainerDataRoot, agentKey))
+// existingWorkspaces walks the nested layout and returns a WorkspaceKey for
+// every already-materialized per-user workspace of the given role (each
+// corresponds to a provisioned container).
+func (m *Manager) existingWorkspaces(role string) []WorkspaceKey {
+	pattern := filepath.Join(m.cfg.ContainerDataRoot, "tenants", "*",
+		"subscriptions", "*", "agents", role, "users", "*")
+	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil
 	}
-	var hashes []string
-	for _, e := range entries {
-		if e.IsDir() {
-			hashes = append(hashes, e.Name())
+	var keys []WorkspaceKey
+	for _, uw := range matches {
+		if fi, err := os.Stat(uw); err != nil || !fi.IsDir() {
+			continue
 		}
+		rel, err := filepath.Rel(m.cfg.ContainerDataRoot, uw)
+		if err != nil {
+			continue
+		}
+		// rel = tenants/<t>/subscriptions/<s>/agents/<role>/users/<u>
+		parts := strings.Split(rel, string(os.PathSeparator))
+		if len(parts) != 8 {
+			continue
+		}
+		keys = append(keys, WorkspaceKey{
+			TenantID: parts[1], SubsAccID: parts[3], Role: role, UserAccID: parts[7],
+		})
 	}
-	return hashes
+	return keys
 }
 
 func trimName(names []string) string {

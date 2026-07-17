@@ -48,6 +48,75 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 	}
 }
 
+func TestFindSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	key := "abc123def456"
+
+	writeFile(t, dir, "sk_v1_match.meta.json",
+		`{"scope":{"values":{"chat":"direct:pico:`+key+`"}}}`)
+	writeFile(t, dir, "sk_v1_other.meta.json",
+		`{"scope":{"values":{"chat":"direct:pico:zzzzzzzzzzzz"}}}`)
+
+	if got := FindSessionFile(dir, key); got != "sk_v1_match" {
+		t.Errorf("FindSessionFile = %q, want %q", got, "sk_v1_match")
+	}
+	if got := FindSessionFile(dir, "nomatch"); got != "" {
+		t.Errorf("FindSessionFile (no match) = %q, want empty", got)
+	}
+	if got := FindSessionFile(filepath.Join(dir, "does-not-exist"), key); got != "" {
+		t.Errorf("FindSessionFile (missing dir) = %q, want empty", got)
+	}
+}
+
+// SyncDurable must preserve the transcript across a picoclaw restart that
+// overwrites the live file with only the post-restart turns.
+func TestSyncDurablePreservesAcrossOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	key := "durkey000000"
+	writeFile(t, dir, "live.meta.json", `{"scope":{"values":{"chat":"direct:pico:`+key+`"}}}`)
+
+	// Turns 1-2 live; fold into durable.
+	writeFile(t, dir, "live.jsonl",
+		`{"role":"user","content":"one","created_at":"t1"}`+"\n"+
+			`{"role":"assistant","content":"reply one","created_at":"t2"}`+"\n")
+	if err := SyncDurable(dir, key); err != nil {
+		t.Fatalf("sync1: %v", err)
+	}
+
+	// picoclaw restarts and OVERWRITES the live file with only a fresh turn.
+	writeFile(t, dir, "live.jsonl",
+		`{"role":"user","content":"two","created_at":"t3"}`+"\n"+
+			`{"role":"assistant","content":"reply two","created_at":"t4"}`+"\n")
+	if err := SyncDurable(dir, key); err != nil {
+		t.Fatalf("sync2: %v", err)
+	}
+
+	want := []Message{
+		{Role: "user", Content: "one"}, {Role: "assistant", Content: "reply one"},
+		{Role: "user", Content: "two"}, {Role: "assistant", Content: "reply two"},
+	}
+	msgs, err := Read(dir, key)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("got %d messages, want %d: %+v", len(msgs), len(want), msgs)
+	}
+	for i := range want {
+		if msgs[i] != want[i] {
+			t.Errorf("msg[%d] = %+v, want %+v", i, msgs[i], want[i])
+		}
+	}
+
+	// A repeated sync must not duplicate already-captured turns.
+	if err := SyncDurable(dir, key); err != nil {
+		t.Fatalf("sync3: %v", err)
+	}
+	if msgs2, _ := Read(dir, key); len(msgs2) != len(want) {
+		t.Errorf("re-sync duplicated: got %d, want %d", len(msgs2), len(want))
+	}
+}
+
 func TestReadMissingDir(t *testing.T) {
 	msgs, err := Read(filepath.Join(t.TempDir(), "does-not-exist"), "whatever")
 	if err != nil {

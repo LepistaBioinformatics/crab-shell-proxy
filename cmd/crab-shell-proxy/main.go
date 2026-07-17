@@ -39,14 +39,9 @@ func main() {
 	dkr := docker.NewUnixClient(socket)
 	mgr := docker.NewManager(cfg, dkr, nil, logger.Printf)
 
-	resolver, err := identity.NewFallbackResolver()
-	if err != nil {
-		logger.Fatalf("identity resolver: %v", err)
-	}
-
 	srv := &httpapi.Server{
 		Cfg:      cfg,
-		Resolver: resolver,
+		Resolver: identity.NewSDKResolver(),
 		Mgr:      mgr,
 		Pico:     &pico.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Logf:     logger.Printf,

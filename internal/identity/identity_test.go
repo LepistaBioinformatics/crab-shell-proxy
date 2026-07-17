@@ -21,10 +21,12 @@ func encodeProfile(t *testing.T, jsonBody string) string {
 }
 
 func TestResolve(t *testing.T) {
-	r, err := NewFallbackResolver()
-	if err != nil {
-		t.Fatalf("resolver: %v", err)
-	}
+	r := NewSDKResolver()
+
+	// accId is always a UUID on the wire (mycelium core `acc_id: Uuid`); the SDK
+	// decodes it into uuid.UUID, so fixtures use real UUIDs.
+	const accA = "11111111-1111-1111-1111-111111111111"
+	const accB = "22222222-2222-2222-2222-222222222222"
 
 	tests := []struct {
 		name      string
@@ -35,16 +37,16 @@ func TestResolve(t *testing.T) {
 	}{
 		{
 			name:      "accId + principal email",
-			header:    encodeProfile(t, `{"accId":"acc-123","owners":[{"email":"other@x","isPrincipal":false},{"email":"alice@x","isPrincipal":true}]}`),
+			header:    encodeProfile(t, `{"accId":"`+accA+`","owners":[{"email":"other@x","isPrincipal":false},{"email":"alice@x","isPrincipal":true}]}`),
 			wantOK:    true,
-			wantAcc:   "acc-123",
+			wantAcc:   accA,
 			wantEmail: "alice@x",
 		},
 		{
 			name:      "accId with no owners still resolves (email empty)",
-			header:    encodeProfile(t, `{"accId":"acc-xyz","owners":[]}`),
+			header:    encodeProfile(t, `{"accId":"`+accB+`","owners":[]}`),
 			wantOK:    true,
-			wantAcc:   "acc-xyz",
+			wantAcc:   accB,
 			wantEmail: "",
 		},
 		{
