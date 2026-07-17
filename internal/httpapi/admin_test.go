@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sgelias/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 )
 
 // Profile fixtures for the admin tier matrix. accAlice is the caller; the

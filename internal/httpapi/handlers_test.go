@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/sgelias/crab-shell-proxy/internal/config"
-	"github.com/sgelias/crab-shell-proxy/internal/docker"
-	"github.com/sgelias/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // Fixed UUIDs used across the authorization table tests.

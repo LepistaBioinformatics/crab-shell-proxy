@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/sgelias/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
 
 // ErrMediaName is returned when an uploaded filename can't be sanitized into a

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sgelias/crab-shell-proxy/internal/config"
-	"github.com/sgelias/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // Reconciliation labels stamped on every managed container.

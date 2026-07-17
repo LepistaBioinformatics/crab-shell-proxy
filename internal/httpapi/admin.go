@@ -9,9 +9,9 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
-	"github.com/sgelias/crab-shell-proxy/internal/authz"
-	"github.com/sgelias/crab-shell-proxy/internal/docker"
-	"github.com/sgelias/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // Role slugs for scope discovery (SystemActor Display forms). Authorization

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sgelias/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
 
 // sharedManager builds a Manager over a temp root with no chown (PicoclawUser

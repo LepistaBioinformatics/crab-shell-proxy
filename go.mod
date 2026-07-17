@@ -1,4 +1,4 @@
-module github.com/sgelias/crab-shell-proxy
+module github.com/LepistaBioinformatics/crab-shell-proxy
 
 go 1.23
 

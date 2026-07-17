@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sgelias/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
 
 // fakeDocker is an in-memory Docker for manager tests.

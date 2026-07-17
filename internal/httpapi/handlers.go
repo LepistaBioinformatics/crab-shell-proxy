@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sgelias/crab-shell-proxy/internal/config"
-	"github.com/sgelias/crab-shell-proxy/internal/docker"
-	"github.com/sgelias/crab-shell-proxy/internal/history"
-	"github.com/sgelias/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // Orchestrator is the container-lifecycle + workspace-scaffold surface the

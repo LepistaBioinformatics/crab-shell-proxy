@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sgelias/crab-shell-proxy/internal/config"
-	"github.com/sgelias/crab-shell-proxy/internal/docker"
-	"github.com/sgelias/crab-shell-proxy/internal/history"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 )
 
 // turnTimeout bounds a picoclaw turn once it is decoupled from the client

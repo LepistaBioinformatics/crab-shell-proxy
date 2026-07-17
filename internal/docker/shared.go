@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sgelias/crab-shell-proxy/internal/config"
-	"github.com/sgelias/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // ScopeKind names the tier a shared-content operation targets.
