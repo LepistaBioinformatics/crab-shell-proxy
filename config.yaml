@@ -52,7 +52,12 @@ agents:
     token: { env: "MYC_PICOCLAW_ALPHA_TOKEN" }
     template: "alpha" # <containerDataRoot>/templates/alpha/{config.json,.security.yml}
     # data now lives under <containerDataRoot>/tenants/<t>/subscriptions/<s>/agents/alpha/users/<u>
-    mode: "scale-to-zero" # or "continuous"
+    # "continuous" keeps the container running: picoclaw holds each direct session
+    # in an in-memory store (SQLite :memory:) and does NOT reload it on restart —
+    # so a scale-to-zero stop would reset the conversation and overwrite its
+    # transcript on the next turn. Staying up preserves history during use.
+    # (idleTimeout is ignored in continuous mode; kept for a quick switch back.)
+    mode: "continuous" # or "scale-to-zero"
     idleTimeout: 15m
     # Pin the picoclaw provider/model and take the API key from the environment.
     # The proxy enables the pico channel, sets provider/model, and writes the key
@@ -69,7 +74,7 @@ agents:
     serviceName: "picoclaw-beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }
     template: "beta"
-    mode: "scale-to-zero"
+    mode: "continuous" # keep alive so picoclaw's in-memory session isn't reset (see alpha)
     idleTimeout: 15m
     model:
       provider: "deepseek"
