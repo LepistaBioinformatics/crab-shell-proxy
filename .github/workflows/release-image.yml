@@ -1,0 +1,61 @@
+# Build and publish the crab-shell-proxy image to GHCR.
+#
+# The Dockerfile is self-testing: `go vet` + `go test ./...` run inside the
+# build stage, so a red test fails the image build (and therefore the push).
+# config.yaml is baked in but holds only env-var NAMES ({ env: "..." }), so the
+# image stays deploy-agnostic -- real secrets and machine-specific paths are
+# supplied at runtime via the environment.
+name: release-image
+
+on:
+  push:
+    tags: ["v*"]           # publish on version tags, e.g. v1.2.3
+    branches: ["main"]     # also publish :main + :sha for the latest default branch
+  workflow_dispatch: {}
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # github.repository is <owner>/<repo>; metadata-action lowercases it
+          # for GHCR (which rejects uppercase paths).
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
