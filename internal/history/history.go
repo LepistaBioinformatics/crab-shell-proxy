@@ -12,8 +12,9 @@ import (
 
 // Message is one conversational turn returned to the client.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
 }
 
 // metaFile mirrors the subset of a *.meta.json we match on. picoclaw derives
@@ -30,8 +31,9 @@ type metaFile struct {
 
 // jsonlEntry is one line of a picoclaw session transcript.
 type jsonlEntry struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
 }
 
 // durableDir is the subdirectory (under a session's sessions/ dir) holding the
@@ -205,7 +207,7 @@ func readMessages(sessionsDir, basename string) ([]Message, error) {
 		// inline, which the live stream already discards. History should match
 		// what the user actually saw.
 		if (e.Role == "user" || e.Role == "assistant") && e.Content != "" {
-			messages = append(messages, Message{Role: e.Role, Content: e.Content})
+			messages = append(messages, Message{Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt})
 		}
 	}
 	if err := sc.Err(); err != nil {

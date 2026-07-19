@@ -21,9 +21,9 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 	writeFile(t, dir, "sk_v1_match.meta.json",
 		`{"scope":{"values":{"chat":"direct:pico:`+key+`"}}}`)
 	writeFile(t, dir, "sk_v1_match.jsonl",
-		`{"role":"user","content":"hi"}`+"\n"+
+		`{"role":"user","content":"hi","created_at":"2026-07-16T19:39:06.983127587Z"}`+"\n"+
 			`{"role":"tool","content":"raw tool output"}`+"\n"+
-			`{"role":"assistant","content":"hello there"}`+"\n"+
+			`{"role":"assistant","content":"hello there","created_at":"2026-07-16T19:39:08.697371182Z"}`+"\n"+
 			`not valid json`+"\n"+
 			`{"role":"assistant","content":""}`+"\n")
 
@@ -40,10 +40,10 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2: %+v", len(msgs), msgs)
 	}
-	if msgs[0] != (Message{Role: "user", Content: "hi"}) {
+	if msgs[0] != (Message{Role: "user", Content: "hi", CreatedAt: "2026-07-16T19:39:06.983127587Z"}) {
 		t.Errorf("msg[0] = %+v", msgs[0])
 	}
-	if msgs[1] != (Message{Role: "assistant", Content: "hello there"}) {
+	if msgs[1] != (Message{Role: "assistant", Content: "hello there", CreatedAt: "2026-07-16T19:39:08.697371182Z"}) {
 		t.Errorf("msg[1] = %+v", msgs[1])
 	}
 }
@@ -92,8 +92,8 @@ func TestSyncDurablePreservesAcrossOverwrite(t *testing.T) {
 	}
 
 	want := []Message{
-		{Role: "user", Content: "one"}, {Role: "assistant", Content: "reply one"},
-		{Role: "user", Content: "two"}, {Role: "assistant", Content: "reply two"},
+		{Role: "user", Content: "one", CreatedAt: "t1"}, {Role: "assistant", Content: "reply one", CreatedAt: "t2"},
+		{Role: "user", Content: "two", CreatedAt: "t3"}, {Role: "assistant", Content: "reply two", CreatedAt: "t4"},
 	}
 	msgs, err := Read(dir, key)
 	if err != nil {
