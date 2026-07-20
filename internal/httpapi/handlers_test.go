@@ -80,6 +80,11 @@ func (f *fakeOrch) ListSecrets(docker.WorkspaceKey) (docker.SecretNames, error) 
 	return f.listResult, nil
 }
 
+func (f *fakeOrch) ListRegisteredModels(string) ([]docker.RegisteredModel, error)              { return nil, nil }
+func (f *fakeOrch) AddRegisteredModel(string, docker.RegisteredModel) error                    { return nil }
+func (f *fakeOrch) DeleteRegisteredModel(string, string, string) error                         { return nil }
+func (f *fakeOrch) ApplyRegisteredModelToUser(string, docker.WorkspaceKey, string, string) error { return nil }
+
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr

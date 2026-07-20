@@ -103,6 +103,18 @@ type Orchestrator interface {
 	// ReapplyModelUser re-applies the resolved model to one user's established
 	// workspace, then restarts it if running.
 	ReapplyModelUser(key docker.WorkspaceKey, agent config.Agent) error
+
+	// --- admin-model-registry (per-agent model definitions + keys) ---
+
+	// ListRegisteredModels returns an agent's registered models (never keys).
+	ListRegisteredModels(agentKey string) ([]docker.RegisteredModel, error)
+	// AddRegisteredModel upserts a model (definition + key) in an agent's registry.
+	AddRegisteredModel(agentKey string, rm docker.RegisteredModel) error
+	// DeleteRegisteredModel removes a model from an agent's registry.
+	DeleteRegisteredModel(agentKey, provider, name string) error
+	// ApplyRegisteredModelToUser writes a registered model (definition + key +
+	// active) into one user's workspace config.
+	ApplyRegisteredModelToUser(agentKey string, key docker.WorkspaceKey, provider, name string) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -157,6 +169,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/admin/model", s.handleAdminModelSet)
 	mux.HandleFunc("DELETE /v1/admin/model", s.handleAdminModelClear)
 	mux.HandleFunc("GET /v1/admin/model/users", s.handleAdminModelUsers)
+	mux.HandleFunc("GET /v1/admin/registered-models", s.handleAdminRegisteredModelsList)
+	mux.HandleFunc("POST /v1/admin/registered-models", s.handleAdminRegisteredModelsPost)
+	mux.HandleFunc("DELETE /v1/admin/registered-models", s.handleAdminRegisteredModelsDelete)
+	mux.HandleFunc("POST /v1/admin/registered-models/apply", s.handleAdminRegisteredModelApply)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }

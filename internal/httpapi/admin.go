@@ -693,3 +693,157 @@ func (s *Server) handleAdminModelUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
+
+// --- admin-model-registry (per-agent model definitions + keys) ---
+
+type registeredModelRequest struct {
+	Provider string `json:"provider"`
+	Name     string `json:"name"`
+	Model    string `json:"model"`
+	APIBase  string `json:"api_base"`
+	APIKey   string `json:"api_key"`
+}
+
+type applyRegisteredModelRequest struct {
+	TenantID  string `json:"tenant_id"`
+	SubsAccID string `json:"subs_acc_id"`
+	UserAccID string `json:"user_acc_id"`
+	Provider  string `json:"provider"`
+	Name      string `json:"name"`
+}
+
+// handleAdminRegisteredModelsList returns the agent's registered models (never
+// keys). The agent is resolved from the routed picoclaw service, so registration
+// is per-agent. Admin-privilege gated (registry is agent-global).
+func (s *Server) handleAdminRegisteredModelsList(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	if !ident.Profile.HasAdminPrivileges() {
+		writeJSON(w, http.StatusForbidden, errBody("admin privileges required to manage the model registry"))
+		return
+	}
+	models, err := s.Mgr.ListRegisteredModels(agent.Key)
+	if err != nil {
+		s.logf("registered-models: list failed svc=%s: %v", agent.Key, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
+// handleAdminRegisteredModelsPost registers/updates a model (definition + key)
+// for the routed agent.
+func (s *Server) handleAdminRegisteredModelsPost(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	if !ident.Profile.HasAdminPrivileges() {
+		writeJSON(w, http.StatusForbidden, errBody("admin privileges required to manage the model registry"))
+		return
+	}
+	var req registeredModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
+		return
+	}
+	if req.Provider == "" || req.Name == "" || req.Model == "" || req.APIBase == "" || req.APIKey == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"provider", "name", "model", "api_base" and "api_key" are required`))
+		return
+	}
+	rm := docker.RegisteredModel{
+		Provider: req.Provider, Name: req.Name, Model: req.Model, APIBase: req.APIBase, APIKey: req.APIKey,
+	}
+	if err := s.Mgr.AddRegisteredModel(agent.Key, rm); err != nil {
+		s.logf("registered-models: add failed svc=%s: %v", agent.Key, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "provider": req.Provider, "name": req.Name})
+}
+
+// handleAdminRegisteredModelsDelete removes a model from the routed agent's registry.
+func (s *Server) handleAdminRegisteredModelsDelete(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	if !ident.Profile.HasAdminPrivileges() {
+		writeJSON(w, http.StatusForbidden, errBody("admin privileges required to manage the model registry"))
+		return
+	}
+	provider := r.URL.Query().Get("provider")
+	name := r.URL.Query().Get("name")
+	if provider == "" || name == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"provider" and "name" query parameters are required`))
+		return
+	}
+	if err := s.Mgr.DeleteRegisteredModel(agent.Key, provider, name); err != nil {
+		s.logf("registered-models: delete failed svc=%s: %v", agent.Key, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleAdminRegisteredModelApply assigns a registered model to one specific
+// user (writes its definition + key into that user's config) and restarts them.
+// Authorized like the other per-user admin ops (authority over the subscription).
+func (s *Server) handleAdminRegisteredModelApply(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	var req applyRegisteredModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
+		return
+	}
+	tenantID, err := uuid.Parse(req.TenantID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(req.SubsAccID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
+		return
+	}
+	userAccID, err := uuid.Parse(req.UserAccID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"user_acc_id" is required and must be a UUID`))
+		return
+	}
+	if req.Provider == "" || req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"provider" and "name" are required`))
+		return
+	}
+	if !authz.AuthorizeUserManagement(ident.Profile, tenantID.String(), subsAccID.String()) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to manage this user"))
+		return
+	}
+	key := docker.WorkspaceKey{
+		TenantID: tenantID.String(), SubsAccID: subsAccID.String(), Role: agent.Key, UserAccID: userAccID.String(),
+	}
+	if err := s.Mgr.ApplyRegisteredModelToUser(agent.Key, key, req.Provider, req.Name); err != nil {
+		if errors.Is(err, docker.ErrRegisteredModelNotFound) {
+			writeJSON(w, http.StatusNotFound, errBody(err.Error()))
+			return
+		}
+		if errors.Is(err, docker.ErrWorkspaceNotProvisioned) {
+			writeJSON(w, http.StatusConflict, errBody(err.Error()))
+			return
+		}
+		s.logf("registered-models: apply failed svc=%s user=%s: %v", agent.Key, userAccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if err := s.Mgr.RestartWorkspace(key); err != nil {
+		s.logf("registered-models: restart failed svc=%s user=%s: %v", agent.Key, userAccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "provider": req.Provider, "name": req.Name})
+}
