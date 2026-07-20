@@ -18,11 +18,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/google/uuid"
 )
 
 // Orchestrator is the container-lifecycle + workspace-scaffold surface the
@@ -87,6 +87,22 @@ type Orchestrator interface {
 	DeleteUserFile(key docker.WorkspaceKey, name string) error
 	// RestartScope best-effort recreates running containers under a scope (NFR-4).
 	RestartScope(scope docker.Scope) error
+
+	// --- admin-model-override (CTX-AMO-06: keys never transit these calls) ---
+
+	// EffectiveModel resolves the model in effect at a target, reporting which
+	// level set it ("tenant"|"subscription"|"user"|"default").
+	EffectiveModel(agent config.Agent, target docker.ModelTarget) (*config.ModelConfig, string)
+	// SetModelOverride writes a validated model selection at a target.
+	SetModelOverride(target docker.ModelTarget, sel docker.ModelSel) error
+	// ClearModelOverride removes a model override at a target (idempotent).
+	ClearModelOverride(target docker.ModelTarget) error
+	// ReapplyModelScope re-applies the resolved model to every established
+	// workspace under a scope, then restarts the running ones.
+	ReapplyModelScope(scope docker.Scope) error
+	// ReapplyModelUser re-applies the resolved model to one user's established
+	// workspace, then restarts it if running.
+	ReapplyModelUser(key docker.WorkspaceKey, agent config.Agent) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -134,6 +150,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/users", s.handleAdminUsersList)
 	mux.HandleFunc("GET /v1/admin/users/files", s.handleAdminUserFilesList)
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
+	// admin-model-override: keys never transit the API (CTX-AMO-06); the
+	// models list is provider/name only.
+	mux.HandleFunc("GET /v1/admin/models", s.handleAdminModelsList)
+	mux.HandleFunc("GET /v1/admin/model", s.handleAdminModelGet)
+	mux.HandleFunc("PUT /v1/admin/model", s.handleAdminModelSet)
+	mux.HandleFunc("DELETE /v1/admin/model", s.handleAdminModelClear)
+	mux.HandleFunc("GET /v1/admin/model/users", s.handleAdminModelUsers)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }

@@ -256,6 +256,223 @@ func TestReapplyModelPreservesTokenAndSecrets(t *testing.T) {
 	}
 }
 
+// provisionedWorkspace writes a minimal already-provisioned workspace (as left
+// behind by a first provision) at key: config.json with agents.defaults, and a
+// .security.yml carrying a distinct pico token, so a test can assert the token
+// survives a reapply.
+func provisionedWorkspace(t *testing.T, root string, key WorkspaceKey, provider, modelName, token string) string {
+	t.Helper()
+	dir := config.UserWorkspace(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfigJSON(t, dir, provider, modelName)
+	sec := "channel_list:\n  pico:\n    settings:\n      token: " + token + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".security.yml"), []byte(sec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestReapplyModelScopeSubscription proves ReapplyModelScope re-applies a
+// subscription-level override to every ESTABLISHED (already-provisioned)
+// workspace under that subscription — updating config.json's provider/
+// model_name and .security.yml's model_list entry while preserving each
+// workspace's own pico token — then calls RestartScope (a no-op here since no
+// container is "running" in the fake docker).
+func TestReapplyModelScopeSubscription(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		HostDataRoot:      "/host/data",
+		ContainerDataRoot: root,
+		ContainerPrefix:   "picoclaw",
+		Agents:            map[string]config.Agent{"alpha": testAgent()},
+	}
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+
+	key1 := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+	key2 := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u2"}
+	dir1 := provisionedWorkspace(t, root, key1, "deepseek", "deepseek-chat", "tok-u1")
+	dir2 := provisionedWorkspace(t, root, key2, "deepseek", "deepseek-chat", "tok-u2")
+
+	scope := Scope{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1"}
+	subPath := config.SubscriptionModelOverrideFile(root, "t1", "s1")
+	if err := m.setModelOverride(subPath, ModelSel{Provider: "openai", Name: "gpt-4o"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.ReapplyModelScope(scope); err != nil {
+		t.Fatalf("ReapplyModelScope: %v", err)
+	}
+
+	for _, tc := range []struct {
+		dir, wantToken string
+	}{{dir1, "tok-u1"}, {dir2, "tok-u2"}} {
+		raw, err := os.ReadFile(filepath.Join(tc.dir, "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfgJSON map[string]any
+		if err := json.Unmarshal(raw, &cfgJSON); err != nil {
+			t.Fatal(err)
+		}
+		defaults := cfgJSON["agents"].(map[string]any)["defaults"].(map[string]any)
+		if defaults["provider"] != "openai" || defaults["model_name"] != "gpt-4o" {
+			t.Errorf("%s: provider/model_name = %v/%v, want openai/gpt-4o", tc.dir, defaults["provider"], defaults["model_name"])
+		}
+		secRaw, err := os.ReadFile(filepath.Join(tc.dir, ".security.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		secStr := string(secRaw)
+		if !strings.Contains(secStr, "sk-openai") {
+			t.Errorf("%s: .security.yml missing new api key: %s", tc.dir, secStr)
+		}
+		if !strings.Contains(secStr, tc.wantToken) {
+			t.Errorf("%s: .security.yml lost its pico token %q: %s", tc.dir, tc.wantToken, secStr)
+		}
+	}
+}
+
+// TestReapplyModelScopeTenantWide proves ReapplyModelScope enumerates every
+// (subscription, role, user) leaf under a whole tenant via the
+// tenants/<t>/subscriptions/*/agents/*/users/* glob (mirroring reconcile.go's
+// existingWorkspaces pattern), across two different subscriptions.
+func TestReapplyModelScopeTenantWide(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		HostDataRoot:      "/host/data",
+		ContainerDataRoot: root,
+		ContainerPrefix:   "picoclaw",
+		Agents:            map[string]config.Agent{"alpha": testAgent()},
+	}
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+
+	keyA := WorkspaceKey{TenantID: "t1", SubsAccID: "sA", Role: "alpha", UserAccID: "u1"}
+	keyB := WorkspaceKey{TenantID: "t1", SubsAccID: "sB", Role: "alpha", UserAccID: "u2"}
+	dirA := provisionedWorkspace(t, root, keyA, "deepseek", "deepseek-chat", "tok-a")
+	dirB := provisionedWorkspace(t, root, keyB, "deepseek", "deepseek-chat", "tok-b")
+
+	tenantPath := config.TenantModelOverrideFile(root, "t1")
+	if err := m.setModelOverride(tenantPath, ModelSel{Provider: "anthropic", Name: "claude-sonnet"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.ReapplyModelScope(Scope{Kind: ScopeTenant, TenantID: "t1"}); err != nil {
+		t.Fatalf("ReapplyModelScope: %v", err)
+	}
+
+	for _, dir := range []string{dirA, dirB} {
+		raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfgJSON map[string]any
+		if err := json.Unmarshal(raw, &cfgJSON); err != nil {
+			t.Fatal(err)
+		}
+		defaults := cfgJSON["agents"].(map[string]any)["defaults"].(map[string]any)
+		if defaults["provider"] != "anthropic" || defaults["model_name"] != "claude-sonnet" {
+			t.Errorf("%s: provider/model_name = %v/%v, want anthropic/claude-sonnet", dir, defaults["provider"], defaults["model_name"])
+		}
+	}
+}
+
+// TestReapplyModelScopeSkipsUnprovisionedWorkspace proves a workspace with no
+// config.json yet (never provisioned) is left untouched rather than erroring
+// or partially seeding it — resolveModel already applies automatically at its
+// first provision instead.
+func TestReapplyModelScopeSkipsUnprovisionedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		HostDataRoot:      "/host/data",
+		ContainerDataRoot: root,
+		ContainerPrefix:   "picoclaw",
+		Agents:            map[string]config.Agent{"alpha": testAgent()},
+	}
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+	dir := config.UserWorkspace(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// No config.json written: the workspace directory exists (e.g. a lazily
+	// created leaf) but was never provisioned.
+
+	subPath := config.SubscriptionModelOverrideFile(root, "t1", "s1")
+	if err := m.setModelOverride(subPath, ModelSel{Provider: "openai", Name: "gpt-4o"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReapplyModelScope(Scope{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1"}); err != nil {
+		t.Fatalf("ReapplyModelScope should not error on an unprovisioned workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); !os.IsNotExist(err) {
+		t.Errorf("unprovisioned workspace should remain untouched, config.json stat err = %v", err)
+	}
+}
+
+// TestReapplyModelUser proves ReapplyModelUser re-applies the resolved model
+// (here, a per-user override) to exactly the one workspace it targets, using
+// SetModelOverride/EffectiveModel's ModelTarget shape end to end.
+func TestReapplyModelUser(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		HostDataRoot:      "/host/data",
+		ContainerDataRoot: root,
+		ContainerPrefix:   "picoclaw",
+		Agents:            map[string]config.Agent{"alpha": testAgent()},
+	}
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+	agent := testAgent()
+
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+	dir := provisionedWorkspace(t, root, key, "deepseek", "deepseek-chat", "tok-u1")
+
+	target := ModelTarget{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+	if err := m.SetModelOverride(target, ModelSel{Provider: "openai", Name: "gpt-4o"}); err != nil {
+		t.Fatalf("SetModelOverride: %v", err)
+	}
+	if _, err := os.Stat(config.UserModelOverrideFile(root, "t1", "s1", "alpha", "u1")); err != nil {
+		t.Fatalf("user override file not written: %v", err)
+	}
+
+	if model, level := m.EffectiveModel(agent, target); model == nil || model.Name != "gpt-4o" || level != "user" {
+		t.Fatalf("EffectiveModel = %v/%s, want gpt-4o at level user", model, level)
+	}
+
+	if err := m.ReapplyModelUser(key, agent); err != nil {
+		t.Fatalf("ReapplyModelUser: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfgJSON map[string]any
+	if err := json.Unmarshal(raw, &cfgJSON); err != nil {
+		t.Fatal(err)
+	}
+	defaults := cfgJSON["agents"].(map[string]any)["defaults"].(map[string]any)
+	if defaults["provider"] != "openai" || defaults["model_name"] != "gpt-4o" {
+		t.Errorf("provider/model_name = %v/%v, want openai/gpt-4o", defaults["provider"], defaults["model_name"])
+	}
+	secRaw, err := os.ReadFile(filepath.Join(dir, ".security.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(secRaw), "tok-u1") {
+		t.Errorf(".security.yml lost its pico token: %s", secRaw)
+	}
+
+	// ClearModelOverride falls back to the next level (agent default here).
+	if err := m.ClearModelOverride(target); err != nil {
+		t.Fatalf("ClearModelOverride: %v", err)
+	}
+	if model, level := m.EffectiveModel(agent, target); model != agent.Model || level != "default" {
+		t.Fatalf("after clear, EffectiveModel = %v/%s, want agent default", model, level)
+	}
+}
+
 func TestReapplyModelNilNoOp(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeTestConfigJSON(t, dir, "deepseek", "deepseek-chat")

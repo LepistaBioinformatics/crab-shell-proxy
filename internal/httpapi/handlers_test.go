@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Fixed UUIDs used across the authorization table tests.
@@ -49,6 +49,16 @@ type fakeOrch struct {
 	sharedDeletes   []docker.Scope
 	userFileDeletes []docker.WorkspaceKey
 	restartScopes   []docker.Scope
+
+	// admin-model-override fakes: record calls, return canned results.
+	effectiveModel  *config.ModelConfig
+	effectiveLevel  string
+	modelSetErr     error
+	modelClearErr   error
+	modelSets       []docker.ModelTarget
+	modelClears     []docker.ModelTarget
+	reapplyScopes   []docker.Scope
+	reapplyUserKeys []docker.WorkspaceKey
 }
 
 type secretWrite struct {
@@ -170,6 +180,36 @@ func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _ string) error {
 
 func (f *fakeOrch) RestartScope(scope docker.Scope) error {
 	f.restartScopes = append(f.restartScopes, scope)
+	return nil
+}
+
+func (f *fakeOrch) EffectiveModel(config.Agent, docker.ModelTarget) (*config.ModelConfig, string) {
+	return f.effectiveModel, f.effectiveLevel
+}
+
+func (f *fakeOrch) SetModelOverride(target docker.ModelTarget, _ docker.ModelSel) error {
+	if f.modelSetErr != nil {
+		return f.modelSetErr
+	}
+	f.modelSets = append(f.modelSets, target)
+	return nil
+}
+
+func (f *fakeOrch) ClearModelOverride(target docker.ModelTarget) error {
+	if f.modelClearErr != nil {
+		return f.modelClearErr
+	}
+	f.modelClears = append(f.modelClears, target)
+	return nil
+}
+
+func (f *fakeOrch) ReapplyModelScope(scope docker.Scope) error {
+	f.reapplyScopes = append(f.reapplyScopes, scope)
+	return nil
+}
+
+func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey, _ config.Agent) error {
+	f.reapplyUserKeys = append(f.reapplyUserKeys, key)
 	return nil
 }
 

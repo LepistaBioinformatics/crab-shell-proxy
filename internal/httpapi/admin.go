@@ -8,10 +8,11 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/google/uuid"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/google/uuid"
 )
 
 // Role slugs for scope discovery (SystemActor Display forms). Authorization
@@ -466,4 +467,229 @@ func (s *Server) handleAdminUserFilesDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "name": name})
+}
+
+// --- admin-model-override (CTX-AMO-06: keys never transit this API) ---
+
+// handleAdminModelsList returns the caller agent's SELECTABLE models
+// {provider,name} only — never an api key or apiKeyEnv (CTX-AMO-06).
+func (s *Server) handleAdminModelsList(w http.ResponseWriter, r *http.Request) {
+	agent, _, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	models := make([]map[string]any, 0, len(agent.SelectableModels()))
+	for _, mc := range agent.SelectableModels() {
+		models = append(models, map[string]any{"provider": mc.Provider, "name": mc.Name})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
+// resolveModelTarget parses+authorizes a model-override target shared by
+// GET/PUT/DELETE /v1/admin/model, regardless of whether the ids came from the
+// query string or a JSON body. When userAccIDStr is non-empty the target
+// addresses one specific user (authorized like adminUserFileKey: authority over
+// that user's subscription); otherwise it addresses a tenant/subscription scope
+// (authorized like the shared-content handlers). It writes the error response
+// and returns ok=false on any failure.
+func (s *Server) resolveModelTarget(w http.ResponseWriter, agent config.Agent, ident identity.Identity,
+	scopeKind, tenantIDStr, subsAccIDStr, userAccIDStr string) (docker.ModelTarget, docker.Scope, docker.WorkspaceKey, bool) {
+	if userAccIDStr != "" {
+		tenantID, err := uuid.Parse(tenantIDStr)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
+			return docker.ModelTarget{}, docker.Scope{}, docker.WorkspaceKey{}, false
+		}
+		subsAccID, err := uuid.Parse(subsAccIDStr)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
+			return docker.ModelTarget{}, docker.Scope{}, docker.WorkspaceKey{}, false
+		}
+		userAccID, err := uuid.Parse(userAccIDStr)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(`"user_acc_id" must be a UUID`))
+			return docker.ModelTarget{}, docker.Scope{}, docker.WorkspaceKey{}, false
+		}
+		if !authz.AuthorizeUserManagement(ident.Profile, tenantID.String(), subsAccID.String()) {
+			writeJSON(w, http.StatusForbidden, errBody("not authorized to manage this user's model"))
+			return docker.ModelTarget{}, docker.Scope{}, docker.WorkspaceKey{}, false
+		}
+		target := docker.ModelTarget{
+			Kind: docker.ScopeSubscription, TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
+			Role: agent.Key, UserAccID: userAccID.String(),
+		}
+		key := docker.WorkspaceKey{
+			TenantID: tenantID.String(), SubsAccID: subsAccID.String(), Role: agent.Key, UserAccID: userAccID.String(),
+		}
+		return target, docker.Scope{}, key, true
+	}
+
+	scope, msg := parseAdminScope(scopeKind, tenantIDStr, subsAccIDStr)
+	if msg != "" {
+		writeJSON(w, http.StatusBadRequest, errBody(msg))
+		return docker.ModelTarget{}, docker.Scope{}, docker.WorkspaceKey{}, false
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return docker.ModelTarget{}, docker.Scope{}, docker.WorkspaceKey{}, false
+	}
+	target := docker.ModelTarget{Kind: scope.Kind, TenantID: scope.TenantID, SubsAccID: scope.SubsAccID}
+	return target, scope, docker.WorkspaceKey{}, true
+}
+
+// writeModelResult writes the {provider,name,level} response shape shared by
+// GET/PUT — never an api key (CTX-AMO-06). A nil model (no override anywhere
+// and no agent default) reports empty provider/name at level "default".
+func writeModelResult(w http.ResponseWriter, model *config.ModelConfig, level string) {
+	resp := map[string]any{"level": level}
+	if model != nil {
+		resp["provider"] = model.Provider
+		resp["name"] = model.Name
+	} else {
+		resp["provider"] = ""
+		resp["name"] = ""
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAdminModelGet returns the current effective model override at a
+// scope/user (+ which level set it): tenant|subscription|user|default. NO key.
+func (s *Server) handleAdminModelGet(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	target, _, _, ok := s.resolveModelTarget(w, agent, ident, q.Get("scope"), q.Get("tenant_id"), q.Get("subs_acc_id"), q.Get("user_acc_id"))
+	if !ok {
+		return
+	}
+	model, level := s.Mgr.EffectiveModel(agent, target)
+	writeModelResult(w, model, level)
+}
+
+// adminModelRequest is the PUT /v1/admin/model body.
+type adminModelRequest struct {
+	Scope     string `json:"scope"`
+	TenantID  string `json:"tenant_id"`
+	SubsAccID string `json:"subs_acc_id"`
+	UserAccID string `json:"user_acc_id"`
+	Provider  string `json:"provider"`
+	Name      string `json:"name"`
+}
+
+// handleAdminModelSet sets a model override at a target: validates
+// {provider,name} against the agent's selectable allowlist (400 if not
+// selectable — nothing is written), writes the override, then re-applies it to
+// every established workspace under the target (or the single user) and
+// restarts the running ones so picoclaw reloads it.
+func (s *Server) handleAdminModelSet(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	var req adminModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
+		return
+	}
+	if agent.FindModel(req.Provider, req.Name) == nil {
+		writeJSON(w, http.StatusBadRequest, errBody("model is not in the agent's selectable allowlist"))
+		return
+	}
+	target, scope, key, ok := s.resolveModelTarget(w, agent, ident, req.Scope, req.TenantID, req.SubsAccID, req.UserAccID)
+	if !ok {
+		return
+	}
+	sel := docker.ModelSel{Provider: req.Provider, Name: req.Name}
+	if err := s.Mgr.SetModelOverride(target, sel); err != nil {
+		s.logf("admin: set model override failed target=%+v: %v", target, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if req.UserAccID != "" {
+		if err := s.Mgr.ReapplyModelUser(key, agent); err != nil {
+			s.logf("admin: reapply model user failed key=%+v: %v", key, err)
+		}
+	} else if err := s.Mgr.ReapplyModelScope(scope); err != nil {
+		s.logf("admin: reapply model scope failed scope=%+v: %v", scope, err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "provider": req.Provider, "name": req.Name})
+}
+
+// handleAdminModelClear clears a model override at a target (idempotent),
+// falls back to the next level (re-applied to every established workspace
+// under the target), and restarts the running ones.
+func (s *Server) handleAdminModelClear(w http.ResponseWriter, r *http.Request) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	target, scope, key, ok := s.resolveModelTarget(w, agent, ident, q.Get("scope"), q.Get("tenant_id"), q.Get("subs_acc_id"), q.Get("user_acc_id"))
+	if !ok {
+		return
+	}
+	if err := s.Mgr.ClearModelOverride(target); err != nil {
+		s.logf("admin: clear model override failed target=%+v: %v", target, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if q.Get("user_acc_id") != "" {
+		if err := s.Mgr.ReapplyModelUser(key, agent); err != nil {
+			s.logf("admin: reapply model user failed key=%+v: %v", key, err)
+		}
+	} else if err := s.Mgr.ReapplyModelScope(scope); err != nil {
+		s.logf("admin: reapply model scope failed scope=%+v: %v", scope, err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared"})
+}
+
+// handleAdminModelUsers mirrors handleAdminUsersList but includes each user's
+// current effective model {provider,name,level} for the per-user override UI.
+// Each user's OWN agent (by role) resolves its model — a subscription can host
+// users under several different agents. NO key ever appears (CTX-AMO-06).
+func (s *Server) handleAdminModelUsers(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	if !authz.AuthorizeUserManagement(ident.Profile, tenantID.String(), subsAccID.String()) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to manage users under this subscription"))
+		return
+	}
+	users, err := s.Mgr.ListSubscriptionUsers(tenantID.String(), subsAccID.String())
+	if err != nil {
+		s.logf("admin: list model users failed tenant=%s subs=%s: %v", tenantID, subsAccID, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	out := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		entry := map[string]any{"accId": u.AccID, "role": u.Role, "email": u.Email}
+		if userAgent, ok := s.Cfg.Agents[u.Role]; ok {
+			target := docker.ModelTarget{
+				Kind: docker.ScopeSubscription, TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
+				Role: u.Role, UserAccID: u.AccID,
+			}
+			model, level := s.Mgr.EffectiveModel(userAgent, target)
+			entry["level"] = level
+			if model != nil {
+				entry["provider"] = model.Provider
+				entry["name"] = model.Name
+			}
+		}
+		out = append(out, entry)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
