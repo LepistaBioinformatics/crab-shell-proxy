@@ -144,7 +144,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
 	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
-	token, err := provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, key, ownerEmail)
+	token, err := provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, m.resolveModel(agent, key), key, ownerEmail)
 	if err != nil {
 		return Target{}, err
 	}

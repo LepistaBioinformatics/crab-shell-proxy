@@ -109,9 +109,51 @@ type Agent struct {
 	// Model optionally pins the picoclaw provider/model and injects the API key
 	// from the environment into each user's config at provisioning time.
 	Model *ModelConfig `yaml:"model"`
+	// Models is the selectable model allowlist for admin-model-override (the
+	// default Model above stays the fallback). Each entry's APIKey is resolved
+	// from its APIKeyEnv exactly like Model, at Load.
+	Models []*ModelConfig `yaml:"models"`
 
 	// ResolvedToken is filled by Load from Token.
 	ResolvedToken string `yaml:"-"`
+}
+
+// modelKey identifies a ModelConfig by its selectable identity.
+type modelKey struct{ Provider, Name string }
+
+// SelectableModels returns the agent's selectable model list: the default
+// Model (if set) followed by Models, deduped by (provider, name) with the
+// first occurrence winning, in stable declaration order.
+func (a Agent) SelectableModels() []*ModelConfig {
+	seen := map[modelKey]bool{}
+	out := []*ModelConfig{}
+	add := func(mc *ModelConfig) {
+		if mc == nil {
+			return
+		}
+		k := modelKey{mc.Provider, mc.Name}
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, mc)
+	}
+	add(a.Model)
+	for _, mc := range a.Models {
+		add(mc)
+	}
+	return out
+}
+
+// FindModel returns the selectable ModelConfig matching {provider, name}, or
+// nil when none match.
+func (a Agent) FindModel(provider, name string) *ModelConfig {
+	for _, mc := range a.SelectableModels() {
+		if mc.Provider == provider && mc.Name == name {
+			return mc
+		}
+	}
+	return nil
 }
 
 // Config is the full proxy configuration.
@@ -181,6 +223,11 @@ func Load(path string) (*Config, error) {
 			// Empty is allowed (e.g. structural tests) — picoclaw will surface an
 			// auth error on the first model call rather than failing to boot.
 			agent.Model.APIKey = os.Getenv(agent.Model.APIKeyEnv)
+		}
+		for _, mc := range agent.Models {
+			if mc.APIKeyEnv != "" {
+				mc.APIKey = os.Getenv(mc.APIKeyEnv)
+			}
 		}
 		cfg.Agents[key] = agent
 	}
@@ -294,6 +341,18 @@ func (c *Config) validate() error {
 				return fmt.Errorf("agent %q: model requires both provider and name", key)
 			}
 		}
+		seen := map[modelKey]bool{}
+		for _, mc := range agent.Models {
+			if mc.Provider == "" || mc.Name == "" {
+				return fmt.Errorf("agent %q: models entries require both provider and name", key)
+			}
+			k := modelKey{mc.Provider, mc.Name}
+			if seen[k] {
+				return fmt.Errorf("agent %q: duplicate model {provider: %q, name: %q} in models",
+					key, mc.Provider, mc.Name)
+			}
+			seen[k] = true
+		}
 	}
 	return nil
 }
@@ -339,6 +398,26 @@ func SessionsDir(root, tenantID, subsAccID, role, userAccID string) string {
 func UploadsDir(root, tenantID, subsAccID, role, userAccID string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
 		"workspace", "uploads")
+}
+
+// TenantModelOverrideFile is the tenant-scope model override selection file
+// (admin-model-override): <root>/tenants/<t>/shared/model.json.
+func TenantModelOverrideFile(root, tenantID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID), "shared", "model.json")
+}
+
+// SubscriptionModelOverrideFile is the subscription-scope model override
+// selection file: <root>/tenants/<t>/subscriptions/<s>/shared/model.json.
+func SubscriptionModelOverrideFile(root, tenantID, subsAccID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"subscriptions", identity.SanitizeID(subsAccID), "shared", "model.json")
+}
+
+// UserModelOverrideFile is the per-user model override selection file, a
+// dotfile beside .crab-owner.json inside the user's workspace so picoclaw
+// ignores it: UserWorkspace/.crab-model.json.
+func UserModelOverrideFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID), ".crab-model.json")
 }
 
 // TenantSharedFilesDir is the tenant-scope shared-files store, cascaded

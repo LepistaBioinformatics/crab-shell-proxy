@@ -272,3 +272,159 @@ func TestWebhookSecretUnsetIsEmpty(t *testing.T) {
 		t.Errorf("webhookSecret should be empty when unset, got %q", cfg.ResolvedWebhookSecret)
 	}
 }
+
+const modelsSample = `
+listen: ":9000"
+hostDataRoot: "/host/data"
+network: "net"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+    model:
+      provider: "deepseek"
+      name: "deepseek-chat"
+      apiKeyEnv: "DEEPSEEK_KEY"
+    models:
+      - provider: "openai"
+        name: "gpt-4o"
+        apiKeyEnv: "OPENAI_KEY"
+      - provider: "anthropic"
+        name: "claude-sonnet"
+        apiKeyEnv: "ANTHROPIC_KEY"
+`
+
+func TestModelsAPIKeyResolvedAtLoad(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("DEEPSEEK_KEY", "sk-deepseek")
+	t.Setenv("OPENAI_KEY", "sk-openai")
+	t.Setenv("ANTHROPIC_KEY", "sk-anthropic")
+	cfg, err := Load(writeConfig(t, modelsSample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a := cfg.Agents["alpha"]
+	if a.Model.APIKey != "sk-deepseek" {
+		t.Errorf("default model apiKey = %q", a.Model.APIKey)
+	}
+	if len(a.Models) != 2 {
+		t.Fatalf("models = %v", a.Models)
+	}
+	if a.Models[0].APIKey != "sk-openai" || a.Models[1].APIKey != "sk-anthropic" {
+		t.Errorf("models apiKeys = %q, %q", a.Models[0].APIKey, a.Models[1].APIKey)
+	}
+}
+
+func TestModelsRequireProviderAndName(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	bad := `
+listen: ":9000"
+hostDataRoot: "/host/data"
+network: "net"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+    models:
+      - provider: "openai"
+        apiKeyEnv: "OPENAI_KEY"
+`
+	if _, err := Load(writeConfig(t, bad)); err == nil {
+		t.Fatal("expected error for models entry missing name")
+	}
+}
+
+func TestModelsRejectsDuplicateProviderName(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	dup := `
+listen: ":9000"
+hostDataRoot: "/host/data"
+network: "net"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+    models:
+      - provider: "openai"
+        name: "gpt-4o"
+        apiKeyEnv: "OPENAI_KEY"
+      - provider: "openai"
+        name: "gpt-4o"
+        apiKeyEnv: "OPENAI_KEY2"
+`
+	if _, err := Load(writeConfig(t, dup)); err == nil {
+		t.Fatal("expected error for duplicate {provider,name} in models")
+	}
+}
+
+func TestSelectableModelsDedupAndOrder(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("DEEPSEEK_KEY", "sk-deepseek")
+	t.Setenv("OPENAI_KEY", "sk-openai")
+	t.Setenv("ANTHROPIC_KEY", "sk-anthropic")
+	cfg, err := Load(writeConfig(t, modelsSample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a := cfg.Agents["alpha"]
+	sel := a.SelectableModels()
+	if len(sel) != 3 {
+		t.Fatalf("SelectableModels = %d entries, want 3: %+v", len(sel), sel)
+	}
+	if sel[0].Provider != "deepseek" || sel[1].Provider != "openai" || sel[2].Provider != "anthropic" {
+		t.Errorf("SelectableModels order = %v", sel)
+	}
+
+	// Dedup: an agent whose Models happens to repeat the default Model
+	// {provider,name} keeps only one entry.
+	dup := Agent{
+		Model: &ModelConfig{Provider: "deepseek", Name: "deepseek-chat"},
+		Models: []*ModelConfig{
+			{Provider: "deepseek", Name: "deepseek-chat"},
+			{Provider: "openai", Name: "gpt-4o"},
+		},
+	}
+	dsel := dup.SelectableModels()
+	if len(dsel) != 2 {
+		t.Fatalf("dedup SelectableModels = %d entries, want 2: %+v", len(dsel), dsel)
+	}
+}
+
+func TestFindModelHitAndMiss(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("DEEPSEEK_KEY", "sk-deepseek")
+	t.Setenv("OPENAI_KEY", "sk-openai")
+	t.Setenv("ANTHROPIC_KEY", "sk-anthropic")
+	cfg, err := Load(writeConfig(t, modelsSample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a := cfg.Agents["alpha"]
+	if mc := a.FindModel("openai", "gpt-4o"); mc == nil || mc.APIKey != "sk-openai" {
+		t.Errorf("FindModel hit = %v", mc)
+	}
+	if mc := a.FindModel("openai", "gpt-3.5"); mc != nil {
+		t.Errorf("FindModel miss should be nil, got %v", mc)
+	}
+}
+
+func TestModelOverrideFilePaths(t *testing.T) {
+	if got, want := TenantModelOverrideFile("/data", "t1"),
+		"/data/tenants/t1/shared/model.json"; got != want {
+		t.Errorf("TenantModelOverrideFile = %q, want %q", got, want)
+	}
+	if got, want := SubscriptionModelOverrideFile("/data", "t1", "s1"),
+		"/data/tenants/t1/subscriptions/s1/shared/model.json"; got != want {
+		t.Errorf("SubscriptionModelOverrideFile = %q, want %q", got, want)
+	}
+	if got, want := UserModelOverrideFile("/data", "t1", "s1", "alpha", "u1"),
+		"/data/tenants/t1/subscriptions/s1/agents/alpha/users/u1/.crab-model.json"; got != want {
+		t.Errorf("UserModelOverrideFile = %q, want %q", got, want)
+	}
+}
