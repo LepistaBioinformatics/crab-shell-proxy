@@ -847,3 +847,190 @@ func (s *Server) handleAdminRegisteredModelApply(w http.ResponseWriter, r *http.
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "provider": req.Provider, "name": req.Name})
 }
+
+// --- admin-shared-skills ---
+
+func skillErrStatus(err error) (int, bool) {
+	switch {
+	case errors.Is(err, docker.ErrInvalidSkillName),
+		errors.Is(err, docker.ErrReservedSkillName),
+		errors.Is(err, docker.ErrSkillMetadata),
+		errors.Is(err, docker.ErrSkillArchive):
+		return http.StatusBadRequest, true
+	}
+	return 0, false
+}
+
+func (s *Server) handleAdminSkillsList(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.adminScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	skills, err := s.Mgr.ListSharedSkills(scope)
+	if err != nil {
+		s.logf("admin: list shared skills failed scope=%+v: %v", scope, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skills": skills})
+}
+
+func (s *Server) handleAdminSkillsDoc(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.adminScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"name" query parameter is required`))
+		return
+	}
+	content, meta, err := s.Mgr.ReadSharedSkillDoc(scope, name)
+	if err != nil {
+		if st, ok := skillErrStatus(err); ok {
+			writeJSON(w, st, errBody(err.Error()))
+			return
+		}
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, errBody("skill not found"))
+			return
+		}
+		s.logf("admin: read skill doc failed scope=%+v name=%s: %v", scope, name, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "content": content, "meta": meta})
+}
+
+func (s *Server) handleAdminSkillsArchive(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.adminScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"name" query parameter is required`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.zip"`)
+	if err := s.Mgr.ArchiveSharedSkill(scope, name, w); err != nil {
+		// Headers may already be sent; just log (mirrors the streaming file route).
+		s.logf("admin: archive skill failed scope=%+v name=%s: %v", scope, name, err)
+	}
+}
+
+func (s *Server) handleAdminSkillsPost(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.Cfg.MediaMaxBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, errBody("upload exceeds the size limit"))
+		return
+	}
+	scope, ok := s.adminScope(w, r.FormValue)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name := r.FormValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("a `name` field is required"))
+		return
+	}
+	var writeErr error
+	if file, _, err := r.FormFile("file"); err == nil {
+		defer file.Close()
+		writeErr = s.Mgr.WriteSharedSkillZip(scope, name, file)
+	} else {
+		body := r.FormValue("body")
+		if body == "" {
+			writeJSON(w, http.StatusBadRequest, errBody("provide either a `file` (zip) or a `body` (SKILL.md)"))
+			return
+		}
+		writeErr = s.Mgr.WriteSharedSkillDoc(scope, name, body)
+	}
+	if writeErr != nil {
+		if st, ok := skillErrStatus(writeErr); ok {
+			writeJSON(w, st, errBody(writeErr.Error()))
+			return
+		}
+		s.logf("admin: write skill failed scope=%+v name=%s: %v", scope, name, writeErr)
+		writeJSON(w, http.StatusBadGateway, errBody(writeErr.Error()))
+		return
+	}
+	// Skills reach containers via the merged effective dir, so re-materialize it
+	// and restart the scope (stop/start, no recreate) to pick up the change.
+	if err := s.Mgr.SyncEffectiveSkillsForScope(scope); err != nil {
+		s.logf("admin: sync effective skills failed scope=%+v: %v", scope, err)
+	}
+	if err := s.Mgr.RestartScope(scope); err != nil {
+		s.logf("admin: restart scope after skill write failed scope=%+v: %v", scope, err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "name": name})
+}
+
+func (s *Server) handleAdminSkillsDelete(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.adminScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"name" query parameter is required`))
+		return
+	}
+	if err := s.Mgr.DeleteSharedSkill(scope, name); err != nil {
+		if st, ok := skillErrStatus(err); ok {
+			writeJSON(w, st, errBody(err.Error()))
+			return
+		}
+		s.logf("admin: delete skill failed scope=%+v name=%s: %v", scope, name, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if err := s.Mgr.SyncEffectiveSkillsForScope(scope); err != nil {
+		s.logf("admin: sync effective skills failed scope=%+v: %v", scope, err)
+	}
+	if err := s.Mgr.RestartScope(scope); err != nil {
+		s.logf("admin: restart scope after skill delete failed scope=%+v: %v", scope, err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "name": name})
+}

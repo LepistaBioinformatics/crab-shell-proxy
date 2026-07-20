@@ -80,6 +80,14 @@ func (f *fakeOrch) ListSecrets(docker.WorkspaceKey) (docker.SecretNames, error) 
 	return f.listResult, nil
 }
 
+func (f *fakeOrch) ListSharedSkills(docker.Scope) ([]docker.SkillMeta, error)              { return nil, nil }
+func (f *fakeOrch) ReadSharedSkillDoc(docker.Scope, string) (string, docker.SkillMeta, error) { return "", docker.SkillMeta{}, nil }
+func (f *fakeOrch) WriteSharedSkillDoc(docker.Scope, string, string) error                 { return nil }
+func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error              { return nil }
+func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error               { return nil }
+func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error                           { return nil }
+func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error                         { return nil }
+
 func (f *fakeOrch) ListRegisteredModels(string) ([]docker.RegisteredModel, error)              { return nil, nil }
 func (f *fakeOrch) AddRegisteredModel(string, docker.RegisteredModel) error                    { return nil }
 func (f *fakeOrch) DeleteRegisteredModel(string, string, string) error                         { return nil }

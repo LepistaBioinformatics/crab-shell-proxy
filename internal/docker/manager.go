@@ -243,6 +243,16 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		":" + mountDest + "/workspace/" + managedSkillRel + ":ro"
 	managedMemoryMount := filepath.Join(managedBase, managedMemoryRel) +
 		":" + mountDest + "/workspace/" + managedMemoryRel + ":ro"
+	// Cascade admin shared skills: materialize the (tenant, subscription)
+	// effective-skills dir and mount it whole READ-ONLY at picoclaw's global
+	// skills root. New/edited/removed skills reach picoclaw on the next
+	// stop/start (RestartScope) — no recreate, no transcript loss — mirroring
+	// the effective-secrets discipline.
+	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID); err != nil {
+		return fmt.Errorf("sync effective skills: %w", err)
+	}
+	skillsMount := config.EffectiveSkillsDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
+		":" + mountDest + "/skills:ro"
 	env := []string{
 		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
 		"HOME=" + m.cfg.PicoclawHome,
@@ -261,7 +271,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelMode:         string(agent.Mode),
 		},
 		Binds: []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount,
-			managedSkillMount, managedMemoryMount},
+			managedSkillMount, managedMemoryMount, skillsMount},
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -316,6 +326,9 @@ func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
 		config.TenantSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID),
 		config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 		config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+		config.TenantSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID),
+		config.SubscriptionSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+		config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {

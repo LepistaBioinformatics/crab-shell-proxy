@@ -115,6 +115,18 @@ type Orchestrator interface {
 	// ApplyRegisteredModelToUser writes a registered model (definition + key +
 	// active) into one user's workspace config.
 	ApplyRegisteredModelToUser(agentKey string, key docker.WorkspaceKey, provider, name string) error
+
+	// --- admin-shared-skills (per-scope skill dirs; keys never involved) ---
+
+	ListSharedSkills(scope docker.Scope) ([]docker.SkillMeta, error)
+	ReadSharedSkillDoc(scope docker.Scope, name string) (string, docker.SkillMeta, error)
+	WriteSharedSkillDoc(scope docker.Scope, name, body string) error
+	WriteSharedSkillZip(scope docker.Scope, name string, r io.Reader) error
+	ArchiveSharedSkill(scope docker.Scope, name string, w io.Writer) error
+	DeleteSharedSkill(scope docker.Scope, name string) error
+	// SyncEffectiveSkillsForScope rebuilds the merged effective-skills dir(s) a
+	// scope change affects, so the RO mount reflects it on the next stop/start.
+	SyncEffectiveSkillsForScope(scope docker.Scope) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client).
@@ -173,6 +185,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/registered-models", s.handleAdminRegisteredModelsPost)
 	mux.HandleFunc("DELETE /v1/admin/registered-models", s.handleAdminRegisteredModelsDelete)
 	mux.HandleFunc("POST /v1/admin/registered-models/apply", s.handleAdminRegisteredModelApply)
+	mux.HandleFunc("GET /v1/admin/skills", s.handleAdminSkillsList)
+	mux.HandleFunc("GET /v1/admin/skills/doc", s.handleAdminSkillsDoc)
+	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)
+	mux.HandleFunc("POST /v1/admin/skills", s.handleAdminSkillsPost)
+	mux.HandleFunc("DELETE /v1/admin/skills", s.handleAdminSkillsDelete)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.withLogging(mux)
 }

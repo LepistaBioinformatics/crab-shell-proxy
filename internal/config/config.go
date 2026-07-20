@@ -450,6 +450,32 @@ func SubscriptionSharedSecretsDir(root, tenantID, subsAccID string) string {
 		"subscriptions", identity.SanitizeID(subsAccID), "shared", "secrets")
 }
 
+// TenantSharedSkillsDir is the tenant-scope shared-skills store, cascaded
+// read-only into every user container under the tenant:
+// <root>/tenants/<t>/shared/skills. Each skill is a directory <name>/ with a
+// SKILL.md (+ optional supporting files).
+func TenantSharedSkillsDir(root, tenantID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID), "shared", "skills")
+}
+
+// SubscriptionSharedSkillsDir is the subscription-scope shared-skills store:
+// <root>/tenants/<t>/subscriptions/<s>/shared/skills.
+func SubscriptionSharedSkillsDir(root, tenantID, subsAccID string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"subscriptions", identity.SanitizeID(subsAccID), "shared", "skills")
+}
+
+// EffectiveSkillsDir is the per-(tenant, subscription) MERGED skills view
+// bind-mounted read-only at the container's global skills root
+// (<mountDest>/skills): subscription-scope skills override tenant-scope by name.
+// Materialized whenever a shared skill changes so additions/edits/removals reach
+// picoclaw live (via the mount) on the next stop/start, without a recreate:
+// <root>/effective-skills/<t>/<s>.
+func EffectiveSkillsDir(root, tenantID, subsAccID string) string {
+	return filepath.Join(root, "effective-skills",
+		identity.SanitizeID(tenantID), identity.SanitizeID(subsAccID))
+}
+
 // StoreDir is the per-(user, agent) secret store, kept OUTSIDE the
 // tenant/subscription tree so the same secret reaches every workspace of that
 // pair (CTX-AC-03): <root>/user-secrets/<u>/<role>. Keyed only by the user
