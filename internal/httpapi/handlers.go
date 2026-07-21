@@ -22,6 +22,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/google/uuid"
 )
 
@@ -129,9 +130,10 @@ type Orchestrator interface {
 	SyncEffectiveSkillsForScope(scope docker.Scope) error
 }
 
-// Turner runs one conversational turn (satisfied by *pico.Client).
+// Turner runs one conversational turn (satisfied by *pico.Client and
+// *hermes.Client).
 type Turner interface {
-	RunTurn(ctx context.Context, wsURL, picoToken, sessionID, userContent string, onDelta func(string)) (string, error)
+	RunTurn(ctx context.Context, req turn.Request, onDelta func(string)) (string, error)
 }
 
 // Server holds the handler dependencies.
@@ -139,8 +141,34 @@ type Server struct {
 	Cfg      *config.Config
 	Resolver identity.Resolver
 	Mgr      Orchestrator
-	Pico     Turner
-	Logf     func(string, ...any)
+	// Pico runs picoclaw turns; Hermes runs hermes-agent turns. Selected per
+	// target by turnerFor.
+	Pico   Turner
+	Hermes Turner
+	Logf   func(string, ...any)
+}
+
+// turnerFor selects the turn runner for a resolved target's harness.
+func (s *Server) turnerFor(harness string) Turner {
+	if harness == config.HarnessHermes {
+		return s.Hermes
+	}
+	return s.Pico
+}
+
+// turnModelFor is the model name to send in the turn request body. picoclaw
+// ignores it (it is pinned server-side), so the OpenAI display value is fine.
+// hermes puts it straight into its request body, so the "picoclaw" display
+// sentinel must NOT leak — send the agent's configured model, or "" to let
+// hermes fall back to its config.yaml default.
+func turnModelFor(agent config.Agent, display string) string {
+	if agent.Harness != config.HarnessHermes {
+		return display
+	}
+	if agent.Model != nil {
+		return agent.Model.Name
+	}
+	return ""
 }
 
 // Handler returns the routed http.Handler.
@@ -191,6 +219,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/skills", s.handleAdminSkillsPost)
 	mux.HandleFunc("DELETE /v1/admin/skills", s.handleAdminSkillsDelete)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
+	// directly from the service host via openapiPath, not through the gateway).
+	mux.HandleFunc("GET /doc/openapi.json", s.handleOpenAPI)
 	return s.withLogging(mux)
 }
 
@@ -395,7 +426,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	content, err := s.Pico.RunTurn(turnCtx, tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent, nil)
+	content, err := s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
+		Endpoint:   tgt.Endpoint,
+		AuthToken:  tgt.AuthToken,
+		SessionID:  sessionKey,
+		SessionKey: key.UserAccID + ":" + key.Role,
+		Model:      turnModelFor(agent, model),
+		Content:    userContent,
+	}, nil)
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("chat: turn failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)

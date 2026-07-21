@@ -42,6 +42,16 @@ const (
 	ModeContinuous Mode = "continuous"
 )
 
+// Harness kinds select the agent runtime an agent orchestrates.
+const (
+	// HarnessPicoclaw is the default: a picoclaw container spoken to over the
+	// Pico Protocol WebSocket.
+	HarnessPicoclaw = "picoclaw"
+	// HarnessHermes is Nous Research's hermes-agent, driven over its
+	// OpenAI-compatible HTTP API server.
+	HarnessHermes = "hermes"
+)
+
 // secret is a value sourced either inline or from an environment variable
 // (`{ env: "VAR" }`), mirroring mycelium's own field-level env resolver.
 type secret struct {
@@ -84,15 +94,27 @@ func (s secret) resolve() (string, error) {
 // picoclaw config/.security.yml at provisioning time.
 type ModelConfig struct {
 	Provider  string `yaml:"provider"`
-	Name      string `yaml:"name"`      // must match a picoclaw model_list model_name
-	APIKeyEnv string `yaml:"apiKeyEnv"` // env var holding the API key
+	Name      string `yaml:"name"`      // picoclaw: a model_list model_name; hermes: model.default
+	APIKeyEnv string `yaml:"apiKeyEnv"` // env var (in THIS proxy) holding the API key
 	APIKey    string `yaml:"-"`         // resolved from APIKeyEnv at load
+	// BaseURL is the provider endpoint for OpenAI-compatible harnesses (hermes):
+	// written to config.yaml's model.base_url (e.g. https://api.z.ai/api/paas/v4).
+	// Ignored by picoclaw.
+	BaseURL string `yaml:"baseUrl"`
+	// KeyEnvName is the env var name the HARNESS reads the key under INSIDE its
+	// container (hermes only; provider-specific and not derivable from Provider,
+	// e.g. "GLM_API_KEY" for provider "zai"). The proxy injects APIKey under this
+	// name. Ignored by picoclaw.
+	KeyEnvName string `yaml:"keyEnvName"`
 }
 
 // Agent is one declared picoclaw agent (e.g. alpha, beta).
 type Agent struct {
 	// Key is the catalog key (map key), e.g. "alpha".
 	Key string `yaml:"-"`
+	// Harness selects the agent runtime kind (HarnessPicoclaw | HarnessHermes).
+	// Empty defaults to picoclaw at Load, so existing configs are unchanged.
+	Harness string `yaml:"harness"`
 	// ServiceName matches the value mycelium injects as x-mycelium-service-name
 	// (e.g. "picoclaw-alpha"). Requests are routed to an agent by this value.
 	ServiceName string `yaml:"serviceName"`
@@ -106,6 +128,12 @@ type Agent struct {
 	Mode Mode `yaml:"mode"`
 	// IdleTimeout is the scale-to-zero inactivity window (ignored when continuous).
 	IdleTimeout Duration `yaml:"idleTimeout"`
+	// StartupDeadline optionally overrides the global StartupDeadline for this
+	// agent's cold-start health-wait. Heavy harnesses (e.g. hermes: bundled-skill
+	// sync + browser bootstrap) need much longer than picoclaw to serve their
+	// port. Safe to raise well past mycelium's 60s gatewayTimeout because chat is
+	// streamed (the 200 is flushed before the cold start). 0 => use the global.
+	StartupDeadline Duration `yaml:"startupDeadline"`
 	// Model optionally pins the picoclaw provider/model and injects the API key
 	// from the environment into each user's config at provisioning time.
 	Model *ModelConfig `yaml:"model"`
@@ -168,7 +196,10 @@ type Config struct {
 	// Network is the docker network spawned containers join (compose-qualified).
 	Network       string `yaml:"network"`
 	PicoclawImage string `yaml:"picoclawImage"`
-	PicoclawPort  int    `yaml:"picoclawPort"`
+	// HermesImage is the image for hermes-agent harness agents. Defaulted so
+	// existing configs need not set it.
+	HermesImage  string `yaml:"hermesImage"`
+	PicoclawPort int    `yaml:"picoclawPort"`
 	// PicoclawUser is the "uid:gid" the spawned picoclaw containers run as.
 	// Empty => root (the image default). Non-root requires relocating HOME
 	// (PicoclawHome) because the image's /root is 0700.
@@ -179,7 +210,9 @@ type Config struct {
 	PicoclawHome    string   `yaml:"picoclawHome"`
 	StartupDeadline Duration `yaml:"startupDeadline"`
 	TurnTimeout     Duration `yaml:"turnTimeout"`
-	// ContainerPrefix prefixes every managed container name (default "picoclaw").
+	// ContainerPrefix prefixes every managed container name (default "crabshell").
+	// Harness-agnostic: a container's harness is recorded in its labels/config,
+	// not its name (the name is <prefix>-<role>-<hash>).
 	ContainerPrefix string `yaml:"containerPrefix"`
 	// WebhookSecret authenticates POST /v1/accounts (the mycelium
 	// subscriptionAccount.created webhook); env-resolvable like agent tokens so
@@ -218,6 +251,9 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("agent %q token: %w", key, err)
 		}
 		agent.Key = key
+		if agent.Harness == "" {
+			agent.Harness = HarnessPicoclaw
+		}
 		agent.ResolvedToken = tok
 		if agent.Model != nil && agent.Model.APIKeyEnv != "" {
 			// Empty is allowed (e.g. structural tests) — picoclaw will surface an
@@ -274,6 +310,9 @@ func (c *Config) applyDefaults() {
 	if c.PicoclawImage == "" {
 		c.PicoclawImage = "docker.io/sipeed/picoclaw:latest"
 	}
+	if c.HermesImage == "" {
+		c.HermesImage = "docker.io/nousresearch/hermes-agent:latest"
+	}
 	if c.PicoclawPort == 0 {
 		c.PicoclawPort = 18790
 	}
@@ -284,7 +323,7 @@ func (c *Config) applyDefaults() {
 		c.TurnTimeout = Duration(120 * time.Second)
 	}
 	if c.ContainerPrefix == "" {
-		c.ContainerPrefix = "picoclaw"
+		c.ContainerPrefix = "crabshell"
 	}
 	if c.PicoclawHome == "" {
 		// Default to a non-root-writable HOME so the default posture (non-root
@@ -326,6 +365,12 @@ func (c *Config) validate() error {
 		}
 		if agent.Template == "" {
 			return fmt.Errorf("agent %q: template is required", key)
+		}
+		switch agent.Harness {
+		case "", HarnessPicoclaw, HarnessHermes:
+		default:
+			return fmt.Errorf("agent %q: harness must be %q or %q, got %q",
+				key, HarnessPicoclaw, HarnessHermes, agent.Harness)
 		}
 		switch agent.Mode {
 		case ModeScaleToZero, ModeContinuous:

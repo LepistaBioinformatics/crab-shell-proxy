@@ -62,7 +62,7 @@ func TestLoadResolvesAndParses(t *testing.T) {
 		t.Errorf("inline token = %q", cfg.Agents["gamma"].ResolvedToken)
 	}
 	// Defaults applied.
-	if cfg.PicoclawPort != 18790 || cfg.ContainerPrefix != "picoclaw" {
+	if cfg.PicoclawPort != 18790 || cfg.ContainerPrefix != "crabshell" {
 		t.Errorf("defaults not applied: port=%d prefix=%q", cfg.PicoclawPort, cfg.ContainerPrefix)
 	}
 }

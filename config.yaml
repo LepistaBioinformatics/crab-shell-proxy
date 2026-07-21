@@ -39,7 +39,7 @@ picoclawHome: "/data"
 # never races the gateway's own 504.
 startupDeadline: 35s
 turnTimeout: 120s
-containerPrefix: "picoclaw"
+containerPrefix: "crabshell"
 
 # Shared secret authenticating the mycelium subscriptionAccount.created webhook
 # at POST /v1/accounts. Sourced from the environment so it never lives in this
@@ -48,7 +48,7 @@ webhookSecret: { env: "CRAB_WEBHOOK_SECRET" }
 
 agents:
   alpha:
-    serviceName: "picoclaw-alpha" # matches x-mycelium-service-name mycelium injects
+    serviceName: "alpha" # matches x-mycelium-service-name mycelium injects
     token: { env: "MYC_PICOCLAW_ALPHA_TOKEN" }
     template: "alpha" # <containerDataRoot>/templates/alpha/{config.json,.security.yml}
     # data now lives under <containerDataRoot>/tenants/<t>/subscriptions/<s>/agents/alpha/users/<u>
@@ -70,8 +70,9 @@ agents:
       provider: "deepseek"
       name: "deepseek-chat"
       apiKeyEnv: "PICOCLAW_ALPHA_API_KEY"
+
   beta:
-    serviceName: "picoclaw-beta"
+    serviceName: "beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }
     template: "beta"
     mode: "continuous" # keep alive so picoclaw's in-memory session isn't reset (see alpha)
@@ -80,3 +81,27 @@ agents:
       provider: "deepseek"
       name: "deepseek-chat"
       apiKeyEnv: "PICOCLAW_BETA_API_KEY"
+
+  # A hermes-agent (Nous Research) instance instead of picoclaw. Driven over its
+  # OpenAI-compatible API server (:8642), not the Pico Protocol. The proxy seeds
+  # config.yaml (model.default/provider/base_url), generates the API server key,
+  # and injects the provider key as container env under keyEnvName.
+  hermes-glm:
+    harness: hermes
+    serviceName: "hermes-glm" # matches x-mycelium-service-name mycelium injects
+    token: { env: "MYC_HERMES_GLM_TOKEN" }
+    template: "hermes-glm" # <containerDataRoot>/templates/hermes-glm/config.yaml (bundled fallback if absent)
+    mode: "continuous"
+    idleTimeout: 15m
+    # hermes boots much slower than picoclaw (bundled-skill sync + browser
+    # bootstrap under s6), so it needs far longer than the global 35s to serve
+    # :8642 — else the proxy's health-wait times out and tears the container
+    # down (~37s). Safe past the gateway's 60s timeout: chat is streamed (the
+    # 200 is flushed before the cold start).
+    startupDeadline: 180s
+    model:
+      provider: "zai"                             # hermes config.yaml model.provider
+      name: "glm-4.7-flash"                        # hermes config.yaml model.default
+      baseUrl: "https://api.z.ai/api/paas/v4"      # hermes config.yaml model.base_url
+      apiKeyEnv: "PROXY_GLM_API_KEY"               # env IN THIS PROXY holding the key
+      keyEnvName: "GLM_API_KEY"                    # env name hermes reads INSIDE the container

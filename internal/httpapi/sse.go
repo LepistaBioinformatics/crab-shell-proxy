@@ -10,6 +10,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 )
 
 // turnTimeout bounds a picoclaw turn once it is decoupled from the client
@@ -78,13 +79,19 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		return
 	}
 
-	_, err = s.Pico.RunTurn(turnCtx, tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent,
-		func(delta string) {
-			if clientCtx.Err() != nil {
-				return // client gone — keep draining so picoclaw finishes its write
-			}
-			writeChunk(map[string]any{"content": delta}, nil)
-		})
+	_, err = s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
+		Endpoint:   tgt.Endpoint,
+		AuthToken:  tgt.AuthToken,
+		SessionID:  sessionKey,
+		SessionKey: key.UserAccID + ":" + key.Role,
+		Model:      turnModelFor(agent, model),
+		Content:    userContent,
+	}, func(delta string) {
+		if clientCtx.Err() != nil {
+			return // client gone — keep draining so the agent finishes its write
+		}
+		writeChunk(map[string]any{"content": delta}, nil)
+	})
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("stream: turn failed: %v", err)

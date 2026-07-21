@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -233,7 +235,7 @@ func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.W
 		return docker.Target{}, f.ensureErr
 	}
 	f.keys = append(f.keys, key)
-	return docker.Target{Name: "picoclaw-alpha-h", WSEndpoint: "ws://x:1/pico/ws", PicoToken: "t"}, nil
+	return docker.Target{Name: "picoclaw-alpha-h", Endpoint: "ws://x:1/pico/ws", AuthToken: "t"}, nil
 }
 func (f *fakeOrch) ArmIdle(config.Agent, docker.WorkspaceKey) { f.armed++ }
 func (f *fakeOrch) ScaffoldSubscription(tenantID, subsAccID string) (bool, error) {
@@ -254,7 +256,7 @@ type fakeTurner struct {
 	deltas  []string
 }
 
-func (f *fakeTurner) RunTurn(_ context.Context, _, _, _, _ string, onDelta func(string)) (string, error) {
+func (f *fakeTurner) RunTurn(_ context.Context, _ turn.Request, onDelta func(string)) (string, error) {
 	for _, d := range f.deltas {
 		if onDelta != nil {
 			onDelta(d)
@@ -293,6 +295,35 @@ func testServer(orch Orchestrator, turner Turner) *Server {
 		},
 	}
 	return &Server{Cfg: cfg, Resolver: res, Mgr: orch, Pico: turner}
+}
+
+func TestOpenAPIDocServedUnauthenticated(t *testing.T) {
+	s := testServer(newFakeOrch(), &fakeTurner{})
+	w := httptest.NewRecorder()
+	// No Authorization / profile headers: mycelium discovery fetches this
+	// directly from the service host, unauthenticated.
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/doc/openapi.json", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json", ct)
+	}
+	var doc struct {
+		OpenAPI string `json:"openapi"`
+		Paths   map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if !strings.HasPrefix(doc.OpenAPI, "3.") {
+		t.Errorf("openapi version = %q, want 3.x", doc.OpenAPI)
+	}
+	if doc.Paths["/v1/chat/completions"]["post"].OperationID != "chatCompletion" {
+		t.Errorf("chatCompletion operation missing; paths = %+v", doc.Paths)
+	}
 }
 
 func chatReq(t *testing.T, body string, headers map[string]string) *http.Request {
