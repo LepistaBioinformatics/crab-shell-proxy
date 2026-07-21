@@ -152,8 +152,12 @@ func (m *Manager) ApplyRegisteredModelToUser(agentKey string, key WorkspaceKey, 
 		return fmt.Errorf("parse config.json: %w", err)
 	}
 	list, _ := cfg["model_list"].([]any)
+	// picoclaw/litellm reads the model's key from the config.json model_list
+	// entry (the template ships a "sk-dummy-placeholder" there), NOT from
+	// .security.yml — so the real key MUST go here or the provider 401s.
 	entry := map[string]any{
-		"model_name": rm.Name, "provider": rm.Provider, "model": rm.Model, "api_base": rm.APIBase, "enabled": true,
+		"model_name": rm.Name, "provider": rm.Provider, "model": rm.Model,
+		"api_base": rm.APIBase, "api_key": rm.APIKey, "enabled": true,
 	}
 	replaced := false
 	for i, item := range list {

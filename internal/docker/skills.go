@@ -377,11 +377,22 @@ func (m *Manager) syncEffectiveSkills(tenantID, subsAccID string) error {
 		}
 	}
 
-	if err := os.RemoveAll(eff); err != nil {
-		return err
-	}
+	// Clear the effective dir's CONTENTS but keep the dir itself: containers
+	// bind-mount this directory, and removing+recreating it would orphan their
+	// mount to the old (now-empty) inode. Emptying its children in place keeps
+	// the inode stable so the RO bind reflects updates live (same discipline as
+	// the effective-secrets dir).
 	if err := os.MkdirAll(eff, 0o700); err != nil {
 		return err
+	}
+	existing, err := os.ReadDir(eff)
+	if err != nil {
+		return err
+	}
+	for _, e := range existing {
+		if err := os.RemoveAll(filepath.Join(eff, e.Name())); err != nil {
+			return err
+		}
 	}
 	for name, src := range sources {
 		if err := copyTree(src, filepath.Join(eff, name)); err != nil {

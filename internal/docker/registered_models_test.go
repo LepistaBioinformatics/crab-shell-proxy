@@ -66,8 +66,14 @@ func TestRegisteredModelsRoundTrip(t *testing.T) {
 		t.Errorf("active model not set: %+v", defs)
 	}
 	list := out["model_list"].([]any)
-	if len(list) != 1 || list[0].(map[string]any)["api_base"] != "https://api.openai.com/v1" {
+	entry := list[0].(map[string]any)
+	if len(list) != 1 || entry["api_base"] != "https://api.openai.com/v1" {
 		t.Errorf("model definition not written: %+v", list)
+	}
+	// The key MUST land in the config.json entry — that's where litellm reads it
+	// (the template ships a placeholder there); .security.yml alone is ignored.
+	if entry["api_key"] != "sk-secret" {
+		t.Errorf("api_key not written into config.json entry: %+v", entry)
 	}
 	sec, _ := readSecurityConfig(filepath.Join(userDir, ".security.yml"))
 	ml := sec["model_list"].(map[string]any)["gpt-5.4"].(map[string]any)

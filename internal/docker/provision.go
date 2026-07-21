@@ -35,6 +35,16 @@ func provision(userDir, templateDir, storeDir, home, user string, model *config.
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
+		// Self-heal: if the agent's template is missing (e.g. data/ was wiped or
+		// never seeded), materialize the bundled fallback template first so
+		// provisioning succeeds instead of failing on a missing seed.
+		if _, tErr := os.Stat(filepath.Join(templateDir, "config.json")); tErr != nil {
+			// "picoclaw" is the only harness today; thread the agent's harness
+			// here once multi-harness support lands.
+			if err := materializeDefaultTemplate(templateDir, "picoclaw", user); err != nil {
+				return "", fmt.Errorf("materialize default template: %w", err)
+			}
+		}
 		if err := seedFromTemplate(userDir, templateDir); err != nil {
 			return "", err
 		}

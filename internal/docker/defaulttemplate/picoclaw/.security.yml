@@ -1,0 +1,4 @@
+channel_list:
+  pico:
+    settings:
+      token: seed
