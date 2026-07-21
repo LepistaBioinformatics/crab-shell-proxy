@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/coder/websocket"
 )
 
@@ -121,11 +122,12 @@ type Client struct {
 	TurnTimeout time.Duration
 }
 
-// RunTurn opens a Pico Protocol WebSocket to wsURL (e.g.
-// ws://picoclaw-alpha-<hash>:18790/pico/ws), sends userContent for sessionID,
+// RunTurn opens a Pico Protocol WebSocket to req.Endpoint (e.g.
+// ws://picoclaw-alpha-<hash>:18790/pico/ws), sends req.Content for req.SessionID,
 // and returns the final assistant text. If onDelta is non-nil it is called with
-// each newly-appended chunk as it streams in.
-func (c *Client) RunTurn(ctx context.Context, wsURL, picoToken, sessionID, userContent string, onDelta func(string)) (string, error) {
+// each newly-appended chunk as it streams in. req.SessionKey/Model are unused
+// (picoclaw is pinned server-side).
+func (c *Client) RunTurn(ctx context.Context, req turn.Request, onDelta func(string)) (string, error) {
 	timeout := c.TurnTimeout
 	if timeout <= 0 {
 		timeout = 120 * time.Second
@@ -133,17 +135,17 @@ func (c *Client) RunTurn(ctx context.Context, wsURL, picoToken, sessionID, userC
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	u, err := url.Parse(wsURL)
+	u, err := url.Parse(req.Endpoint)
 	if err != nil {
 		return "", fmt.Errorf("invalid picoclaw ws url: %w", err)
 	}
 	q := u.Query()
-	q.Set("session_id", sessionID)
+	q.Set("session_id", req.SessionID)
 	u.RawQuery = q.Encode()
 
 	conn, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{
 		// Pico Protocol authenticates via the token.<token> subprotocol.
-		Subprotocols: []string{"token." + picoToken},
+		Subprotocols: []string{"token." + req.AuthToken},
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to picoclaw pico channel (check token/url): %w", err)
@@ -157,8 +159,8 @@ func (c *Client) RunTurn(ctx context.Context, wsURL, picoToken, sessionID, userC
 	// extra payload fields.
 	send, err := json.Marshal(map[string]any{
 		"type":       "message.send",
-		"session_id": sessionID,
-		"payload":    map[string]any{"content": userContent},
+		"session_id": req.SessionID,
+		"payload":    map[string]any{"content": req.Content},
 	})
 	if err != nil {
 		return "", err

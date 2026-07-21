@@ -46,14 +46,25 @@ type Docker interface {
 	List(ctx context.Context, label string) ([]ContainerSummary, error)
 }
 
-// HealthChecker reports whether picoclaw inside a container is health-ready.
+// HealthChecker reports whether the harness inside a container is health-ready
+// (an HTTP GET returning 2xx on the harness port).
 type HealthChecker func(ctx context.Context, name string, port int) error
+
+// hermesAPIPort is the OpenAI-compatible API server port hermes-agent listens on
+// (API_SERVER_PORT); the picoclaw port is configurable (cfg.PicoclawPort).
+const hermesAPIPort = 8642
 
 // Target is the resolved connection info for a running per-user container.
 type Target struct {
-	Name       string
-	WSEndpoint string // ws://<name>:<port>/pico/ws
-	PicoToken  string
+	Name string
+	// Endpoint is the harness-specific address: ws://<name>:<port>/pico/ws
+	// (picoclaw) or http://<name>:8642 (hermes).
+	Endpoint string
+	// AuthToken is the pico channel token (picoclaw) or API server bearer key
+	// (hermes).
+	AuthToken string
+	// Harness selects which turner runs against this target.
+	Harness string
 }
 
 type keyState struct {
@@ -103,7 +114,28 @@ func (m *Manager) ContainerName(key WorkspaceKey) string {
 		identity.SanitizeID(key.Role), hex.EncodeToString(sum[:])[:16])
 }
 
-func (m *Manager) wsEndpoint(name string) string {
+// harnessPort is the health/API port for an agent's harness.
+func (m *Manager) harnessPort(agent config.Agent) int {
+	if agent.Harness == config.HarnessHermes {
+		return hermesAPIPort
+	}
+	return m.cfg.PicoclawPort
+}
+
+// startupDeadline is how long to wait for an agent's container to become
+// health-ready: the agent's own override when set, else the global.
+func (m *Manager) startupDeadline(agent config.Agent) time.Duration {
+	if agent.StartupDeadline > 0 {
+		return agent.StartupDeadline.Std()
+	}
+	return m.cfg.StartupDeadline.Std()
+}
+
+// endpoint is the address a turner dials for a running container of this agent.
+func (m *Manager) endpoint(agent config.Agent, name string) string {
+	if agent.Harness == config.HarnessHermes {
+		return fmt.Sprintf("http://%s:%d", name, hermesAPIPort)
+	}
 	return fmt.Sprintf("ws://%s:%d/pico/ws", name, m.cfg.PicoclawPort)
 }
 
@@ -143,8 +175,19 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
-	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
-	token, err := provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, agent.Model, key, ownerEmail)
+	model := m.resolveModel(agent, key)
+
+	// Provision the per-user data dir and obtain the auth token to reach the
+	// container: picoclaw's pico channel token, or hermes' generated API server
+	// bearer key. Both are persisted per user so a returning user reuses them.
+	var authToken string
+	var err error
+	if agent.Harness == config.HarnessHermes {
+		authToken, err = provisionHermes(userDir, templateDir, m.cfg.PicoclawUser, model)
+	} else {
+		storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+		authToken, err = provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, model, key, ownerEmail)
+	}
 	if err != nil {
 		return Target{}, err
 	}
@@ -157,8 +200,14 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	createdNow := false
 	switch {
 	case !st.Exists:
-		if err := m.create(ctx, agent, key, name); err != nil {
-			return Target{}, err
+		var cerr error
+		if agent.Harness == config.HarnessHermes {
+			cerr = m.createHermes(ctx, agent, key, name, model, authToken)
+		} else {
+			cerr = m.create(ctx, agent, key, name)
+		}
+		if cerr != nil {
+			return Target{}, cerr
 		}
 		createdNow = true
 		if err := m.docker.Start(ctx, name); err != nil {
@@ -170,16 +219,16 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		}
 	}
 
-	if err := m.waitHealthy(ctx, name); err != nil {
+	if err := m.waitHealthy(ctx, name, m.harnessPort(agent), m.startupDeadline(agent)); err != nil {
 		// Don't leak a half-started container we just created.
 		if createdNow {
 			_ = m.docker.Stop(context.Background(), name, 5*time.Second)
 			_ = m.docker.Remove(context.Background(), name)
 		}
-		return Target{}, fmt.Errorf("picoclaw %s did not become ready: %w", name, err)
+		return Target{}, fmt.Errorf("%s %s did not become ready: %w", agent.Harness, name, err)
 	}
 
-	return Target{Name: name, WSEndpoint: m.wsEndpoint(name), PicoToken: token}, nil
+	return Target{Name: name, Endpoint: m.endpoint(agent, name), AuthToken: authToken, Harness: agent.Harness}, nil
 }
 
 func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceKey, name string) error {
@@ -243,6 +292,16 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		":" + mountDest + "/workspace/" + managedSkillRel + ":ro"
 	managedMemoryMount := filepath.Join(managedBase, managedMemoryRel) +
 		":" + mountDest + "/workspace/" + managedMemoryRel + ":ro"
+	// Cascade admin shared skills: materialize the (tenant, subscription)
+	// effective-skills dir and mount it whole READ-ONLY at picoclaw's global
+	// skills root. New/edited/removed skills reach picoclaw on the next
+	// stop/start (RestartScope) — no recreate, no transcript loss — mirroring
+	// the effective-secrets discipline.
+	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID); err != nil {
+		return fmt.Errorf("sync effective skills: %w", err)
+	}
+	skillsMount := config.EffectiveSkillsDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
+		":" + mountDest + "/skills:ro"
 	env := []string{
 		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
 		"HOME=" + m.cfg.PicoclawHome,
@@ -261,7 +320,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelMode:         string(agent.Mode),
 		},
 		Binds: []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount,
-			managedSkillMount, managedMemoryMount},
+			managedSkillMount, managedMemoryMount, skillsMount},
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -275,15 +334,15 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	return nil
 }
 
-func (m *Manager) waitHealthy(ctx context.Context, name string) error {
-	deadline := time.Now().Add(m.cfg.StartupDeadline.Std())
+func (m *Manager) waitHealthy(ctx context.Context, name string, port int, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		lastErr = m.health(attemptCtx, name, m.cfg.PicoclawPort)
+		lastErr = m.health(attemptCtx, name, port)
 		cancel()
 		if lastErr == nil {
 			return nil
@@ -316,6 +375,9 @@ func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
 		config.TenantSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID),
 		config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 		config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+		config.TenantSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID),
+		config.SubscriptionSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+		config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -376,8 +438,14 @@ func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
 	if err := m.docker.Start(ctx, name); err != nil {
 		return err
 	}
-	if err := m.waitHealthy(ctx, name); err != nil {
-		return fmt.Errorf("picoclaw %s did not become ready after restart: %w", name, err)
+	port := m.cfg.PicoclawPort
+	budget := m.cfg.StartupDeadline.Std()
+	if agent, ok := m.cfg.Agents[key.Role]; ok {
+		port = m.harnessPort(agent)
+		budget = m.startupDeadline(agent)
+	}
+	if err := m.waitHealthy(ctx, name, port, budget); err != nil {
+		return fmt.Errorf("container %s did not become ready after restart: %w", name, err)
 	}
 	if agent, ok := m.cfg.Agents[key.Role]; ok && agent.Mode == config.ModeScaleToZero {
 		m.armLocked(ks, name, agent.IdleTimeout.Std())

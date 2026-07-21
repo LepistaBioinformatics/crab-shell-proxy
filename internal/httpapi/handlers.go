@@ -18,11 +18,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
+	"github.com/google/uuid"
 )
 
 // Orchestrator is the container-lifecycle + workspace-scaffold surface the
@@ -87,11 +88,52 @@ type Orchestrator interface {
 	DeleteUserFile(key docker.WorkspaceKey, name string) error
 	// RestartScope best-effort recreates running containers under a scope (NFR-4).
 	RestartScope(scope docker.Scope) error
+
+	// --- admin-model-override (CTX-AMO-06: keys never transit these calls) ---
+
+	// EffectiveModel resolves the model in effect at a target, reporting which
+	// level set it ("tenant"|"subscription"|"user"|"default").
+	EffectiveModel(agent config.Agent, target docker.ModelTarget) (*config.ModelConfig, string)
+	// SetModelOverride writes a validated model selection at a target.
+	SetModelOverride(target docker.ModelTarget, sel docker.ModelSel) error
+	// ClearModelOverride removes a model override at a target (idempotent).
+	ClearModelOverride(target docker.ModelTarget) error
+	// ReapplyModelScope re-applies the resolved model to every established
+	// workspace under a scope, then restarts the running ones.
+	ReapplyModelScope(scope docker.Scope) error
+	// ReapplyModelUser re-applies the resolved model to one user's established
+	// workspace, then restarts it if running.
+	ReapplyModelUser(key docker.WorkspaceKey, agent config.Agent) error
+
+	// --- admin-model-registry (per-agent model definitions + keys) ---
+
+	// ListRegisteredModels returns an agent's registered models (never keys).
+	ListRegisteredModels(agentKey string) ([]docker.RegisteredModel, error)
+	// AddRegisteredModel upserts a model (definition + key) in an agent's registry.
+	AddRegisteredModel(agentKey string, rm docker.RegisteredModel) error
+	// DeleteRegisteredModel removes a model from an agent's registry.
+	DeleteRegisteredModel(agentKey, provider, name string) error
+	// ApplyRegisteredModelToUser writes a registered model (definition + key +
+	// active) into one user's workspace config.
+	ApplyRegisteredModelToUser(agentKey string, key docker.WorkspaceKey, provider, name string) error
+
+	// --- admin-shared-skills (per-scope skill dirs; keys never involved) ---
+
+	ListSharedSkills(scope docker.Scope) ([]docker.SkillMeta, error)
+	ReadSharedSkillDoc(scope docker.Scope, name string) (string, docker.SkillMeta, error)
+	WriteSharedSkillDoc(scope docker.Scope, name, body string) error
+	WriteSharedSkillZip(scope docker.Scope, name string, r io.Reader) error
+	ArchiveSharedSkill(scope docker.Scope, name string, w io.Writer) error
+	DeleteSharedSkill(scope docker.Scope, name string) error
+	// SyncEffectiveSkillsForScope rebuilds the merged effective-skills dir(s) a
+	// scope change affects, so the RO mount reflects it on the next stop/start.
+	SyncEffectiveSkillsForScope(scope docker.Scope) error
 }
 
-// Turner runs one conversational turn (satisfied by *pico.Client).
+// Turner runs one conversational turn (satisfied by *pico.Client and
+// *hermes.Client).
 type Turner interface {
-	RunTurn(ctx context.Context, wsURL, picoToken, sessionID, userContent string, onDelta func(string)) (string, error)
+	RunTurn(ctx context.Context, req turn.Request, onDelta func(string)) (string, error)
 }
 
 // Server holds the handler dependencies.
@@ -99,8 +141,34 @@ type Server struct {
 	Cfg      *config.Config
 	Resolver identity.Resolver
 	Mgr      Orchestrator
-	Pico     Turner
-	Logf     func(string, ...any)
+	// Pico runs picoclaw turns; Hermes runs hermes-agent turns. Selected per
+	// target by turnerFor.
+	Pico   Turner
+	Hermes Turner
+	Logf   func(string, ...any)
+}
+
+// turnerFor selects the turn runner for a resolved target's harness.
+func (s *Server) turnerFor(harness string) Turner {
+	if harness == config.HarnessHermes {
+		return s.Hermes
+	}
+	return s.Pico
+}
+
+// turnModelFor is the model name to send in the turn request body. picoclaw
+// ignores it (it is pinned server-side), so the OpenAI display value is fine.
+// hermes puts it straight into its request body, so the "picoclaw" display
+// sentinel must NOT leak — send the agent's configured model, or "" to let
+// hermes fall back to its config.yaml default.
+func turnModelFor(agent config.Agent, display string) string {
+	if agent.Harness != config.HarnessHermes {
+		return display
+	}
+	if agent.Model != nil {
+		return agent.Model.Name
+	}
+	return ""
 }
 
 // Handler returns the routed http.Handler.
@@ -134,7 +202,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/users", s.handleAdminUsersList)
 	mux.HandleFunc("GET /v1/admin/users/files", s.handleAdminUserFilesList)
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
+	// admin-model-override: keys never transit the API (CTX-AMO-06); the
+	// models list is provider/name only.
+	mux.HandleFunc("GET /v1/admin/models", s.handleAdminModelsList)
+	mux.HandleFunc("GET /v1/admin/model", s.handleAdminModelGet)
+	mux.HandleFunc("PUT /v1/admin/model", s.handleAdminModelSet)
+	mux.HandleFunc("DELETE /v1/admin/model", s.handleAdminModelClear)
+	mux.HandleFunc("GET /v1/admin/model/users", s.handleAdminModelUsers)
+	mux.HandleFunc("GET /v1/admin/registered-models", s.handleAdminRegisteredModelsList)
+	mux.HandleFunc("POST /v1/admin/registered-models", s.handleAdminRegisteredModelsPost)
+	mux.HandleFunc("DELETE /v1/admin/registered-models", s.handleAdminRegisteredModelsDelete)
+	mux.HandleFunc("POST /v1/admin/registered-models/apply", s.handleAdminRegisteredModelApply)
+	mux.HandleFunc("GET /v1/admin/skills", s.handleAdminSkillsList)
+	mux.HandleFunc("GET /v1/admin/skills/doc", s.handleAdminSkillsDoc)
+	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)
+	mux.HandleFunc("POST /v1/admin/skills", s.handleAdminSkillsPost)
+	mux.HandleFunc("DELETE /v1/admin/skills", s.handleAdminSkillsDelete)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
+	// directly from the service host via openapiPath, not through the gateway).
+	mux.HandleFunc("GET /doc/openapi.json", s.handleOpenAPI)
 	return s.withLogging(mux)
 }
 
@@ -339,7 +426,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	content, err := s.Pico.RunTurn(turnCtx, tgt.WSEndpoint, tgt.PicoToken, sessionKey, userContent, nil)
+	content, err := s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
+		Endpoint:   tgt.Endpoint,
+		AuthToken:  tgt.AuthToken,
+		SessionID:  sessionKey,
+		SessionKey: key.UserAccID + ":" + key.Role,
+		Model:      turnModelFor(agent, model),
+		Content:    userContent,
+	}, nil)
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("chat: turn failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)

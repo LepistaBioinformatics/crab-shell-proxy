@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,10 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Fixed UUIDs used across the authorization table tests.
@@ -49,6 +51,16 @@ type fakeOrch struct {
 	sharedDeletes   []docker.Scope
 	userFileDeletes []docker.WorkspaceKey
 	restartScopes   []docker.Scope
+
+	// admin-model-override fakes: record calls, return canned results.
+	effectiveModel  *config.ModelConfig
+	effectiveLevel  string
+	modelSetErr     error
+	modelClearErr   error
+	modelSets       []docker.ModelTarget
+	modelClears     []docker.ModelTarget
+	reapplyScopes   []docker.Scope
+	reapplyUserKeys []docker.WorkspaceKey
 }
 
 type secretWrite struct {
@@ -69,6 +81,19 @@ func (f *fakeOrch) WriteSecret(_ config.Agent, key docker.WorkspaceKey, format, 
 func (f *fakeOrch) ListSecrets(docker.WorkspaceKey) (docker.SecretNames, error) {
 	return f.listResult, nil
 }
+
+func (f *fakeOrch) ListSharedSkills(docker.Scope) ([]docker.SkillMeta, error)              { return nil, nil }
+func (f *fakeOrch) ReadSharedSkillDoc(docker.Scope, string) (string, docker.SkillMeta, error) { return "", docker.SkillMeta{}, nil }
+func (f *fakeOrch) WriteSharedSkillDoc(docker.Scope, string, string) error                 { return nil }
+func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error              { return nil }
+func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error               { return nil }
+func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error                           { return nil }
+func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error                         { return nil }
+
+func (f *fakeOrch) ListRegisteredModels(string) ([]docker.RegisteredModel, error)              { return nil, nil }
+func (f *fakeOrch) AddRegisteredModel(string, docker.RegisteredModel) error                    { return nil }
+func (f *fakeOrch) DeleteRegisteredModel(string, string, string) error                         { return nil }
+func (f *fakeOrch) ApplyRegisteredModelToUser(string, docker.WorkspaceKey, string, string) error { return nil }
 
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
@@ -173,6 +198,36 @@ func (f *fakeOrch) RestartScope(scope docker.Scope) error {
 	return nil
 }
 
+func (f *fakeOrch) EffectiveModel(config.Agent, docker.ModelTarget) (*config.ModelConfig, string) {
+	return f.effectiveModel, f.effectiveLevel
+}
+
+func (f *fakeOrch) SetModelOverride(target docker.ModelTarget, _ docker.ModelSel) error {
+	if f.modelSetErr != nil {
+		return f.modelSetErr
+	}
+	f.modelSets = append(f.modelSets, target)
+	return nil
+}
+
+func (f *fakeOrch) ClearModelOverride(target docker.ModelTarget) error {
+	if f.modelClearErr != nil {
+		return f.modelClearErr
+	}
+	f.modelClears = append(f.modelClears, target)
+	return nil
+}
+
+func (f *fakeOrch) ReapplyModelScope(scope docker.Scope) error {
+	f.reapplyScopes = append(f.reapplyScopes, scope)
+	return nil
+}
+
+func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey, _ config.Agent) error {
+	f.reapplyUserKeys = append(f.reapplyUserKeys, key)
+	return nil
+}
+
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }
 
 func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.WorkspaceKey, _ string) (docker.Target, error) {
@@ -180,7 +235,7 @@ func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.W
 		return docker.Target{}, f.ensureErr
 	}
 	f.keys = append(f.keys, key)
-	return docker.Target{Name: "picoclaw-alpha-h", WSEndpoint: "ws://x:1/pico/ws", PicoToken: "t"}, nil
+	return docker.Target{Name: "picoclaw-alpha-h", Endpoint: "ws://x:1/pico/ws", AuthToken: "t"}, nil
 }
 func (f *fakeOrch) ArmIdle(config.Agent, docker.WorkspaceKey) { f.armed++ }
 func (f *fakeOrch) ScaffoldSubscription(tenantID, subsAccID string) (bool, error) {
@@ -201,7 +256,7 @@ type fakeTurner struct {
 	deltas  []string
 }
 
-func (f *fakeTurner) RunTurn(_ context.Context, _, _, _, _ string, onDelta func(string)) (string, error) {
+func (f *fakeTurner) RunTurn(_ context.Context, _ turn.Request, onDelta func(string)) (string, error) {
 	for _, d := range f.deltas {
 		if onDelta != nil {
 			onDelta(d)
@@ -240,6 +295,35 @@ func testServer(orch Orchestrator, turner Turner) *Server {
 		},
 	}
 	return &Server{Cfg: cfg, Resolver: res, Mgr: orch, Pico: turner}
+}
+
+func TestOpenAPIDocServedUnauthenticated(t *testing.T) {
+	s := testServer(newFakeOrch(), &fakeTurner{})
+	w := httptest.NewRecorder()
+	// No Authorization / profile headers: mycelium discovery fetches this
+	// directly from the service host, unauthenticated.
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/doc/openapi.json", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json", ct)
+	}
+	var doc struct {
+		OpenAPI string `json:"openapi"`
+		Paths   map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if !strings.HasPrefix(doc.OpenAPI, "3.") {
+		t.Errorf("openapi version = %q, want 3.x", doc.OpenAPI)
+	}
+	if doc.Paths["/v1/chat/completions"]["post"].OperationID != "chatCompletion" {
+		t.Errorf("chatCompletion operation missing; paths = %+v", doc.Paths)
+	}
 }
 
 func chatReq(t *testing.T, body string, headers map[string]string) *http.Request {

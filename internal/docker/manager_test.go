@@ -128,11 +128,11 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	if tgt.Name != name {
 		t.Errorf("name = %q, want %q", tgt.Name, name)
 	}
-	if tgt.WSEndpoint != "ws://"+name+":18790/pico/ws" {
-		t.Errorf("endpoint = %q", tgt.WSEndpoint)
+	if tgt.Endpoint != "ws://"+name+":18790/pico/ws" {
+		t.Errorf("endpoint = %q", tgt.Endpoint)
 	}
-	if tgt.PicoToken != "secret-tok" {
-		t.Errorf("token = %q, want secret-tok", tgt.PicoToken)
+	if tgt.AuthToken != "secret-tok" {
+		t.Errorf("token = %q, want secret-tok", tgt.AuthToken)
 	}
 	if f.createN != 1 || f.startN != 1 {
 		t.Errorf("create=%d start=%d, want 1/1", f.createN, f.startN)

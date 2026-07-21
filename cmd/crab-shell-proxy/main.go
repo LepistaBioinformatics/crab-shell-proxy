@@ -15,6 +15,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/hermes"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/pico"
@@ -44,6 +45,7 @@ func main() {
 		Resolver: identity.NewSDKResolver(),
 		Mgr:      mgr,
 		Pico:     &pico.Client{TurnTimeout: cfg.TurnTimeout.Std()},
+		Hermes:   &hermes.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Logf:     logger.Printf,
 	}
 
