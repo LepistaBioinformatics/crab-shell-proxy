@@ -428,3 +428,70 @@ func TestModelOverrideFilePaths(t *testing.T) {
 		t.Errorf("UserModelOverrideFile = %q, want %q", got, want)
 	}
 }
+
+const hermesSample = `
+listen: ":9000"
+hostDataRoot: "/host/data"
+network: "net"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+  hermes-glm:
+    harness: hermes
+    serviceName: "hermes-glm"
+    token: { env: "MYC_HERMES_TOK" }
+    template: "hermes-glm"
+    mode: "continuous"
+    model:
+      provider: "zai"
+      name: "glm-4.7-flash"
+      baseUrl: "https://api.z.ai/api/paas/v4"
+      apiKeyEnv: "GLM_KEY"
+`
+
+func TestHermesDisabledWhenSecretsMissing(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	// MYC_HERMES_TOK and GLM_KEY intentionally left unset.
+	cfg, err := Load(writeConfig(t, hermesSample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Agents["hermes-glm"]; ok {
+		t.Fatalf("hermes-glm should be dropped when its token/key are unset")
+	}
+	if _, ok := cfg.Agents["alpha"]; !ok {
+		t.Fatalf("picoclaw alpha should remain registered")
+	}
+	found := false
+	for _, k := range cfg.DisabledAgents {
+		if k == "hermes-glm" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("hermes-glm should be recorded in DisabledAgents, got %v", cfg.DisabledAgents)
+	}
+}
+
+func TestHermesEnabledWhenSecretsPresent(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("MYC_HERMES_TOK", "htok")
+	t.Setenv("GLM_KEY", "gkey")
+	cfg, err := Load(writeConfig(t, hermesSample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a, ok := cfg.Agents["hermes-glm"]
+	if !ok {
+		t.Fatalf("hermes-glm should be registered when its secrets are set")
+	}
+	if a.ResolvedToken != "htok" || a.Model == nil || a.Model.APIKey != "gkey" {
+		t.Fatalf("hermes secrets not resolved: token=%q key=%v", a.ResolvedToken, a.Model)
+	}
+	if len(cfg.DisabledAgents) != 0 {
+		t.Fatalf("no agents should be disabled, got %v", cfg.DisabledAgents)
+	}
+}
