@@ -32,6 +32,9 @@ func main() {
 	if err != nil {
 		logger.Fatalf("config: %v", err)
 	}
+	if len(cfg.DisabledAgents) > 0 {
+		logger.Printf("disabled agents (required secrets not set): %v", cfg.DisabledAgents)
+	}
 
 	socket := os.Getenv("DOCKER_SOCKET")
 	if socket == "" {

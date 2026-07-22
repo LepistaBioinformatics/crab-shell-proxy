@@ -227,6 +227,12 @@ type Config struct {
 
 	// ResolvedWebhookSecret is filled by Load from WebhookSecret.
 	ResolvedWebhookSecret string `yaml:"-"`
+
+	// DisabledAgents lists agents dropped at Load because their deployment did
+	// not provide their required secrets (currently: a hermes agent missing its
+	// token or its provider API key). Dropped agents are not registered, so
+	// nothing (reconcile or on-demand) ever starts them.
+	DisabledAgents []string `yaml:"-"`
 }
 
 // Load reads, validates, and env-resolves the config at path.
@@ -248,6 +254,14 @@ func Load(path string) (*Config, error) {
 	for key, agent := range cfg.Agents {
 		tok, err := agent.Token.resolve()
 		if err != nil {
+			// A hermes agent whose token env is unset means this deployment is
+			// not configured for it: drop it (so nothing starts it) instead of
+			// failing the whole proxy. Picoclaw still requires its token.
+			if agent.Harness == HarnessHermes {
+				cfg.DisabledAgents = append(cfg.DisabledAgents, key)
+				delete(cfg.Agents, key)
+				continue
+			}
 			return nil, fmt.Errorf("agent %q token: %w", key, err)
 		}
 		agent.Key = key
@@ -263,6 +277,20 @@ func Load(path string) (*Config, error) {
 		for _, mc := range agent.Models {
 			if mc.APIKeyEnv != "" {
 				mc.APIKey = os.Getenv(mc.APIKeyEnv)
+			}
+		}
+		// Only register a hermes agent when its deployment actually provides its
+		// secrets: mycelium cannot route to it without a token, and it cannot
+		// reach its provider without the API key. A hermes entry left in
+		// config.yaml with its token/key unset is dropped here instead of being
+		// started (reconcile and on-demand both key off cfg.Agents). Picoclaw is
+		// unchanged -- its empty key is still tolerated (see above).
+		if agent.Harness == HarnessHermes {
+			keyMissing := agent.Model != nil && agent.Model.APIKeyEnv != "" && agent.Model.APIKey == ""
+			if tok == "" || keyMissing {
+				cfg.DisabledAgents = append(cfg.DisabledAgents, key)
+				delete(cfg.Agents, key)
+				continue
 			}
 		}
 		cfg.Agents[key] = agent
