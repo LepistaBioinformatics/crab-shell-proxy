@@ -130,9 +130,10 @@ func (r *Registry) ListScopeDefaults() (map[string]ScopeDefault, error) {
 	return out, nil
 }
 
-// setScopeDefaultRaw writes without the active-model check, for the boot
-// migration importing pre-existing overrides whose model may already be retired.
-func (r *Registry) setScopeDefaultRaw(key, modelName string) error {
+// SetScopeDefaultRaw writes a scope default WITHOUT the active-model check. It
+// exists for the boot migration, which imports pre-existing overrides whose model
+// may already be retired. Never call it from an HTTP handler.
+func (r *Registry) SetScopeDefaultRaw(key, modelName string) error {
 	return r.db.Update(func(tx *bolt.Tx) error {
 		return putJSON(tx.Bucket(bScopeDefaults), key, ScopeDefault{
 			ModelName: modelName, UpdatedAt: r.now(),

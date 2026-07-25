@@ -253,6 +253,39 @@ func (r *Registry) SetStatus(name string, version uint64, status Status, replace
 	return out, nil
 }
 
+// CreateModelRaw inserts a record without the create-time restrictions the public
+// API enforces (it accepts a deprecated status and a blank api_base). It exists
+// for the boot migration recovering records from live workspaces, whose shape the
+// proxy did not choose. Never call it from an HTTP handler.
+func (r *Registry) CreateModelRaw(m Model) (Model, error) {
+	if m.ModelName == "" {
+		return Model{}, fmt.Errorf("%w: model_name is required", ErrInvalid)
+	}
+	if m.Status == "" {
+		m.Status = StatusActive
+	}
+	var out Model
+	err := r.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bModels)
+		if b.Get([]byte(m.ModelName)) != nil {
+			return fmt.Errorf("%w: %q", ErrDuplicate, m.ModelName)
+		}
+		if m.Position == 0 {
+			m.Position = b.Stats().KeyN + 1
+		}
+		at := r.now()
+		m.Version = 1
+		m.CreatedAt = at
+		m.UpdatedAt = at
+		out = m
+		return putJSON(b, m.ModelName, m)
+	})
+	if err != nil {
+		return Model{}, err
+	}
+	return out, nil
+}
+
 // UpdateModelRaw mutates a record without the version check. It exists for the
 // boot migration and for tests seeding states the public API refuses to create
 // directly. Never call it from an HTTP handler.
