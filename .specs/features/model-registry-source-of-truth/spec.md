@@ -24,12 +24,17 @@ The only code that knows the storage shape. Everything else calls it.
   assignment → subscription default → tenant default → agent default → global
   default → `ErrNoModelResolvable`. A `deprecated` result is followed to
   `replaced_by` **only** when the workspace has no materialized assignment,
-  bounded at 8 hops with cycle detection.
+  bounded at 8 hops with cycle detection. `chain` is the primary's own declared
+  `Fallbacks`, one level deep, with non-`active` entries skipped and logged.
 - **Invariants inside one `bolt.Update`**: `model_name` unique; delete and
-  `→ disabled` both blocked while referenced by any assignment, scope default, or
-  another model's `replaced_by`, with the referrers named; `→ deprecated`
-  requires a `replaced_by` naming an existing `active` model; acyclic deprecation
-  chains; stale `version` rejected.
+  `→ disabled` both blocked while referenced by any assignment (as primary or
+  chain member), scope default, another model's `replaced_by`, or another model's
+  `fallbacks`, with the referrers named; `→ deprecated` requires a `replaced_by`
+  naming an existing `active` model; acyclic deprecation chains; every
+  `fallbacks` name exists and no model lists itself; stale `version` rejected.
+- **`Assignment` records the primary *and* the materialized `chain`.** Without the
+  chain, editing a model's key would reach only the workspaces where it is primary,
+  leaving every workspace that has it as a fallback on a revoked credential.
 - **`APIKey` is `json:"-"`** on the wire type — leaking a key must require adding
   code, not forgetting it.
 
@@ -39,7 +44,7 @@ The only code that knows the storage shape. Everything else calls it.
 |---|---|
 | `internal/docker/model.go` | delete `resolveModel`, `reapplyModel`, `getModelOverride`, `setModelOverride`, `clearModelOverride`, `EffectiveModel`, `SetModelOverride`, `ClearModelOverride`, `ModelSel`. `ReapplyModelScope` / `ReapplyModelUser` survive, calling `registry.Resolve` + `materializeModels` |
 | `internal/docker/registered_models.go` + test | deleted |
-| `internal/docker/provision.go:103` | `applyModel` → `materializeModels(configPath, secPath, primary, chain)`; writes the full `model_list` **without `api_key`**, sets `agents.defaults.provider`/`model_name`/`model_fallbacks`, and the keys into `.security.yml` `model_list.<name>.api_keys` via read-modify-write |
+| `internal/docker/provision.go:103` | `applyModel` → `materializeModels(configPath, secPath, primary, chain)`; writes the full `model_list` **without `api_key`**, sets `agents.defaults.provider`/`model_name`/`model_fallbacks`, and the keys into `.security.yml` `model_list.<name>.api_keys` via read-modify-write, **pruning** `model_list` entries outside the materialized set (`unsetNativeSlot`, `secrets.go:111`) while leaving the pico token, `web.*` and native overlay slots intact |
 | `internal/docker/provision.go` | refuse to provision on `ErrNoModelResolvable`, before creating anything |
 | `internal/docker/defaulttemplate/picoclaw/config.json` | `"model_list": []`, empty `agents.defaults.provider`/`model_name` |
 | `internal/docker/model-catalog.json` | new, `go:embed` — the 30 former template entries as a read-only suggestion catalog (`provider`, `model`, `api_base`; never a key) |
@@ -89,11 +94,16 @@ duplicate name, in-use rejection, version conflict, or `ErrNoModelResolvable`.
 
 ## Re-materialization
 
-Scope-default changes, per-user assignment changes and model definition/key edits
-re-materialize eagerly (stop/start the affected workspaces, never recreate).
-Reordering the active set is applied lazily on each workspace's next
-materialization, plus an explicit "apply now" — a drag must not restart the fleet.
-Deprecation triggers nothing: existing users keeping the model is the point.
+All eager paths are stop/start, never recreate.
+
+| Change | Affected workspaces |
+|---|---|
+| scope default | those resolving through it |
+| per-user assignment | that workspace |
+| model definition or key | those whose `Assignment` names it as primary **or** in `chain` |
+| a model's `fallbacks` | those whose `Assignment` names it as primary |
+| reorder (`position`) | none — presentation only |
+| deprecation | none — existing users keeping the model is the point |
 
 ## Migration (in `Reconcile`, once)
 
@@ -103,10 +113,11 @@ Deprecation triggers nothing: existing users keeping the model is the point.
 3. `shared/model.json` → scope defaults; `.crab-model.json` → explicit
    assignments.
 4. Every existing workspace: read `config.json`'s `agents.defaults.model_name`
-   and record the assignment (`inherited` unless step 3 gave it an explicit one).
-   A model named by a workspace but absent from the inventory is imported from
-   that workspace's own `model_list` entry + `.security.yml` key, flagged
-   `ImportedOrphan` and logged.
+   **and `model_fallbacks`** and record the assignment's primary and `chain`
+   (`inherited` unless step 3 gave it an explicit one). A model named by a
+   workspace but absent from the inventory — whether as primary or in the chain —
+   is imported from that workspace's own `model_list` entry + `.security.yml` key,
+   flagged `ImportedOrphan` and logged.
 5. Normalize every `<dataRoot>/templates/<agent>/config.json` to an empty
    `model_list`, backing the original up to `config.json.pre-registry` — the only
    destructive write, ordered last so an earlier failure leaves it undone.
@@ -131,13 +142,15 @@ agents only this cycle.
 
 `go vet ./...` and `go test ./...` clean (the Dockerfile build *is* the gate,
 `Dockerfile:22-23`). New tests: store invariants each rejected with nothing
-written; all five cascade levels plus explicit-beats-inherited; the deprecation
-hop firing only for unmaterialized workspaces; materialization asserting no
-`api_key` in `config.json` and the key present in `.security.yml` with the pico
-token intact; provision refusal with no container created; a fixture data root
-exercising the whole migration and asserting no workspace's active model changed,
-then that a second run is a no-op; each HTTP gate returning 403 for the wrong
-tier.
+written, including a `fallbacks` referrer blocking delete/disable and detaching it
+unblocking; all five cascade levels plus explicit-beats-inherited; the deprecation
+hop firing only for unmaterialized workspaces; a non-`active` fallback skipped and
+logged; materialization asserting no `api_key` in `config.json`, the key present in
+`.security.yml`, a stale sibling model key pruned, and the pico token intact;
+`model_fallbacks` matching the primary's declared list; provision refusal with no
+container created; a fixture data root exercising the whole migration and asserting
+no workspace's active model or chain changed, then that a second run is a no-op;
+each HTTP gate returning 403 for the wrong tier.
 
 ## Status
 
