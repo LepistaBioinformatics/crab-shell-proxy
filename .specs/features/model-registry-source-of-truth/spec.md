@@ -45,8 +45,26 @@ The only code that knows the storage shape. Everything else calls it.
 | `internal/docker/model-catalog.json` | new, `go:embed` — the 30 former template entries as a read-only suggestion catalog (`provider`, `model`, `api_base`; never a key) |
 | `internal/docker/reconcile.go:19` | one-time migration guarded by `meta.schema_version`, plus a per-boot read-only drift check |
 | `internal/docker/secrets.go:174` | `validateNativeSlot`'s `model_list.<model>.api_keys` family validates against the inventory instead of a template `.security.yml` |
-| `internal/httpapi/admin.go` | `registered-models` handlers removed; new `internal/httpapi/admin_models.go` |
-| `internal/httpapi/openapi.json` | new routes documented |
+| `internal/httpapi/admin.go` | `registered-models` and `model-override` handlers removed; new `internal/httpapi/admin_models.go` |
+| `internal/httpapi/handlers.go:95-110` | the `Docker` interface loses `EffectiveModel`, `SetModelOverride`, `ClearModelOverride`; `ReapplyModelScope`/`ReapplyModelUser` keep their signatures |
+| `internal/httpapi/openapi.json` | new routes documented, removed ones dropped |
+
+### Routes removed or repurposed
+
+Registered today at `internal/httpapi/handlers.go:211-219`:
+
+| Existing route | Fate |
+|---|---|
+| `GET /v1/admin/models` | **repurposed** — was the `config.yaml` selectable list, becomes the inventory listing |
+| `GET` `PUT` `DELETE` `/v1/admin/model` | removed — replaced by `/v1/admin/model-defaults` and `/v1/admin/model-assignments` |
+| `GET /v1/admin/model/users` | removed — replaced by `/v1/admin/models/{name}/usage` |
+| `GET` `POST` `DELETE` `/v1/admin/registered-models` | removed |
+| `POST /v1/admin/registered-models/apply` | removed — replaced by `POST /v1/admin/model-assignments` |
+
+The repurposing of `GET /v1/admin/models` is a breaking response-shape change on
+an existing path. No client calls it today (the webapp never shipped the
+`admin-model-override` UI its FR-6 specified), so no coordinated cutover is
+needed — but the gateway allowlist and `openapi.json` must both be updated.
 
 ## HTTP surface
 
