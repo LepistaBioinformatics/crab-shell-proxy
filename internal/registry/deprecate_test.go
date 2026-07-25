@@ -68,7 +68,7 @@ func TestDeprecateRejectsACycle(t *testing.T) {
 		t.Fatalf("cycle: want ErrInvalid, got %v", err)
 	}
 	after, _ := r.GetModel("b")
-	if after.Status != StatusActive {
+	if after.Status != StatusActive || after.ReplacedBy != "" {
 		t.Errorf("rejected cycle still wrote: %+v", after)
 	}
 }
