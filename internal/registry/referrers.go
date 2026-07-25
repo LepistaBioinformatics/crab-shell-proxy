@@ -126,17 +126,6 @@ func (r *Registry) DeleteAssignment(ref WorkspaceRef) error {
 	})
 }
 
-// PutScopeDefault sets the model chosen at one cascade level. The caller
-// validates the model exists and is active.
-func (r *Registry) PutScopeDefault(scopeKey string, d ScopeDefault) error {
-	if d.UpdatedAt.IsZero() {
-		d.UpdatedAt = r.now()
-	}
-	return r.db.Update(func(tx *bolt.Tx) error {
-		return putJSON(tx.Bucket(bScopeDefaults), scopeKey, d)
-	})
-}
-
 // guardUnreferenced returns an *InUseError naming every referrer when anything
 // still references name, so a caller can reject a delete or a disable with the
 // concrete list of what to detach first. Takes the caller's transaction: the

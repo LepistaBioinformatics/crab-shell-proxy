@@ -15,8 +15,8 @@ func TestReferrersFindsAllFourKinds(t *testing.T) {
 	if err := r.PutAssignment(ref, Assignment{ModelName: "target", Source: SourceInherited}); err != nil {
 		t.Fatalf("PutAssignment: %v", err)
 	}
-	if err := r.PutScopeDefault("tenant/t", ScopeDefault{ModelName: "target"}); err != nil {
-		t.Fatalf("PutScopeDefault: %v", err)
+	if err := r.SetScopeDefault(ScopeSel{Level: LevelTenant, TenantID: "t"}, "target"); err != nil {
+		t.Fatalf("SetScopeDefault: %v", err)
 	}
 	// successor -> deprecated placeholder pointing at target via replaced_by.
 	if _, err := r.UpdateModelRaw("successor", func(m *Model) error {
