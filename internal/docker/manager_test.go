@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 // fakeDocker is an in-memory Docker for manager tests.
@@ -113,7 +115,26 @@ func testManager(t *testing.T, mode config.Mode, dkr Docker) (*Manager, config.A
 		Agents: map[string]config.Agent{"alpha": agent},
 	}
 	healthy := func(context.Context, string, int) error { return nil }
-	return NewManager(cfg, dkr, healthy, nil, nil), agent
+
+	// A real registry with one resolvable model at LevelGlobal: EnsureRunning
+	// now calls resolveAndMaterialize after provision, and a workspace with no
+	// resolvable model is refused rather than defaulted (materialize.go).
+	reg, err := registry.Open(filepath.Join(root, "model-registry.db"), time.Now)
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	if _, err := reg.CreateModel(registry.Model{
+		ModelName: "default", Provider: "openai", Model: "gpt-4o",
+		APIBase: "https://api.openai.com/v1", APIKey: "sk-test", Status: registry.StatusActive,
+	}); err != nil {
+		t.Fatalf("registry.CreateModel: %v", err)
+	}
+	if err := reg.SetScopeDefault(registry.ScopeSel{Level: registry.LevelGlobal}, "default"); err != nil {
+		t.Fatalf("registry.SetScopeDefault: %v", err)
+	}
+
+	return NewManager(cfg, dkr, healthy, reg, nil), agent
 }
 
 func TestEnsureRunningColdStart(t *testing.T) {
@@ -131,8 +152,11 @@ func TestEnsureRunningColdStart(t *testing.T) {
 	if tgt.Endpoint != "ws://"+name+":18790/pico/ws" {
 		t.Errorf("endpoint = %q", tgt.Endpoint)
 	}
-	if tgt.AuthToken != "secret-tok" {
-		t.Errorf("token = %q, want secret-tok", tgt.AuthToken)
+	// seedPicoToken always mints a fresh token on first provision, regardless of
+	// whatever placeholder the template shipped (it no longer only regenerates
+	// the token when a model happens to be pinned).
+	if !strings.HasPrefix(tgt.AuthToken, "pico-") {
+		t.Errorf("token = %q, want a pico- prefixed random token", tgt.AuthToken)
 	}
 	if f.createN != 1 || f.startN != 1 {
 		t.Errorf("create=%d start=%d, want 1/1", f.createN, f.startN)
