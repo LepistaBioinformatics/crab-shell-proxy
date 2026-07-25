@@ -37,6 +37,23 @@ func TestDeprecateRequiresAnExistingActiveReplacement(t *testing.T) {
 	}
 }
 
+func TestDeprecateRejectsAStaleVersion(t *testing.T) {
+	r := testRegistry(t)
+	old := mustCreate(t, r, "old")
+	mustCreate(t, r, "new")
+
+	// Call Deprecate with a stale version.
+	if _, err := r.Deprecate("old", old.Version-1, "new"); !errors.Is(err, ErrVersionConflict) {
+		t.Errorf("stale version: want ErrVersionConflict, got %v", err)
+	}
+
+	// Verify the stored record is untouched.
+	after, _ := r.GetModel("old")
+	if after.Status != StatusActive || after.ReplacedBy != "" {
+		t.Errorf("rejected stale version still wrote: %+v", after)
+	}
+}
+
 func TestDeprecateSucceedsAndRecordsTheReplacement(t *testing.T) {
 	r := testRegistry(t)
 	old := mustCreate(t, r, "old")

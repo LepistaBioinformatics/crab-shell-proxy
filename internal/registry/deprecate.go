@@ -15,7 +15,9 @@ const maxDeprecationHops = 8
 // it, while new ones get replacedBy. That is the only way to retire something in
 // use — disable requires zero usage (I3).
 //
-// Enforces I4 (the replacement must exist and be active) and I5 (no cycles).
+// Enforces I4 (replacement must exist and not be disabled; a deprecated
+// replacement is a valid chain link because resolution walks onward to
+// something active) and I5 (no cycles).
 func (r *Registry) Deprecate(name string, version uint64, replacedBy string) (Model, error) {
 	if replacedBy == "" {
 		return Model{}, fmt.Errorf("%w: deprecating %q requires a replacement so new users have somewhere to go", ErrInvalid, name)
@@ -61,8 +63,8 @@ func (r *Registry) Deprecate(name string, version uint64, replacedBy string) (Mo
 	return out, nil
 }
 
-// assertNoCycleTx walks replaced_by from start and fails if it reaches forbidden
-// or revisits a node.
+// assertNoCycleTx walks replaced_by from start and fails if it reaches forbidden,
+// revisits a node, or exceeds maxDeprecationHops.
 func assertNoCycleTx(tx *bolt.Tx, start, forbidden string) error {
 	b := tx.Bucket(bModels)
 	seen := map[string]bool{}
