@@ -235,3 +235,7 @@ func getJSON(b *bolt.Bucket, key string, v any) error {
 	}
 	return json.Unmarshal(raw, v)
 }
+
+// jsonUnmarshal exists so bucket scans (which hold raw bytes, not a key) share
+// one decode path with getJSON.
+func jsonUnmarshal(raw []byte, v any) error { return json.Unmarshal(raw, v) }
