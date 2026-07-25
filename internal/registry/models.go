@@ -192,3 +192,96 @@ func (r *Registry) SetPositions(order []string) error {
 		return nil
 	})
 }
+
+// DeleteModel removes a model, rejecting the delete while anything references it
+// (I2). The rejection names the referrers so the admin knows what to detach.
+func (r *Registry) DeleteModel(name string) error {
+	return r.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bModels)
+		if b.Get([]byte(name)) == nil {
+			return ErrNotFound
+		}
+		refs, err := referrersTx(tx, name)
+		if err != nil {
+			return err
+		}
+		if len(refs) > 0 {
+			return &InUseError{ModelName: name, Referrers: refs}
+		}
+		return b.Delete([]byte(name))
+	})
+}
+
+// SetStatus transitions a model's lifecycle state under the same optimistic
+// version check as an edit.
+//
+//   - -> disabled carries DeleteModel's precondition (I3): a model nothing uses
+//     can be shelved; one in use must be deprecated instead.
+//   - -> active clears ReplacedBy and preserves Position, so reactivating
+//     restores a model's place rather than appending it.
+//   - -> deprecated is rejected here; T04 adds it with its replacement rules.
+func (r *Registry) SetStatus(name string, version uint64, status Status, replacedBy string) (Model, error) {
+	if err := validateStatus(status); err != nil {
+		return Model{}, err
+	}
+	var out Model
+	err := r.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bModels)
+		var cur Model
+		if err := getJSON(b, name, &cur); err != nil {
+			return err
+		}
+		if cur.Version != version {
+			return fmt.Errorf("%w: stored version %d, write carried %d", ErrVersionConflict, cur.Version, version)
+		}
+		switch status {
+		case StatusDisabled:
+			refs, err := referrersTx(tx, name)
+			if err != nil {
+				return err
+			}
+			if len(refs) > 0 {
+				return &InUseError{ModelName: name, Referrers: refs}
+			}
+			cur.ReplacedBy = ""
+		case StatusActive:
+			cur.ReplacedBy = ""
+		case StatusDeprecated:
+			return fmt.Errorf("%w: use Deprecate to retire a model", ErrInvalid)
+		}
+		cur.Status = status
+		cur.Version++
+		cur.UpdatedAt = r.now()
+		out = cur
+		return putJSON(b, name, cur)
+	})
+	if err != nil {
+		return Model{}, err
+	}
+	return out, nil
+}
+
+// UpdateModelRaw mutates a record without the version check. It exists for the
+// boot migration and for tests seeding states the public API refuses to create
+// directly. Never call it from an HTTP handler.
+func (r *Registry) UpdateModelRaw(name string, mutate func(*Model) error) (Model, error) {
+	var out Model
+	err := r.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bModels)
+		var cur Model
+		if err := getJSON(b, name, &cur); err != nil {
+			return err
+		}
+		if err := mutate(&cur); err != nil {
+			return err
+		}
+		cur.Version++
+		cur.UpdatedAt = r.now()
+		out = cur
+		return putJSON(b, name, cur)
+	})
+	if err != nil {
+		return Model{}, err
+	}
+	return out, nil
+}
