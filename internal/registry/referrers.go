@@ -136,3 +136,18 @@ func (r *Registry) PutScopeDefault(scopeKey string, d ScopeDefault) error {
 		return putJSON(tx.Bucket(bScopeDefaults), scopeKey, d)
 	})
 }
+
+// guardUnreferenced returns an *InUseError naming every referrer when anything
+// still references name, so a caller can reject a delete or a disable with the
+// concrete list of what to detach first. Takes the caller's transaction: the
+// check must not be split from the write it guards.
+func guardUnreferenced(tx *bolt.Tx, name string) error {
+	refs, err := referrersTx(tx, name)
+	if err != nil {
+		return err
+	}
+	if len(refs) > 0 {
+		return &InUseError{ModelName: name, Referrers: refs}
+	}
+	return nil
+}

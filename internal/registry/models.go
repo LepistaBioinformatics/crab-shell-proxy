@@ -201,12 +201,8 @@ func (r *Registry) DeleteModel(name string) error {
 		if b.Get([]byte(name)) == nil {
 			return ErrNotFound
 		}
-		refs, err := referrersTx(tx, name)
-		if err != nil {
+		if err := guardUnreferenced(tx, name); err != nil {
 			return err
-		}
-		if len(refs) > 0 {
-			return &InUseError{ModelName: name, Referrers: refs}
 		}
 		return b.Delete([]byte(name))
 	})
@@ -236,12 +232,8 @@ func (r *Registry) SetStatus(name string, version uint64, status Status, replace
 		}
 		switch status {
 		case StatusDisabled:
-			refs, err := referrersTx(tx, name)
-			if err != nil {
+			if err := guardUnreferenced(tx, name); err != nil {
 				return err
-			}
-			if len(refs) > 0 {
-				return &InUseError{ModelName: name, Referrers: refs}
 			}
 			cur.ReplacedBy = ""
 		case StatusActive:
