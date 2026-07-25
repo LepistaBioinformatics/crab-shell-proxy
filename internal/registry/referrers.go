@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"sort"
 
 	bolt "go.etcd.io/bbolt"
@@ -123,6 +124,35 @@ func (r *Registry) GetAssignment(ref WorkspaceRef) (Assignment, error) {
 func (r *Registry) DeleteAssignment(ref WorkspaceRef) error {
 	return r.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bAssignments).Delete([]byte(ref.Key()))
+	})
+}
+
+// RecordMaterialization writes what a workspace just materialized, preserving an
+// existing EXPLICIT pin's source in the SAME transaction that reads it.
+//
+// Read-and-preserve cannot be split across two transactions: the source decides
+// whether a later scope-default change may override this workspace, so a racing
+// writer between the read and the write could silently demote a deliberate pin.
+// A missing prior assignment is the normal first-materialization case; any other
+// read error is returned rather than being treated as "no pin".
+func (r *Registry) RecordMaterialization(ref WorkspaceRef, modelName string, chain []string) error {
+	return r.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bAssignments)
+		source := SourceInherited
+		var prev Assignment
+		switch err := getJSON(b, ref.Key(), &prev); {
+		case err == nil:
+			if prev.Source == SourceExplicit {
+				source = SourceExplicit
+			}
+		case errors.Is(err, ErrNotFound):
+			// First materialization for this workspace.
+		default:
+			return err
+		}
+		return putJSON(b, ref.Key(), Assignment{
+			ModelName: modelName, Chain: chain, Source: source, MaterializedAt: r.now(),
+		})
 	})
 }
 

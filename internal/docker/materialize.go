@@ -176,18 +176,11 @@ func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error 
 		return err
 	}
 
-	// An existing EXPLICIT pin keeps its source: re-materializing must not demote
-	// a deliberate per-user choice into an inherited one, which would let the next
+	// RecordMaterialization preserves an existing EXPLICIT pin's source in the
+	// same transaction that reads it: re-materializing must not demote a
+	// deliberate per-user choice into an inherited one, which would let the next
 	// scope-default change silently override it.
-	source := registry.SourceInherited
-	if prev, err := m.reg.GetAssignment(ref); err == nil && prev.Source == registry.SourceExplicit {
-		source = registry.SourceExplicit
-	}
-	if err := m.reg.PutAssignment(ref, registry.Assignment{
-		ModelName: res.Primary.ModelName,
-		Chain:     res.ChainNames(),
-		Source:    source,
-	}); err != nil {
+	if err := m.reg.RecordMaterialization(ref, res.Primary.ModelName, res.ChainNames()); err != nil {
 		return fmt.Errorf("record assignment: %w", err)
 	}
 	return chownTree(userDir, m.cfg.PicoclawUser)

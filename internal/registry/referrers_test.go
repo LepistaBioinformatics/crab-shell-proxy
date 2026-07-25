@@ -145,3 +145,65 @@ func TestDeleteUnknownModelIsNotFound(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
+
+func TestRecordMaterializationFirstTimeIsInherited(t *testing.T) {
+	r := testRegistry(t)
+	ref := WorkspaceRef{TenantID: "t", SubsAccID: "s", Agent: "alpha", UserAccID: "u"}
+
+	if err := r.RecordMaterialization(ref, "main", []string{"fb"}); err != nil {
+		t.Fatalf("RecordMaterialization: %v", err)
+	}
+
+	a, err := r.GetAssignment(ref)
+	if err != nil {
+		t.Fatalf("GetAssignment: %v", err)
+	}
+	if a.ModelName != "main" || len(a.Chain) != 1 || a.Chain[0] != "fb" {
+		t.Errorf("assignment = %+v, want main/[fb]", a)
+	}
+	if a.Source != SourceInherited {
+		t.Errorf("Source = %q, want inherited for a first materialization", a.Source)
+	}
+}
+
+func TestRecordMaterializationPreservesExplicitSource(t *testing.T) {
+	r := testRegistry(t)
+	ref := WorkspaceRef{TenantID: "t", SubsAccID: "s", Agent: "alpha", UserAccID: "u"}
+	if err := r.PutAssignment(ref, Assignment{ModelName: "old", Source: SourceExplicit}); err != nil {
+		t.Fatalf("PutAssignment: %v", err)
+	}
+
+	if err := r.RecordMaterialization(ref, "new", nil); err != nil {
+		t.Fatalf("RecordMaterialization: %v", err)
+	}
+
+	a, err := r.GetAssignment(ref)
+	if err != nil {
+		t.Fatalf("GetAssignment: %v", err)
+	}
+	// The pin's source survives even though the resolved model name changed
+	// (e.g. an admin edited the pinned model's config elsewhere).
+	if a.ModelName != "new" || a.Source != SourceExplicit {
+		t.Errorf("assignment = %+v, want new/explicit — a pin's source must survive re-materialization", a)
+	}
+}
+
+func TestRecordMaterializationKeepsInheritedSource(t *testing.T) {
+	r := testRegistry(t)
+	ref := WorkspaceRef{TenantID: "t", SubsAccID: "s", Agent: "alpha", UserAccID: "u"}
+	if err := r.PutAssignment(ref, Assignment{ModelName: "old", Source: SourceInherited}); err != nil {
+		t.Fatalf("PutAssignment: %v", err)
+	}
+
+	if err := r.RecordMaterialization(ref, "new", nil); err != nil {
+		t.Fatalf("RecordMaterialization: %v", err)
+	}
+
+	a, err := r.GetAssignment(ref)
+	if err != nil {
+		t.Fatalf("GetAssignment: %v", err)
+	}
+	if a.Source != SourceInherited {
+		t.Errorf("Source = %q, want inherited to remain inherited", a.Source)
+	}
+}
