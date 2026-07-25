@@ -13,6 +13,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 // Reconciliation labels stamped on every managed container.
@@ -78,7 +79,10 @@ type Manager struct {
 	cfg    *config.Config
 	docker Docker
 	health HealthChecker
-	logf   func(format string, args ...any)
+	// reg is the model inventory: the single source of truth for which model a
+	// workspace uses. Nothing else in this package may decide that.
+	reg  *registry.Registry
+	logf func(format string, args ...any)
 
 	mu   sync.Mutex
 	keys map[string]*keyState
@@ -90,14 +94,16 @@ type Manager struct {
 }
 
 // NewManager builds a Manager. If health is nil, an HTTP /health poller is used.
-func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, logf func(string, ...any)) *Manager {
+// reg is required: without the inventory there is no way to resolve a model, and
+// a workspace provisioned without one cannot boot.
+func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, reg *registry.Registry, logf func(string, ...any)) *Manager {
 	if health == nil {
 		health = httpHealth
 	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Manager{cfg: cfg, docker: dkr, health: health, logf: logf, keys: map[string]*keyState{}}
+	return &Manager{cfg: cfg, docker: dkr, health: health, reg: reg, logf: logf, keys: map[string]*keyState{}}
 }
 
 // ContainerName is the deterministic name for one workspace's container:

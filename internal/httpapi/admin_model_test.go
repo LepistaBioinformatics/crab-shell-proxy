@@ -171,7 +171,7 @@ func realModelServer(t *testing.T) (*Server, string) {
 		ContainerPrefix:   "picoclaw",
 		Agents:            map[string]config.Agent{"alpha": modelAgent()},
 	}
-	mgr := docker.NewManager(cfg, fakeAdminDocker{}, func(context.Context, string, int) error { return nil }, nil)
+	mgr := docker.NewManager(cfg, fakeAdminDocker{}, func(context.Context, string, int) error { return nil }, nil, nil)
 	return &Server{Cfg: cfg, Resolver: identity.NewSDKResolver(), Mgr: mgr}, root
 }
 

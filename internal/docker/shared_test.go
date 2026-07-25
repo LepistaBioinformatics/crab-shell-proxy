@@ -19,7 +19,7 @@ func sharedManager(t *testing.T) *Manager {
 		ContainerDataRoot: t.TempDir(),
 		ContainerPrefix:   "picoclaw",
 	}
-	return NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil)
+	return NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil, nil)
 }
 
 func tenantScope() Scope {

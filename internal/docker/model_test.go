@@ -21,7 +21,7 @@ func modelManager(t *testing.T) *Manager {
 		ContainerDataRoot: t.TempDir(),
 		ContainerPrefix:   "picoclaw",
 	}
-	return NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil)
+	return NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil, nil)
 }
 
 func TestModelOverrideRoundTrip(t *testing.T) {
@@ -288,7 +288,7 @@ func TestReapplyModelScopeSubscription(t *testing.T) {
 		ContainerPrefix:   "picoclaw",
 		Agents:            map[string]config.Agent{"alpha": testAgent()},
 	}
-	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil, nil)
 
 	key1 := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
 	key2 := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u2"}
@@ -346,7 +346,7 @@ func TestReapplyModelScopeTenantWide(t *testing.T) {
 		ContainerPrefix:   "picoclaw",
 		Agents:            map[string]config.Agent{"alpha": testAgent()},
 	}
-	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil, nil)
 
 	keyA := WorkspaceKey{TenantID: "t1", SubsAccID: "sA", Role: "alpha", UserAccID: "u1"}
 	keyB := WorkspaceKey{TenantID: "t1", SubsAccID: "sB", Role: "alpha", UserAccID: "u2"}
@@ -390,7 +390,7 @@ func TestReapplyModelScopeSkipsUnprovisionedWorkspace(t *testing.T) {
 		ContainerPrefix:   "picoclaw",
 		Agents:            map[string]config.Agent{"alpha": testAgent()},
 	}
-	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil, nil)
 
 	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
 	dir := config.UserWorkspace(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
@@ -423,7 +423,7 @@ func TestReapplyModelUser(t *testing.T) {
 		ContainerPrefix:   "picoclaw",
 		Agents:            map[string]config.Agent{"alpha": testAgent()},
 	}
-	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil)
+	m := NewManager(cfg, newFakeDocker(), func(context.Context, string, int) error { return nil }, nil, nil)
 	agent := testAgent()
 
 	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}

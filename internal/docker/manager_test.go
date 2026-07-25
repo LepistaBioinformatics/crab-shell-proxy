@@ -113,7 +113,7 @@ func testManager(t *testing.T, mode config.Mode, dkr Docker) (*Manager, config.A
 		Agents: map[string]config.Agent{"alpha": agent},
 	}
 	healthy := func(context.Context, string, int) error { return nil }
-	return NewManager(cfg, dkr, healthy, nil), agent
+	return NewManager(cfg, dkr, healthy, nil, nil), agent
 }
 
 func TestEnsureRunningColdStart(t *testing.T) {

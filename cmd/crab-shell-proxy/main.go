@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/pico"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 func main() {
@@ -41,7 +43,15 @@ func main() {
 		socket = "/var/run/docker.sock"
 	}
 	dkr := docker.NewUnixClient(socket)
-	mgr := docker.NewManager(cfg, dkr, nil, logger.Printf)
+
+	regPath := filepath.Join(cfg.ContainerDataRoot, "model-registry.db")
+	reg, err := registry.Open(regPath, nil)
+	if err != nil {
+		logger.Fatalf("open model registry: %v", err)
+	}
+	defer func() { _ = reg.Close() }()
+
+	mgr := docker.NewManager(cfg, dkr, nil, reg, logger.Printf)
 
 	srv := &httpapi.Server{
 		Cfg:      cfg,

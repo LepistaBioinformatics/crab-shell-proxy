@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -135,4 +136,59 @@ func pruneSecurityModelList(sec map[string]any, keep []string) {
 	if len(ml) == 0 {
 		delete(sec, "model_list")
 	}
+}
+
+// ErrNoModel is the package-level alias the HTTP layer matches on, so handlers
+// do not need to import registry just to classify one error.
+var ErrNoModel = registry.ErrNoModelResolvable
+
+// workspaceRef converts a WorkspaceKey into the registry's own ref. The registry
+// cannot import this package (it would be a cycle), so the conversion lives here.
+func (m *Manager) workspaceRef(key WorkspaceKey) registry.WorkspaceRef {
+	return registry.WorkspaceRef{
+		TenantID:  key.TenantID,
+		SubsAccID: key.SubsAccID,
+		Agent:     key.Role,
+		UserAccID: key.UserAccID,
+	}
+}
+
+// resolveAndMaterialize resolves the workspace's model and writes it. It is the
+// single entry point every provision and every re-apply goes through.
+//
+// A workspace with no resolvable model is REFUSED, not defaulted: picoclaw fails
+// at startup when agents.defaults.model_name names a model absent from
+// model_list, so a silent default would produce a permanently unbootable
+// container. Nothing is written on refusal.
+func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error {
+	ref := m.workspaceRef(key)
+	res, err := m.reg.Resolve(ref)
+	if err != nil {
+		return err
+	}
+	for _, name := range res.Skipped {
+		m.logf("materialize %s: fallback %q is not active, skipped", ref.Key(), name)
+	}
+
+	configPath := filepath.Join(userDir, "config.json")
+	secPath := filepath.Join(userDir, ".security.yml")
+	if err := materializeModels(configPath, secPath, res); err != nil {
+		return err
+	}
+
+	// An existing EXPLICIT pin keeps its source: re-materializing must not demote
+	// a deliberate per-user choice into an inherited one, which would let the next
+	// scope-default change silently override it.
+	source := registry.SourceInherited
+	if prev, err := m.reg.GetAssignment(ref); err == nil && prev.Source == registry.SourceExplicit {
+		source = registry.SourceExplicit
+	}
+	if err := m.reg.PutAssignment(ref, registry.Assignment{
+		ModelName: res.Primary.ModelName,
+		Chain:     res.ChainNames(),
+		Source:    source,
+	}); err != nil {
+		return fmt.Errorf("record assignment: %w", err)
+	}
+	return chownTree(userDir, m.cfg.PicoclawUser)
 }

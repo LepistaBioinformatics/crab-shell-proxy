@@ -578,7 +578,7 @@ func realMgrServer(t *testing.T, webhookSecret string) (*Server, string) {
 				Mode: config.ModeScaleToZero},
 		},
 	}
-	mgr := docker.NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil)
+	mgr := docker.NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil, nil)
 	return &Server{Cfg: cfg, Resolver: identity.NewSDKResolver(), Mgr: mgr}, root
 }
 
