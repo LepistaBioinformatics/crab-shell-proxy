@@ -3,8 +3,10 @@ package docker
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
@@ -81,6 +83,51 @@ func TestMigrateImportsRegisteredModelsFile(t *testing.T) {
 	// actually typed, which no other source can reproduce.
 	if got.APIKey != "sk-zhipu" || got.Provider != "zhipu" {
 		t.Errorf("imported = %+v, want the zhipu definition with its key", got)
+	}
+}
+
+// TestMigrateLaterSourceWinsOnModelNameCollision exercises the ordering
+// contract: later sources win on model_name collision, because a
+// registered-models entry (a real, admin-typed credential) is imported AFTER
+// config.yaml (whose apiKeyEnv may no longer be set). The backfill-only-if-blank
+// branch in importLegacyModel is what makes this hold, and until now nothing
+// exercised it — every other test uses disjoint names.
+func TestMigrateLaterSourceWinsOnModelNameCollision(t *testing.T) {
+	m, reg, root := testManagerWithRegistry(t)
+	// A config.yaml agent model whose apiKeyEnv is unset: APIKey resolves empty,
+	// exactly as config.Load leaves it (internal/config/config.go).
+	m.cfg.Agents = map[string]config.Agent{
+		"alpha": {
+			Key: "alpha",
+			Model: &config.ModelConfig{
+				Provider: "openai", Name: "shared-name", APIKey: "",
+			},
+		},
+	}
+
+	dir := filepath.Join(root, "registered-models")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := `[{"provider":"openai","name":"shared-name","model":"shared-name",
+	  "api_base":"https://api.openai.com/v1","api_key":"sk-real"}]`
+	if err := os.WriteFile(filepath.Join(dir, "alpha.json"), []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.migrateModelRegistry(); err != nil {
+		t.Fatalf("migrateModelRegistry: %v", err)
+	}
+
+	got, err := reg.GetModel("shared-name")
+	if err != nil {
+		t.Fatalf("GetModel: %v", err)
+	}
+	// config.yaml's keyless entry is imported first (step 1); registered-models'
+	// entry with a real key is imported second (step 2) and must backfill it,
+	// not be skipped as a duplicate.
+	if got.APIKey != "sk-real" {
+		t.Errorf("APIKey = %q, want sk-real — the later source's real credential must win", got.APIKey)
 	}
 }
 
@@ -264,5 +311,54 @@ func TestMigrateSkipsAWorkspaceWithNoActiveModelNamed(t *testing.T) {
 	// gets no assignment, and will resolve normally on its next start.
 	if _, err := reg.GetAssignment(m.workspaceRef(key)); !errors.Is(err, registry.ErrNotFound) {
 		t.Errorf("want ErrNotFound for a model-less workspace, got %v", err)
+	}
+}
+
+// TestMigrateLogsAnUnreadableWorkspaceConfigInsteadOfSkippingSilently proves the
+// review-mandated fix in captureWorkspaceModel is reachable: a genuine read
+// failure (permission denied) on a workspace's config.json must be logged, not
+// folded into the "never provisioned" no-op. A workspace this pass could not
+// read may well have a live model, so treating the failure as "nothing to
+// capture" would silently leave it unassigned — the exact failure this task
+// exists to prevent, just triggered by an I/O error instead of a stale scope.
+func TestMigrateLogsAnUnreadableWorkspaceConfigInsteadOfSkippingSilently(t *testing.T) {
+	m, reg, root := testManagerWithRegistry(t)
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+	userDir := seedLegacyWorkspace(t, root, key, "unreadable", "openai", "sk-unreadable", nil)
+	configPath := filepath.Join(userDir, "config.json")
+
+	if err := os.Chmod(configPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0o600) }) // let TempDir clean up
+	if _, err := os.ReadFile(configPath); err == nil || os.IsNotExist(err) {
+		t.Skipf("chmod 000 did not produce a non-ENOENT read error in this environment (err=%v); "+
+			"likely running as root, where file mode does not gate the owner's own read", err)
+	}
+
+	var logs []string
+	m.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	if err := m.migrateModelRegistry(); err != nil {
+		t.Fatalf("migrateModelRegistry: %v", err)
+	}
+
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "read config.json") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no log mentioned the unreadable config.json; logs = %v", logs)
+	}
+	// The old code returned nil for ANY read error, which reads identically to a
+	// never-provisioned workspace: no assignment either way. The fix does not
+	// change that outcome (a failed capture still yields no assignment this
+	// pass) — it changes whether the failure is visible for a retry instead of
+	// being silently indistinguishable from "nothing to do here".
+	if _, err := reg.GetAssignment(m.workspaceRef(key)); !errors.Is(err, registry.ErrNotFound) {
+		t.Errorf("want ErrNotFound (capture failed this pass), got %v", err)
 	}
 }

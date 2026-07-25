@@ -156,7 +156,7 @@ func (m *Manager) importLegacyModel(mod registry.Model) {
 func (m *Manager) importOverrideFiles(root string) {
 	tenantFiles, _ := filepath.Glob(filepath.Join(root, "tenants", "*", "shared", "model.json"))
 	for _, path := range tenantFiles {
-		sel, ok := readLegacySel(path)
+		sel, ok := readLegacySel(path, m.logf)
 		if !ok {
 			continue
 		}
@@ -172,7 +172,7 @@ func (m *Manager) importOverrideFiles(root string) {
 
 	subsFiles, _ := filepath.Glob(filepath.Join(root, "tenants", "*", "subscriptions", "*", "shared", "model.json"))
 	for _, path := range subsFiles {
-		sel, ok := readLegacySel(path)
+		sel, ok := readLegacySel(path, m.logf)
 		if !ok {
 			continue
 		}
@@ -188,13 +188,25 @@ func (m *Manager) importOverrideFiles(root string) {
 	}
 }
 
-func readLegacySel(path string) (legacyModelSel, bool) {
+// readLegacySel reads one admin-model-override selection file. A missing file
+// is the normal case (no override was ever set at that scope) and is silent; any
+// other read or parse failure is logged rather than swallowed, since a missed
+// override only drops a scope default (step 4 still captures each workspace's
+// own assignment independently) but should still be visible, not invisible.
+func readLegacySel(path string, logf func(string, ...any)) (legacyModelSel, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			logf("migrate models: read %s: %v", path, err)
+		}
 		return legacyModelSel{}, false
 	}
 	var sel legacyModelSel
-	if err := json.Unmarshal(raw, &sel); err != nil || sel.Name == "" {
+	if err := json.Unmarshal(raw, &sel); err != nil {
+		logf("migrate models: parse %s: %v", path, err)
+		return legacyModelSel{}, false
+	}
+	if sel.Name == "" {
 		return legacyModelSel{}, false
 	}
 	return sel, true
@@ -243,8 +255,15 @@ func (m *Manager) captureWorkspaceModel(key WorkspaceKey) error {
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	configPath := filepath.Join(userDir, "config.json")
 	raw, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return nil // never provisioned — nothing to capture
+	}
 	if err != nil {
-		return nil // never provisioned
+		// A workspace we cannot read may well have a live model. Surfacing the
+		// error gets it logged and keeps it visible for a retry, rather than
+		// silently recording it as unassigned and letting the next scope change
+		// move it — the exact failure this task exists to prevent.
+		return fmt.Errorf("read config.json: %w", err)
 	}
 	var cfg map[string]any
 	if err := json.Unmarshal(raw, &cfg); err != nil {
