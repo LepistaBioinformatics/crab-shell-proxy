@@ -19,13 +19,13 @@ import (
 // use is lost — the migration already recovered every running model from the
 // workspaces themselves, which is where a working model provably exists.
 func (m *Manager) normalizeDiskTemplates() error {
-	seen := map[string]bool{}
-	for _, agent := range m.cfg.Agents {
-		if agent.Template == "" || seen[agent.Template] {
-			continue
-		}
-		seen[agent.Template] = true
-		path := filepath.Join(config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template), "config.json")
+	// Enumerate templates from DISK, not from m.cfg.Agents: config.Load drops
+	// disabled or removed agents from that map, so a per-agent loop would leave
+	// exactly those agents' templates un-normalized — still carrying models,
+	// still looking like a place the truth lives. The same reason the migration
+	// and the drift check enumerate workspaces from disk.
+	matches, _ := filepath.Glob(filepath.Join(m.cfg.ContainerDataRoot, "templates", "*", "config.json"))
+	for _, path := range matches {
 		if err := normalizeTemplateFile(path); err != nil {
 			m.logf("normalize template %s: %v", path, err)
 		}
@@ -50,10 +50,15 @@ func normalizeTemplateFile(path string) error {
 	// overwrite an existing backup: a re-run must not replace the real original
 	// with an already-normalized copy.
 	backup := path + ".pre-registry"
-	if _, err := os.Stat(backup); os.IsNotExist(err) {
+	switch _, statErr := os.Stat(backup); {
+	case os.IsNotExist(statErr):
 		if err := os.WriteFile(backup, raw, 0o600); err != nil {
 			return fmt.Errorf("write backup: %w", err)
 		}
+	case statErr != nil:
+		// Cannot tell whether a backup exists. Refuse to normalize rather than
+		// destroy the original with no recoverable copy.
+		return fmt.Errorf("stat backup %s: %w", backup, statErr)
 	}
 
 	cfg["model_list"] = []any{}

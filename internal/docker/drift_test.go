@@ -54,6 +54,42 @@ func TestNormalizeDiskTemplatesEmptiesModelListAndBacksUp(t *testing.T) {
 	}
 }
 
+func TestNormalizeDiskTemplatesCoversATemplateNoAgentDeclares(t *testing.T) {
+	// config.Load drops disabled or removed agents from m.cfg.Agents, so a
+	// template used only by such an agent must still be found and normalized —
+	// otherwise it stays un-normalized, still carrying models on disk.
+	m, _, root := testManagerWithRegistry(t)
+	tmplDir := config.TemplatesDir(root, "orphaned")
+	if err := os.MkdirAll(tmplDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"version":3,"agents":{"defaults":{"provider":"zhipu","model_name":"glm-4.7"}},` +
+		`"model_list":[{"model_name":"glm-4.7","provider":"zhipu","model":"glm-4.7"}]}`
+	tmplPath := filepath.Join(tmplDir, "config.json")
+	if err := os.WriteFile(tmplPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No agent in m.cfg.Agents names "orphaned" as its Template.
+	m.cfg.Agents = map[string]config.Agent{"alpha": {Key: "alpha", Template: "picoclaw"}}
+
+	if err := m.normalizeDiskTemplates(); err != nil {
+		t.Fatalf("normalizeDiskTemplates: %v", err)
+	}
+
+	raw, _ := os.ReadFile(tmplPath)
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	list, ok := cfg["model_list"].([]any)
+	if !ok || len(list) != 0 {
+		t.Errorf("model_list = %#v, want [] (template not reachable via m.cfg.Agents was skipped)", cfg["model_list"])
+	}
+	if _, err := os.ReadFile(tmplPath + ".pre-registry"); err != nil {
+		t.Errorf("backup missing for a template no agent declares: %v", err)
+	}
+}
+
 func TestNormalizeDiskTemplatesDoesNotOverwriteAnExistingBackup(t *testing.T) {
 	m, _, root := testManagerWithRegistry(t)
 	tmplDir := config.TemplatesDir(root, "picoclaw")

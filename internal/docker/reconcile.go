@@ -11,6 +11,10 @@ import (
 )
 
 // Reconcile brings the manager's in-memory state in line with reality at boot:
+//   - seeds the model inventory from every pre-existing source and normalizes
+//     disk templates, on first boot after upgrade (migrateModelRegistry),
+//   - logs any mismatch between a workspace's recorded model assignment and
+//     what it is actually running (checkModelDrift),
 //   - adopts already-running managed containers (re-arming scale-to-zero timers),
 //   - ensures continuous-mode containers are started (CSP-08/09/10).
 //
