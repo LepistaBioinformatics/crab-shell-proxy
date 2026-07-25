@@ -70,12 +70,15 @@ type Orchestrator interface {
 	ReadSharedFile(scope docker.Scope, name string) (io.ReadCloser, docker.FileMeta, error)
 	// DeleteSharedFile removes one shared file from a scope.
 	DeleteSharedFile(scope docker.Scope, name string) error
-	// WriteSharedSecret upserts one shared secret at a scope (dotenv/json only).
+	// WriteSharedSecret upserts one shared secret at a scope (dotenv/json/native).
 	WriteSharedSecret(scope docker.Scope, format, name, value string) error
 	// ListSharedSecrets returns a scope's shared-secret names per format (never values).
 	ListSharedSecrets(scope docker.Scope) (docker.SecretNames, error)
 	// DeleteSharedSecret removes one shared secret from a scope.
 	DeleteSharedSecret(scope docker.Scope, format, name string) error
+	// UnsetNativeSlotForScope clears a deleted native slot from the .security.yml
+	// of every workspace the scope covers (the merge on restart only sets slots).
+	UnsetNativeSlotForScope(scope docker.Scope, slot string)
 	// ListTenants returns the tenant ids present on disk (scope discovery, Instance).
 	ListTenants() ([]string, error)
 	// ListTenantSubscriptions returns the subscription ids under a tenant on disk.
@@ -192,6 +195,7 @@ func (s *Server) Handler() http.Handler {
 	// internal/authz. There is deliberately NO users/files/content route and no
 	// user-file write route (FR-7 privacy invariant).
 	mux.HandleFunc("GET /v1/admin/scopes", s.handleAdminScopes)
+	mux.HandleFunc("GET /v1/admin/agents", s.handleAdminAgents)
 	mux.HandleFunc("GET /v1/admin/shared", s.handleAdminSharedList)
 	mux.HandleFunc("POST /v1/admin/shared", s.handleAdminSharedPost)
 	mux.HandleFunc("GET /v1/admin/shared/content", s.handleAdminSharedContent)
@@ -708,6 +712,28 @@ func (s *Server) resolveSecretCaller(w http.ResponseWriter, r *http.Request) (co
 	return agent, ident, true
 }
 
+// rejectNativeForUser writes a 403 and returns true when a per-user secret WRITE
+// names the native format. Native slots (picoclaw's own .security.yml —
+// search-provider and model keys) are an administrative surface: they are
+// published at tenant/subscription scope via /v1/admin/shared-secrets and reach
+// workspaces through the cascade (native-secrets-admin-only FR-1). The gate lives
+// here, in the proxy, and not only in the webapp BFF — the reverted first attempt
+// gated the BFF alone and left this layer open.
+//
+// It gates WRITES only. Listing still reports a user's pre-gate native NAMES
+// (never a value), and deleting one is still allowed: those entries are the
+// user's own data, and removing the only way to clean them up would strand them
+// permanently. Deletion cannot inject a credential, so it is outside what this
+// feature moves to admins.
+func rejectNativeForUser(w http.ResponseWriter, format string) bool {
+	if format != docker.FormatNative {
+		return false
+	}
+	writeJSON(w, http.StatusForbidden, errBody(
+		"native secrets are administered at tenant/subscription scope; ask a scope administrator to set this credential"))
+	return true
+}
+
 // handleSecretsPost injects/updates one secret for the caller's (user, agent)
 // pair and restarts the container so picoclaw re-reads it (AC-02, CTX-AC-04).
 func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
@@ -723,6 +749,9 @@ func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
 	if !knownSecretFormats[req.Format] {
 		writeJSON(w, http.StatusBadRequest,
 			errBody(`"format" must be one of dotenv, json, file, native`))
+		return
+	}
+	if rejectNativeForUser(w, req.Format) {
 		return
 	}
 	tenantID, err := uuid.Parse(req.TenantID)

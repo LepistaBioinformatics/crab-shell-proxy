@@ -26,11 +26,14 @@ const (
 )
 
 // Scope identifies where shared content lives. SubsAccID is empty for a tenant
-// scope.
+// scope. AgentKey narrows the scope to a single agent; empty means "all agents"
+// — the pre-per-agent store, which every agent under the scope still reads
+// (per-agent-injection-scope FR-1).
 type Scope struct {
 	Kind      ScopeKind
 	TenantID  string
 	SubsAccID string
+	AgentKey  string
 }
 
 // FileMeta is the metadata-only view of a stored file (never its bytes). It is
@@ -51,18 +54,84 @@ type UserRef struct {
 	Email string `json:"email"`
 }
 
-func (m *Manager) sharedFilesDir(scope Scope) string {
-	if scope.Kind == ScopeTenant {
-		return config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, scope.TenantID)
+// sharedFileBind pairs a shared-files store's proxy-side path (which must exist
+// and be agent-readable) with the Docker bind string built from its host-side
+// twin.
+type sharedFileBind struct {
+	container string
+	bind      string
+}
+
+// sharedFileBinds is the read-only shared-files bind set for one workspace: the
+// agent-less tenant/subscription pair (all agents) plus the pair scoped to this
+// workspace's own agent (per-agent-injection-scope FR-5). Four sibling mounts
+// rather than a copy-merge like skills — merging would duplicate arbitrarily
+// large uploads on every provision. Pure so the bind set is testable without
+// Docker or root.
+func sharedFileBinds(cfg *config.Config, key WorkspaceKey, mountDest string) []sharedFileBind {
+	type layer struct {
+		dest      string
+		container string
+		host      string
 	}
-	return config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, scope.TenantID, scope.SubsAccID)
+	layers := []layer{
+		{
+			dest:      "tenant",
+			container: config.TenantSharedFilesDir(cfg.ContainerDataRoot, key.TenantID),
+			host:      config.TenantSharedFilesDir(cfg.HostDataRoot, key.TenantID),
+		},
+		{
+			dest:      "subscription",
+			container: config.SubscriptionSharedFilesDir(cfg.ContainerDataRoot, key.TenantID, key.SubsAccID),
+			host:      config.SubscriptionSharedFilesDir(cfg.HostDataRoot, key.TenantID, key.SubsAccID),
+		},
+		{
+			dest:      "tenant-agent",
+			container: config.TenantAgentSharedFilesDir(cfg.ContainerDataRoot, key.TenantID, key.Role),
+			host:      config.TenantAgentSharedFilesDir(cfg.HostDataRoot, key.TenantID, key.Role),
+		},
+		{
+			dest:      "subscription-agent",
+			container: config.SubscriptionAgentSharedFilesDir(cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role),
+			host:      config.SubscriptionAgentSharedFilesDir(cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role),
+		},
+	}
+	out := make([]sharedFileBind, 0, len(layers))
+	for _, l := range layers {
+		out = append(out, sharedFileBind{
+			container: l.container,
+			bind:      l.host + ":" + mountDest + "/workspace/.shared/" + l.dest + ":ro",
+		})
+	}
+	return out
+}
+
+func (m *Manager) sharedFilesDir(scope Scope) string {
+	root := m.cfg.ContainerDataRoot
+	switch {
+	case scope.Kind == ScopeTenant && scope.AgentKey == "":
+		return config.TenantSharedFilesDir(root, scope.TenantID)
+	case scope.Kind == ScopeTenant:
+		return config.TenantAgentSharedFilesDir(root, scope.TenantID, scope.AgentKey)
+	case scope.AgentKey == "":
+		return config.SubscriptionSharedFilesDir(root, scope.TenantID, scope.SubsAccID)
+	default:
+		return config.SubscriptionAgentSharedFilesDir(root, scope.TenantID, scope.SubsAccID, scope.AgentKey)
+	}
 }
 
 func (m *Manager) sharedSecretsDir(scope Scope) string {
-	if scope.Kind == ScopeTenant {
-		return config.TenantSharedSecretsDir(m.cfg.ContainerDataRoot, scope.TenantID)
+	root := m.cfg.ContainerDataRoot
+	switch {
+	case scope.Kind == ScopeTenant && scope.AgentKey == "":
+		return config.TenantSharedSecretsDir(root, scope.TenantID)
+	case scope.Kind == ScopeTenant:
+		return config.TenantAgentSharedSecretsDir(root, scope.TenantID, scope.AgentKey)
+	case scope.AgentKey == "":
+		return config.SubscriptionSharedSecretsDir(root, scope.TenantID, scope.SubsAccID)
+	default:
+		return config.SubscriptionAgentSharedSecretsDir(root, scope.TenantID, scope.SubsAccID, scope.AgentKey)
 	}
-	return config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, scope.TenantID, scope.SubsAccID)
 }
 
 // ListSharedFiles returns the metadata of the files stored at a scope (never
@@ -139,21 +208,60 @@ func (m *Manager) DeleteSharedFile(scope Scope, name string) error {
 }
 
 // WriteSharedSecret upserts one shared secret into a scope's store, reusing the
-// per-user sink writers. Restricted to the env-shaped sinks (dotenv, json) —
-// those are what the cascade injects as env; native has no per-workspace
-// .security.yml to validate against at scope level, and file isn't env-shaped.
+// per-user sink writers. Allowed formats are the env-shaped sinks (dotenv, json)
+// — what the cascade injects as env — plus native, which since
+// native-secrets-admin-only is an admin-only surface and reaches workspaces
+// through the same cascade. `file` is not env-shaped and stays rejected.
 func (m *Manager) WriteSharedSecret(scope Scope, format, name, value string) error {
-	if format != FormatDotenv && format != FormatJSON {
-		return fmt.Errorf("%w: shared secrets support only dotenv and json", ErrInvalidSecretName)
-	}
-	if err := validateSecretName(name); err != nil {
+	if err := m.checkSharedSecretFormat(scope, format, name); err != nil {
 		return err
 	}
 	dir := m.sharedSecretsDir(scope)
-	if err := writeSecret(dir, "", format, name, value); err != nil {
+	if err := writeSecret(dir, m.scopeSecurityTemplate(scope), format, name, value); err != nil {
 		return err
 	}
 	return chownTree(dir, m.cfg.PicoclawUser)
+}
+
+// checkSharedSecretFormat gates which formats a scope accepts and validates the
+// name. A native slot is additionally constrained by scopeSecurityTemplate:
+// web.<provider> needs no model list so it works at any target, while a
+// model_list slot needs the target agent's template (FR-4).
+func (m *Manager) checkSharedSecretFormat(scope Scope, format, name string) error {
+	// The HTTP layer validates the agent target, but this is a public manager
+	// method: an unknown key here would silently resolve to an empty template
+	// path, which a web slot (needing no template) would then accept.
+	if scope.AgentKey != "" {
+		if _, ok := m.cfg.Agents[scope.AgentKey]; !ok {
+			return fmt.Errorf("%w: unknown agent %q", ErrInvalidSecretName, scope.AgentKey)
+		}
+	}
+	switch format {
+	case FormatDotenv, FormatJSON:
+		return validateSecretName(name)
+	case FormatNative:
+		if err := validateSecretName(name); err != nil {
+			return err
+		}
+		if isNativeModelSlot(name) && scope.AgentKey == "" {
+			return fmt.Errorf("%w: a model_list slot must target a single agent, not all agents", ErrUnknownNativeSlot)
+		}
+		return nil // the slot itself is validated by writeSecret/validateNativeSlot
+	default:
+		return fmt.Errorf("%w: shared secrets support only dotenv, json and native", ErrInvalidSecretName)
+	}
+}
+
+// scopeSecurityTemplate is the .security.yml a scope-level native slot is
+// validated against: the target agent's template. Empty for an all-agents scope
+// (and for an unknown key, which checkSharedSecretFormat rejects first) —
+// harmless, because only model_list slots read it and those require an agent.
+func (m *Manager) scopeSecurityTemplate(scope Scope) string {
+	agent, ok := m.cfg.Agents[scope.AgentKey]
+	if !ok {
+		return ""
+	}
+	return filepath.Join(config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template), ".security.yml")
 }
 
 // ListSharedSecrets returns the names of a scope's shared secrets per format,
@@ -162,12 +270,12 @@ func (m *Manager) ListSharedSecrets(scope Scope) (SecretNames, error) {
 	return listSecretNames(m.sharedSecretsDir(scope))
 }
 
-// DeleteSharedSecret removes one shared secret from a scope.
+// DeleteSharedSecret removes one shared secret from a scope. The empty secPath
+// makes the native branch store-only: there is no scope-level .security.yml to
+// unset, and each affected workspace is rebuilt from the cascade by
+// syncEffectiveSecrets.
 func (m *Manager) DeleteSharedSecret(scope Scope, format, name string) error {
-	if format != FormatDotenv && format != FormatJSON {
-		return fmt.Errorf("%w: shared secrets support only dotenv and json", ErrInvalidSecretName)
-	}
-	if err := validateSecretName(name); err != nil {
+	if err := m.checkSharedSecretFormat(scope, format, name); err != nil {
 		return err
 	}
 	dir := m.sharedSecretsDir(scope)
@@ -278,6 +386,11 @@ func (m *Manager) RestartScope(scope Scope) error {
 		if scope.Kind == ScopeSubscription && s.Labels[LabelSubscription] != scope.SubsAccID {
 			continue
 		}
+		// An agent-targeted write only affects that agent's workspaces (FR-7); an
+		// all-agents write keeps hitting every one, as before.
+		if scope.AgentKey != "" && s.Labels[LabelAgent] != scope.AgentKey {
+			continue
+		}
 		key := WorkspaceKey{
 			TenantID:  s.Labels[LabelTenant],
 			SubsAccID: s.Labels[LabelSubscription],
@@ -287,10 +400,18 @@ func (m *Manager) RestartScope(scope Scope) error {
 		// Rebuild the effective secret view (so the change is on disk) then
 		// stop/start — NOT recreate — so picoclaw reloads it while keeping its
 		// live session; a recreate would truncate the transcript.
-		if _, err := m.syncEffectiveSecrets(key); err != nil {
+		effDir, err := m.syncEffectiveSecrets(key)
+		if err != nil {
 			m.logf("restart scope %s/%s: sync secrets %s failed: %v",
 				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
 			continue
+		}
+		// Native slots are not sink files — they live inside .security.yml — so the
+		// mount alone does not deliver them. Merge them into this workspace before
+		// the restart (native-secrets-admin-only FR-6).
+		if err := m.applyNativeToWorkspace(key, effDir); err != nil {
+			m.logf("restart scope %s/%s: apply native %s failed: %v",
+				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
 		}
 		if err := m.RestartWorkspace(key); err != nil {
 			m.logf("restart scope %s/%s: restart %s failed: %v",
@@ -298,6 +419,86 @@ func (m *Manager) RestartScope(scope Scope) error {
 		}
 	}
 	return nil
+}
+
+// applyNativeToWorkspace merges the effective native overlay into one
+// established workspace's .security.yml. A workspace that has not been
+// provisioned yet is a no-op: it picks the overlay up at its first provision.
+func (m *Manager) applyNativeToWorkspace(key WorkspaceKey, effDir string) error {
+	secPath := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
+	if _, err := os.Stat(secPath); err != nil {
+		return nil
+	}
+	return applyNativeSecrets(secPath, effDir, m.cfg.PicoclawUser)
+}
+
+// UnsetNativeSlotForScope removes one native slot from the .security.yml of every
+// established workspace the scope covers, then immediately re-applies the
+// remaining cascade to that same workspace. applyNativeSecrets only ever SETS
+// slots, so a deleted shared native secret would otherwise linger; and unsetting
+// alone would briefly strip a slot a BROADER layer still provides (tenant/all
+// keeps a value the deleted subscription entry was merely overriding). Doing both
+// per workspace keeps it atomic and covers stopped workspaces, which RestartScope
+// never visits. Per-workspace failures are logged, not returned — the store
+// delete already succeeded.
+func (m *Manager) UnsetNativeSlotForScope(scope Scope, slot string) {
+	for _, key := range m.workspacesInScope(scope) {
+		secPath := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot,
+			key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
+		if _, err := os.Stat(secPath); err != nil {
+			continue
+		}
+		sec, err := readSecurityConfig(secPath)
+		if err != nil {
+			m.logf("unset native slot %q in %s: read failed: %v", slot, m.ContainerName(key), err)
+			continue
+		}
+		unsetNativeSlot(sec, slot)
+		if err := writeSecurityConfig(secPath, sec, m.cfg.PicoclawUser); err != nil {
+			m.logf("unset native slot %q in %s: write failed: %v", slot, m.ContainerName(key), err)
+			continue
+		}
+		effDir, err := m.syncEffectiveSecrets(key)
+		if err != nil {
+			m.logf("unset native slot %q in %s: sync failed: %v", slot, m.ContainerName(key), err)
+			continue
+		}
+		if err := m.applyNativeToWorkspace(key, effDir); err != nil {
+			m.logf("unset native slot %q in %s: reapply failed: %v", slot, m.ContainerName(key), err)
+		}
+	}
+}
+
+// workspacesInScope enumerates the on-disk user workspaces a scope covers,
+// narrowed to the scope's target agent when it has one.
+func (m *Manager) workspacesInScope(scope Scope) []WorkspaceKey {
+	subsIDs := []string{scope.SubsAccID}
+	if scope.Kind == ScopeTenant {
+		all, err := m.ListTenantSubscriptions(scope.TenantID)
+		if err != nil {
+			m.logf("workspaces in scope %s: list subscriptions failed: %v", scope.TenantID, err)
+			return nil
+		}
+		subsIDs = all
+	}
+	out := []WorkspaceKey{}
+	for _, sid := range subsIDs {
+		users, err := m.ListSubscriptionUsers(scope.TenantID, sid)
+		if err != nil {
+			m.logf("workspaces in scope %s/%s: list users failed: %v", scope.TenantID, sid, err)
+			continue
+		}
+		for _, u := range users {
+			if scope.AgentKey != "" && u.Role != scope.AgentKey {
+				continue
+			}
+			out = append(out, WorkspaceKey{
+				TenantID: scope.TenantID, SubsAccID: sid, Role: u.Role, UserAccID: u.AccID,
+			})
+		}
+	}
+	return out
 }
 
 // syncEffectiveSecrets materializes the user's EFFECTIVE secret view — the
@@ -310,8 +511,7 @@ func (m *Manager) RestartScope(scope Scope) error {
 // secret changes.
 func (m *Manager) syncEffectiveSecrets(key WorkspaceKey) (string, error) {
 	userStore := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
-	tenantShared := config.TenantSharedSecretsDir(m.cfg.ContainerDataRoot, key.TenantID)
-	subsShared := config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
+	sharedDirs := m.sharedSecretsCascade(key)
 	eff := config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
 	if err := os.MkdirAll(eff, 0o700); err != nil {
 		return "", fmt.Errorf("create effective secrets dir: %w", err)
@@ -327,11 +527,11 @@ func (m *Manager) syncEffectiveSecrets(key WorkspaceKey) (string, error) {
 		userWins[n] = true
 	}
 
-	dotenv, err := cascadeSink(tenantShared, subsShared, userStore, userWins, readDotenvMap)
+	dotenv, err := cascadeSink(sharedDirs, userStore, userWins, readDotenvMap)
 	if err != nil {
 		return "", err
 	}
-	jsonSink, err := cascadeSink(tenantShared, subsShared, userStore, userWins,
+	jsonSink, err := cascadeSink(sharedDirs, userStore, userWins,
 		func(dir string) (map[string]string, error) { return readJSONMap(filepath.Join(dir, "secrets.json")) })
 	if err != nil {
 		return "", err
@@ -342,8 +542,22 @@ func (m *Manager) syncEffectiveSecrets(key WorkspaceKey) (string, error) {
 	if err := writeJSONFile(filepath.Join(eff, "secrets.json"), jsonSink); err != nil {
 		return "", err
 	}
-	// The user's native overlay is never shared; pass it through unchanged.
-	if err := copyFileIfExists(filepath.Join(userStore, "native.yml"), filepath.Join(eff, "native.yml")); err != nil {
+	// Native slots are an ADMIN surface (native-secrets-admin-only FR-5): the
+	// user's own overlay is the lowest layer — legacy entries keep working — and
+	// each shared layer overrides it, most specific last. This inverts the
+	// dotenv/json rule above, where the user wins.
+	native, err := cascadeNative(sharedDirs, userStore)
+	if err != nil {
+		return "", err
+	}
+	nativePath := filepath.Join(eff, "native.yml")
+	if len(native) == 0 {
+		// No overlay anywhere: drop a stale effective copy rather than leaving the
+		// last merge behind.
+		if err := os.Remove(nativePath); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	} else if err := writeOverlay(nativePath, native); err != nil {
 		return "", err
 	}
 	if err := chownTree(eff, m.cfg.PicoclawUser); err != nil {
@@ -352,13 +566,45 @@ func (m *Manager) syncEffectiveSecrets(key WorkspaceKey) (string, error) {
 	return eff, nil
 }
 
-// cascadeSink merges one sink (read by `read`) across tenant → subscription →
-// user, with the user winning: a shared entry whose name the user owns (in any
-// sink) is dropped, then the user's own entries are layered on top.
-func cascadeSink(tenantDir, subsDir, userDir string, userWins map[string]bool,
+// sharedSecretsCascade is the ordered list of shared secret stores that feed a
+// workspace's effective view, lowest precedence first: tenant all-agents →
+// tenant this-agent → subscription all-agents → subscription this-agent
+// (per-agent-injection-scope FR-3). The workspace's own agent is key.Role.
+func (m *Manager) sharedSecretsCascade(key WorkspaceKey) []string {
+	root := m.cfg.ContainerDataRoot
+	return []string{
+		config.TenantSharedSecretsDir(root, key.TenantID),
+		config.TenantAgentSharedSecretsDir(root, key.TenantID, key.Role),
+		config.SubscriptionSharedSecretsDir(root, key.TenantID, key.SubsAccID),
+		config.SubscriptionAgentSharedSecretsDir(root, key.TenantID, key.SubsAccID, key.Role),
+	}
+}
+
+// cascadeNative merges the native.yml overlays: the user's own first (lowest
+// precedence, so a pre-gate entry keeps applying) then each shared dir in
+// ascending-precedence order on top.
+func cascadeNative(sharedDirs []string, userDir string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, dir := range append([]string{userDir}, sharedDirs...) {
+		mm, err := readOverlay(filepath.Join(dir, "native.yml"))
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range mm {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+// cascadeSink merges one sink (read by `read`) across the shared dirs in
+// ascending-precedence order and then the user's own, with the user winning: a
+// shared entry whose name the user owns (in any sink) is dropped, then the
+// user's own entries are layered on top.
+func cascadeSink(sharedDirs []string, userDir string, userWins map[string]bool,
 	read func(string) (map[string]string, error)) (map[string]string, error) {
 	out := map[string]string{}
-	for _, dir := range []string{tenantDir, subsDir} {
+	for _, dir := range sharedDirs {
 		mm, err := read(dir)
 		if err != nil {
 			return nil, err

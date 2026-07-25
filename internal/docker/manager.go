@@ -185,8 +185,14 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	if agent.Harness == config.HarnessHermes {
 		authToken, err = provisionHermes(userDir, templateDir, m.cfg.PicoclawUser, model)
 	} else {
-		storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
-		authToken, err = provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, model, key, ownerEmail)
+		// Materialize the effective secret view BEFORE provisioning: provision
+		// merges the native overlay from it, and native slots now arrive from the
+		// admin cascade, not only from the user's own store.
+		effDir, syncErr := m.syncEffectiveSecrets(key)
+		if syncErr != nil {
+			return Target{}, syncErr
+		}
+		authToken, err = provision(userDir, templateDir, effDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, model, key, ownerEmail)
 	}
 	if err != nil {
 		return Target{}, err
@@ -261,20 +267,16 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// workspace (FR-4/NFR-3). Ensure the container-side dirs exist and are
 	// readable by the non-root agent, mirroring the secret store above, so the
 	// bind source is always present (they are normally pre-created on scaffold).
-	tenantSharedContainer := config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID)
-	subsSharedContainer := config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
-	for _, d := range []string{tenantSharedContainer, subsSharedContainer} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	sharedMounts := make([]string, 0, 4)
+	for _, sm := range sharedFileBinds(m.cfg, key, mountDest) {
+		if err := os.MkdirAll(sm.container, 0o700); err != nil {
 			return fmt.Errorf("create shared files dir: %w", err)
 		}
-		if err := chownTree(d, m.cfg.PicoclawUser); err != nil {
+		if err := chownTree(sm.container, m.cfg.PicoclawUser); err != nil {
 			return fmt.Errorf("chown shared files dir: %w", err)
 		}
+		sharedMounts = append(sharedMounts, sm.bind)
 	}
-	tenantSharedMount := config.TenantSharedFilesDir(m.cfg.HostDataRoot, key.TenantID) +
-		":" + mountDest + "/workspace/.shared/tenant:ro"
-	subsSharedMount := config.SubscriptionSharedFilesDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
-		":" + mountDest + "/workspace/.shared/subscription:ro"
 	// Operator-managed content bind-mounted READ-ONLY into the workspace: the
 	// shared-content skill (where shared files/secrets are + never copy secrets)
 	// and the context-recovery note (how to read the durable transcript back).
@@ -297,10 +299,10 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// skills root. New/edited/removed skills reach picoclaw on the next
 	// stop/start (RestartScope) — no recreate, no transcript loss — mirroring
 	// the effective-secrets discipline.
-	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID); err != nil {
+	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID, key.Role); err != nil {
 		return fmt.Errorf("sync effective skills: %w", err)
 	}
-	skillsMount := config.EffectiveSkillsDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
+	skillsMount := config.EffectiveSkillsDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role) +
 		":" + mountDest + "/skills:ro"
 	env := []string{
 		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
@@ -319,8 +321,8 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds: []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount,
-			managedSkillMount, managedMemoryMount, skillsMount},
+		Binds: append([]string{hostDir + ":" + mountDest, secretsMount},
+			append(sharedMounts, managedSkillMount, managedMemoryMount, skillsMount)...),
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -377,7 +379,19 @@ func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
 		config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 		config.TenantSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID),
 		config.SubscriptionSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
-		config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+	}
+	// The per-agent layer and the effective-skills view are keyed by agent, so
+	// scaffold one of each per configured agent.
+	for agentKey := range m.cfg.Agents {
+		dirs = append(dirs,
+			config.TenantAgentSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, agentKey),
+			config.TenantAgentSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, agentKey),
+			config.TenantAgentSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, agentKey),
+			config.SubscriptionAgentSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+			config.SubscriptionAgentSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+			config.SubscriptionAgentSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+			config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+		)
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -508,8 +522,17 @@ func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
 	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
 		return err
 	}
-	_, err := m.syncEffectiveSecrets(key)
-	return err
+	effDir, err := m.syncEffectiveSecrets(key)
+	if err != nil {
+		return err
+	}
+	// deleteSecret unsets the slot in .security.yml outright, but an admin scope
+	// layer may still provide it — re-apply the remaining cascade so removing a
+	// legacy personal entry never strips the admin's value.
+	if format == FormatNative {
+		return m.applyNativeToWorkspace(key, effDir)
+	}
+	return nil
 }
 
 // workspaceSecurityPath returns the .security.yml to validate/merge native

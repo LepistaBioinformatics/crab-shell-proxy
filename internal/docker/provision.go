@@ -30,8 +30,10 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // home is the in-container HOME the spawned picoclaw will use; the config's
 // workspace path is aligned to <home>/.picoclaw/workspace so it matches the
 // mount point. user ("uid:gid", may be empty) is the non-root owner the data
-// dir is chowned to so a non-root container can write it.
-func provision(userDir, templateDir, storeDir, home, user string, model *config.ModelConfig, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
+// dir is chowned to so a non-root container can write it. secretsDir is the
+// EFFECTIVE secret view (the merged user + shared cascade), which is where the
+// native overlay to merge into .security.yml is read from.
+func provision(userDir, templateDir, secretsDir, home, user string, model *config.ModelConfig, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -75,11 +77,13 @@ func provision(userDir, templateDir, storeDir, home, user string, model *config.
 			return "", fmt.Errorf("chown data dir to %q: %w", user, err)
 		}
 	}
-	// Merge any per-(user, agent) native secrets into this workspace's
-	// .security.yml on EVERY ensure (not just first provision), so a brand-new
-	// workspace of an existing pair — e.g. a second subscription — picks up the
-	// already-stored secrets (AC-04/AC-05, CTX-AC-03). No-op when none are set.
-	if err := applyNativeSecrets(secPath, storeDir, user); err != nil {
+	// Merge the EFFECTIVE native overlay into this workspace's .security.yml on
+	// EVERY ensure (not just first provision), so a brand-new workspace of an
+	// existing pair — e.g. a second subscription — picks up the already-stored
+	// secrets (AC-04/AC-05, CTX-AC-03), and so an admin's scope-level native
+	// secret reaches a user who has never chatted (native-secrets-admin-only
+	// NFR-3). No-op when none are set.
+	if err := applyNativeSecrets(secPath, secretsDir, user); err != nil {
 		return "", fmt.Errorf("apply native secrets: %w", err)
 	}
 	tok, err := readPicoToken(secPath)

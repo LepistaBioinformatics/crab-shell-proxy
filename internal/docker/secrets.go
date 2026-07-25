@@ -195,6 +195,14 @@ func validateNativeSlot(secPath, slot string) error {
 	}
 }
 
+// isNativeModelSlot reports whether a native slot addresses a model's api_keys —
+// the family whose validation needs a concrete agent's model_list, so it cannot
+// be published to an all-agents scope (native-secrets-admin-only FR-4).
+func isNativeModelSlot(slot string) bool {
+	parts := strings.Split(slot, ".")
+	return len(parts) == 3 && parts[0] == "model_list" && parts[2] == "api_keys"
+}
+
 // applyNativeSecrets merges the native.yml overlay from storeDir into secPath's
 // .security.yml at the named slots (preserving all sibling keys — the pico token
 // and model api_keys survive), then re-locks the file 0444. No-op when no native

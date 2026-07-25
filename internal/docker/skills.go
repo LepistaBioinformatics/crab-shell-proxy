@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
@@ -97,10 +98,17 @@ func parseSkillFrontmatter(skillMD string) (name, description string, err error)
 }
 
 func (m *Manager) sharedSkillsDir(scope Scope) string {
-	if scope.Kind == ScopeTenant {
-		return config.TenantSharedSkillsDir(m.cfg.ContainerDataRoot, scope.TenantID)
+	root := m.cfg.ContainerDataRoot
+	switch {
+	case scope.Kind == ScopeTenant && scope.AgentKey == "":
+		return config.TenantSharedSkillsDir(root, scope.TenantID)
+	case scope.Kind == ScopeTenant:
+		return config.TenantAgentSharedSkillsDir(root, scope.TenantID, scope.AgentKey)
+	case scope.AgentKey == "":
+		return config.SubscriptionSharedSkillsDir(root, scope.TenantID, scope.SubsAccID)
+	default:
+		return config.SubscriptionAgentSharedSkillsDir(root, scope.TenantID, scope.SubsAccID, scope.AgentKey)
 	}
-	return config.SubscriptionSharedSkillsDir(m.cfg.ContainerDataRoot, scope.TenantID, scope.SubsAccID)
 }
 
 // ListSharedSkills returns the metadata of every skill at a scope (absent dir →
@@ -348,17 +356,22 @@ func (m *Manager) DeleteSharedSkill(scope Scope, rawName string) error {
 }
 
 // syncEffectiveSkills rebuilds the merged effective-skills dir for one
-// (tenant, subscription): subscription-scope skills override tenant-scope by
-// name; the reserved shared-content is skipped. Copies (not symlinks) so the
-// read-only bind exposes the content inside the container.
-func (m *Manager) syncEffectiveSkills(tenantID, subsAccID string) error {
+// (tenant, subscription, agent): later source wins by name, so an agent-targeted
+// skill overrides an all-agents one and a subscription overrides a tenant; the
+// reserved shared-content is skipped. Copies (not symlinks) so the read-only
+// bind exposes the content inside the container.
+func (m *Manager) syncEffectiveSkills(tenantID, subsAccID, agentKey string) error {
 	root := m.cfg.ContainerDataRoot
-	tenantDir := config.TenantSharedSkillsDir(root, tenantID)
-	subsDir := config.SubscriptionSharedSkillsDir(root, tenantID, subsAccID)
-	eff := config.EffectiveSkillsDir(root, tenantID, subsAccID)
+	eff := config.EffectiveSkillsDir(root, tenantID, subsAccID, agentKey)
+	ordered := []string{
+		config.TenantSharedSkillsDir(root, tenantID),
+		config.TenantAgentSharedSkillsDir(root, tenantID, agentKey),
+		config.SubscriptionSharedSkillsDir(root, tenantID, subsAccID),
+		config.SubscriptionAgentSharedSkillsDir(root, tenantID, subsAccID, agentKey),
+	}
 
 	sources := map[string]string{}
-	for _, d := range []string{tenantDir, subsDir} { // subscription last → wins
+	for _, d := range ordered { // ascending precedence → last wins
 		entries, err := os.ReadDir(d)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -403,20 +416,38 @@ func (m *Manager) syncEffectiveSkills(tenantID, subsAccID string) error {
 }
 
 // SyncEffectiveSkillsForScope rebuilds the effective-skills dir(s) affected by a
-// change at a scope: just the one for a subscription scope, or every
-// subscription under the tenant for a tenant scope.
+// change at a scope: the subscriptions in range (just one, or every subscription
+// under the tenant) crossed with the agents in range (just the targeted one, or
+// every configured agent when the target is all-agents).
 func (m *Manager) SyncEffectiveSkillsForScope(scope Scope) error {
-	if scope.Kind == ScopeSubscription {
-		return m.syncEffectiveSkills(scope.TenantID, scope.SubsAccID)
-	}
-	subs, err := m.ListTenantSubscriptions(scope.TenantID)
-	if err != nil {
-		return err
-	}
-	for _, s := range subs {
-		if err := m.syncEffectiveSkills(scope.TenantID, s); err != nil {
+	subsIDs := []string{scope.SubsAccID}
+	if scope.Kind == ScopeTenant {
+		all, err := m.ListTenantSubscriptions(scope.TenantID)
+		if err != nil {
 			return err
+		}
+		subsIDs = all
+	}
+	for _, s := range subsIDs {
+		for _, agentKey := range m.agentsInScope(scope) {
+			if err := m.syncEffectiveSkills(scope.TenantID, s, agentKey); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// agentsInScope is the set of agent keys a scope-level write reaches: the single
+// targeted agent, or every configured agent for an all-agents write.
+func (m *Manager) agentsInScope(scope Scope) []string {
+	if scope.AgentKey != "" {
+		return []string{scope.AgentKey}
+	}
+	out := make([]string, 0, len(m.cfg.Agents))
+	for key := range m.cfg.Agents {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
@@ -23,6 +24,12 @@ const (
 	slugTenantManager        = "tenant-manager"
 	slugSubscriptionsManager = "subscriptions-manager"
 )
+
+// agentTargetAll is the sentinel that addresses the agent-less shared store —
+// the content every agent under the scope reads. It is the default, so a request
+// that says nothing about agents behaves exactly as it did before
+// per-agent-injection-scope.
+const agentTargetAll = "all"
 
 // parseAdminScope validates the scope kind + ids and returns the resolved
 // docker.Scope, or a non-empty client-error message. UUIDs are normalized to
@@ -46,15 +53,84 @@ func parseAdminScope(kind, tenantID, subsAccID string) (docker.Scope, string) {
 	}
 }
 
-// adminScope reads scope/tenant_id/subs_acc_id via get (query or form), writing
-// a 400 and returning ok=false on a bad value.
+// resolveAgentTarget maps the request's agent target onto Scope.AgentKey: "" /
+// "all" → the all-agents store (empty AgentKey); any other value must be a
+// configured agent key, else a client error (FR-2). The target is deliberately
+// independent of the routed service — the routed agent is the bearer-guard
+// vehicle and cannot express "all agents".
+func (s *Server) resolveAgentTarget(raw string) (string, string) {
+	if raw == "" || raw == agentTargetAll {
+		return "", ""
+	}
+	if _, ok := s.Cfg.Agents[raw]; !ok {
+		return "", `"agent" must be "all" or a configured agent key`
+	}
+	return raw, ""
+}
+
+// adminScope reads scope/tenant_id/subs_acc_id/agent via get (query or form),
+// writing a 400 and returning ok=false on a bad value.
 func (s *Server) adminScope(w http.ResponseWriter, get func(string) string) (docker.Scope, bool) {
 	scope, msg := parseAdminScope(get("scope"), get("tenant_id"), get("subs_acc_id"))
 	if msg != "" {
 		writeJSON(w, http.StatusBadRequest, errBody(msg))
 		return docker.Scope{}, false
 	}
+	agentKey, msg := s.resolveAgentTarget(get("agent"))
+	if msg != "" {
+		writeJSON(w, http.StatusBadRequest, errBody(msg))
+		return docker.Scope{}, false
+	}
+	scope.AgentKey = agentKey
 	return scope, true
+}
+
+// handleAdminAgents lists the configured agent keys so the admin UI can offer an
+// agent target instead of hardcoding one (FR-6). Keys only — never an image,
+// model or key from the agent config. Gated like /v1/admin/scopes: the caller
+// must administer at least one scope.
+func (s *Server) handleAdminAgents(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	if !s.hasAnyManageableScope(ident) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer any scope"))
+		return
+	}
+	keys := make([]string, 0, len(s.Cfg.Agents))
+	for key := range s.Cfg.Agents {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	agents := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		agents = append(agents, map[string]any{"key": key})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+// hasAnyManageableScope reports whether the caller holds administrative
+// authority over at least one tenant or subscription — Instance tier, or a
+// licensed tenant/subscription management role.
+func (s *Server) hasAnyManageableScope(ident identity.Identity) bool {
+	p := ident.Profile
+	if p == nil {
+		return false
+	}
+	if p.HasAdminPrivileges() {
+		return true
+	}
+	if p.LicensedResources == nil {
+		return false
+	}
+	for _, res := range p.LicensedResources.ToLicensesVector() {
+		switch res.Role {
+		case slugTenantOwner, slugTenantManager, slugSubscriptionsManager:
+			return true
+		}
+	}
+	return false
 }
 
 // handleAdminScopes reports the flat set of scopes the caller may administer
@@ -270,6 +346,7 @@ type adminSecretRequest struct {
 	Scope     string `json:"scope"`
 	TenantID  string `json:"tenant_id"`
 	SubsAccID string `json:"subs_acc_id"`
+	Agent     string `json:"agent"`
 	Format    string `json:"format"`
 	Name      string `json:"name"`
 	Value     string `json:"value"`
@@ -290,6 +367,12 @@ func (s *Server) handleAdminSharedSecretsPost(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, errBody(msg))
 		return
 	}
+	agentKey, msg := s.resolveAgentTarget(req.Agent)
+	if msg != "" {
+		writeJSON(w, http.StatusBadRequest, errBody(msg))
+		return
+	}
+	scope.AgentKey = agentKey
 	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
 		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
 		return
@@ -347,13 +430,20 @@ func (s *Server) handleAdminSharedSecretsDelete(w http.ResponseWriter, r *http.R
 	format := r.URL.Query().Get("format")
 	name := r.URL.Query().Get("name")
 	if err := s.Mgr.DeleteSharedSecret(scope, format, name); err != nil {
-		if errors.Is(err, docker.ErrInvalidSecretName) {
+		if errors.Is(err, docker.ErrInvalidSecretName) || errors.Is(err, docker.ErrUnknownNativeSlot) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
 		s.logf("admin: delete shared secret failed scope=%+v: %v", scope, err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
+	}
+	// A native slot lives inside each workspace's .security.yml, and the merge on
+	// restart only ever SETS slots — so clear it from the covered workspaces first.
+	// The RestartScope below then re-applies whatever lower cascade layer still
+	// provides it (native-secrets-admin-only AC-6).
+	if format == docker.FormatNative {
+		s.Mgr.UnsetNativeSlotForScope(scope, name)
 	}
 	if err := s.Mgr.RestartScope(scope); err != nil {
 		s.logf("admin: restart scope after secret delete failed scope=%+v: %v", scope, err)

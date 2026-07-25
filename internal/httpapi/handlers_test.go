@@ -49,6 +49,7 @@ type fakeOrch struct {
 	tenantSubs      []string
 	sharedWrites    []docker.Scope
 	sharedDeletes   []docker.Scope
+	nativeUnsets    []string
 	userFileDeletes []docker.WorkspaceKey
 	restartScopes   []docker.Scope
 
@@ -170,6 +171,10 @@ func (f *fakeOrch) ListSharedSecrets(docker.Scope) (docker.SecretNames, error) {
 func (f *fakeOrch) DeleteSharedSecret(scope docker.Scope, _, _ string) error {
 	f.sharedDeletes = append(f.sharedDeletes, scope)
 	return nil
+}
+
+func (f *fakeOrch) UnsetNativeSlotForScope(scope docker.Scope, slot string) {
+	f.nativeUnsets = append(f.nativeUnsets, scope.AgentKey+"|"+slot)
 }
 
 func (f *fakeOrch) ListTenants() ([]string, error) {
@@ -788,7 +793,9 @@ func secretsReq(t *testing.T, method, query string, headers map[string]string) *
 }
 
 func TestSecretsPostEachFormat(t *testing.T) {
-	for _, format := range []string{"dotenv", "json", "file", "native"} {
+	// native is deliberately absent: it moved to the admin surface
+	// (native-secrets-admin-only AC-1, asserted by TestSecretsNativeRejected).
+	for _, format := range []string{"dotenv", "json", "file"} {
 		t.Run(format, func(t *testing.T) {
 			orch := scaffoldedOrch()
 			s := testServer(orch, &fakeTurner{})
@@ -818,7 +825,7 @@ func TestSecretsPostValidationMapsTo400(t *testing.T) {
 		orch.writeErr = sentinel
 		s := testServer(orch, &fakeTurner{})
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("native", "bad.slot", "v"), goodHeaders(t)))
+		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("dotenv", "BAD NAME", "v"), goodHeaders(t)))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("sentinel %v: status = %d, want 400", sentinel, w.Code)
 		}
@@ -826,6 +833,43 @@ func TestSecretsPostValidationMapsTo400(t *testing.T) {
 			t.Errorf("sentinel %v: restart must not run when write is rejected", sentinel)
 		}
 	}
+}
+
+// TestSecretsNativeRejected proves native-secrets-admin-only AC-1: the per-user
+// endpoint refuses to WRITE the native format, in the PROXY (not only the webapp
+// BFF), and nothing is written or restarted. The caller here is a normal chat
+// user; the gate is unconditional, so tier does not matter. Deleting a pre-gate
+// entry stays allowed — it is the user's own data and cannot inject a credential.
+func TestSecretsNativeRejected(t *testing.T) {
+	t.Run("post", func(t *testing.T) {
+		orch := scaffoldedOrch()
+		s := testServer(orch, &fakeTurner{})
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("native", "web.brave", "sekret"), goodHeaders(t)))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403: %s", w.Code, w.Body.String())
+		}
+		if len(orch.writes) != 0 {
+			t.Errorf("native write reached the manager: %+v", orch.writes)
+		}
+		if len(orch.restarts) != 0 {
+			t.Errorf("restart must not run for a rejected native write")
+		}
+	})
+	t.Run("delete of a legacy entry stays allowed", func(t *testing.T) {
+		orch := scaffoldedOrch()
+		s := testServer(orch, &fakeTurner{})
+		w := httptest.NewRecorder()
+		url := "/v1/secrets?format=native&name=web.brave&tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+		req := httptest.NewRequest(http.MethodDelete, url, nil)
+		for k, v := range goodHeaders(t) {
+			req.Header.Set(k, v)
+		}
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+	})
 }
 
 func TestSecretsPostUnknownFormat400(t *testing.T) {
