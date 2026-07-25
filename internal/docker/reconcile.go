@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,14 @@ import (
 // already exists (a brand-new continuous user still needs one API call to first
 // create the dir — documented limitation R3).
 func (m *Manager) Reconcile(ctx context.Context) error {
+	// The inventory must be seeded before anything resolves a model, and a
+	// migration failure must stop the boot: continuing would provision workspaces
+	// against an empty inventory and refuse every one of them.
+	if err := m.migrateModelRegistry(); err != nil {
+		return fmt.Errorf("migrate model registry: %w", err)
+	}
+	m.checkModelDrift()
+
 	summaries, err := m.docker.List(ctx, LabelManaged+"=true")
 	if err != nil {
 		return err

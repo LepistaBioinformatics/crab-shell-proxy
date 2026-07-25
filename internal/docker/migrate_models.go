@@ -113,6 +113,14 @@ func (m *Manager) migrateModelRegistry() error {
 		}
 	}
 
+	// 5. Normalize the disk templates LAST among the mutating steps. Not a data
+	// dependency — it touches templates, step 4 touches workspaces — but ordering
+	// it here means a failure anywhere earlier leaves the templates untouched and
+	// the whole pass re-runnable.
+	if err := m.normalizeDiskTemplates(); err != nil {
+		return err
+	}
+
 	m.logf("migrate models: superseded files are no longer read " +
 		"(registered-models/*.json, tenants/*/shared/model.json, " +
 		"tenants/*/subscriptions/*/shared/model.json, .crab-model.json); " +
