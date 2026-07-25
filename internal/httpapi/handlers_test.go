@@ -53,15 +53,10 @@ type fakeOrch struct {
 	userFileDeletes []docker.WorkspaceKey
 	restartScopes   []docker.Scope
 
-	// admin-model-override fakes: record calls, return canned results.
-	effectiveModel  *config.ModelConfig
-	effectiveLevel  string
-	modelSetErr     error
-	modelClearErr   error
-	modelSets       []docker.ModelTarget
-	modelClears     []docker.ModelTarget
-	reapplyScopes   []docker.Scope
-	reapplyUserKeys []docker.WorkspaceKey
+	// model re-apply fakes: record calls, return canned results.
+	reapplyScopes    []docker.Scope
+	reapplyUserKeys  []docker.WorkspaceKey
+	reapplyForModels []string
 }
 
 type secretWrite struct {
@@ -90,11 +85,6 @@ func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error   
 func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error               { return nil }
 func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error                           { return nil }
 func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error                         { return nil }
-
-func (f *fakeOrch) ListRegisteredModels(string) ([]docker.RegisteredModel, error)              { return nil, nil }
-func (f *fakeOrch) AddRegisteredModel(string, docker.RegisteredModel) error                    { return nil }
-func (f *fakeOrch) DeleteRegisteredModel(string, string, string) error                         { return nil }
-func (f *fakeOrch) ApplyRegisteredModelToUser(string, docker.WorkspaceKey, string, string) error { return nil }
 
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
@@ -203,33 +193,18 @@ func (f *fakeOrch) RestartScope(scope docker.Scope) error {
 	return nil
 }
 
-func (f *fakeOrch) EffectiveModel(config.Agent, docker.ModelTarget) (*config.ModelConfig, string) {
-	return f.effectiveModel, f.effectiveLevel
-}
-
-func (f *fakeOrch) SetModelOverride(target docker.ModelTarget, _ docker.ModelSel) error {
-	if f.modelSetErr != nil {
-		return f.modelSetErr
-	}
-	f.modelSets = append(f.modelSets, target)
-	return nil
-}
-
-func (f *fakeOrch) ClearModelOverride(target docker.ModelTarget) error {
-	if f.modelClearErr != nil {
-		return f.modelClearErr
-	}
-	f.modelClears = append(f.modelClears, target)
-	return nil
-}
-
 func (f *fakeOrch) ReapplyModelScope(scope docker.Scope) error {
 	f.reapplyScopes = append(f.reapplyScopes, scope)
 	return nil
 }
 
-func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey, _ config.Agent) error {
+func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey) error {
 	f.reapplyUserKeys = append(f.reapplyUserKeys, key)
+	return nil
+}
+
+func (f *fakeOrch) ReapplyModelForModel(modelName string) error {
+	f.reapplyForModels = append(f.reapplyForModels, modelName)
 	return nil
 }
 

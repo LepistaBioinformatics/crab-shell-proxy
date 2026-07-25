@@ -24,6 +24,7 @@ func testManagerWithRegistry(t *testing.T) (*Manager, *registry.Registry, string
 		cfg:  &config.Config{ContainerDataRoot: root, PicoclawUser: ""},
 		reg:  reg,
 		logf: func(string, ...any) {},
+		keys: map[string]*keyState{},
 	}
 	return m, reg, root
 }

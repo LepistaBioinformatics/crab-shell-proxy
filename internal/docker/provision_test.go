@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
 
 func TestReadPicoToken(t *testing.T) {
@@ -39,42 +38,30 @@ func TestAlignWorkspace(t *testing.T) {
 	}
 }
 
-func TestApplyModel(t *testing.T) {
+func TestSeedPicoTokenPreservesTemplateContentAndGeneratesAToken(t *testing.T) {
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.json")
 	secPath := filepath.Join(dir, ".security.yml")
-	os.WriteFile(cfgPath, []byte(`{
-	  "channel_list":{"pico":{"enabled":false,"settings":{}}},
-	  "agents":{"defaults":{"provider":"","model_name":""}}
-	}`), 0o600)
-	os.WriteFile(secPath, []byte("channel_list:\n  pico:\n    settings: {}\n"), 0o600)
-
-	model := &config.ModelConfig{Provider: "deepseek", Name: "deepseek-chat", APIKey: "sk-xyz"}
-	if err := applyModel(cfgPath, secPath, model); err != nil {
-		t.Fatalf("applyModel: %v", err)
+	if err := os.WriteFile(secPath, []byte("web:\n  brave:\n    api_keys:\n    - seeded\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	// config.json: pico enabled + provider/model set.
-	var d map[string]any
-	raw, _ := os.ReadFile(cfgPath)
-	json.Unmarshal(raw, &d)
-	pico := d["channel_list"].(map[string]any)["pico"].(map[string]any)
-	if pico["enabled"] != true {
-		t.Error("pico not enabled")
-	}
-	defs := d["agents"].(map[string]any)["defaults"].(map[string]any)
-	if defs["provider"] != "deepseek" || defs["model_name"] != "deepseek-chat" {
-		t.Errorf("provider/model = %v/%v", defs["provider"], defs["model_name"])
+	if err := seedPicoToken(secPath); err != nil {
+		t.Fatalf("seedPicoToken: %v", err)
 	}
 
-	// .security.yml: fresh pico token + the api key from env.
-	tok, err := readPicoToken(secPath)
-	if err != nil || tok == "" {
-		t.Fatalf("pico token missing after applyModel: %q err=%v", tok, err)
+	sec, err := readSecurityConfig(secPath)
+	if err != nil {
+		t.Fatalf("readSecurityConfig: %v", err)
 	}
-	sec, _ := os.ReadFile(secPath)
-	if !contains(string(sec), "sk-xyz") {
-		t.Errorf(".security.yml missing api key:\n%s", sec)
+	tok, _ := sec["channel_list"].(map[string]any)["pico"].(map[string]any)["settings"].(map[string]any)["token"].(string)
+	if !strings.HasPrefix(tok, "pico-") {
+		t.Errorf("token = %q, want a pico- prefixed random token", tok)
+	}
+	// Only the nested pico.settings.token form is honored by picoclaw (the flat
+	// form silently leaves the channel disabled), and the template's own keys
+	// must survive.
+	if _, ok := sec["web"]; !ok {
+		t.Error("template content was clobbered")
 	}
 }
 
@@ -132,12 +119,14 @@ func TestProvisionFirstSeedsWorkspace(t *testing.T) {
 	userDir := filepath.Join(t.TempDir(), "u")
 	storeDir := t.TempDir()
 	// user "" so chownTree is a no-op (this test does not run as root).
-	tok, err := provision(userDir, tmpl, storeDir, "/data", "", nil, WorkspaceKey{}, "e@x")
+	tok, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, "e@x")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if tok != "tok" {
-		t.Errorf("token = %q, want tok", tok)
+	// seedPicoToken always mints a fresh token on first provision, regardless of
+	// whatever placeholder the template shipped.
+	if !strings.HasPrefix(tok, "pico-") {
+		t.Errorf("token = %q, want a pico- prefixed random token", tok)
 	}
 	if _, err := os.Stat(filepath.Join(userDir, "workspace", "AGENT.md")); err != nil {
 		t.Errorf("AGENT.md not seeded on first provision: %v", err)
@@ -162,22 +151,11 @@ func TestProvisionReturningUserNotReseeded(t *testing.T) {
 	mustWrite(t, filepath.Join(tmpl, "workspace", "AGENT.md"), "TEMPLATE-DEFAULT")
 
 	storeDir := t.TempDir()
-	if _, err := provision(userDir, tmpl, storeDir, "/data", "", nil, WorkspaceKey{}, ""); err != nil {
+	if _, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, ""); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "AGENT.md"))
 	if string(raw) != "EVOLVED" {
 		t.Errorf("returning user's AGENT.md was clobbered: %q", raw)
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (func() bool {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
-		}
-		return false
-	})()
 }

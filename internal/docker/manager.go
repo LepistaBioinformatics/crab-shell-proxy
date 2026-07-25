@@ -181,7 +181,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
-	model := m.resolveModel(agent, key)
+	model := agent.Model
 
 	// Provision the per-user data dir and obtain the auth token to reach the
 	// container: picoclaw's pico channel token, or hermes' generated API server
@@ -198,7 +198,13 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		if syncErr != nil {
 			return Target{}, syncErr
 		}
-		authToken, err = provision(userDir, templateDir, effDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, model, key, ownerEmail)
+		authToken, err = provision(userDir, templateDir, effDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
+		if err == nil {
+			// Materialize AFTER seeding, so the template's (now empty) model_list
+			// is replaced by the inventory's answer. A workspace with no
+			// resolvable model fails here, before any container exists.
+			err = m.resolveAndMaterialize(key, userDir)
+		}
 	}
 	if err != nil {
 		return Target{}, err
