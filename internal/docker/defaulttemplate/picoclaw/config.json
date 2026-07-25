@@ -282,7 +282,7 @@
     {
       "model_name": "deepseek-chat",
       "provider": "deepseek",
-      "model": "deepseek-chat",
+      "model": "deepseek-v4-pro",
       "api_base": "https://api.deepseek.com/v1"
     },
     {
