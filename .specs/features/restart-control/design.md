@@ -248,8 +248,16 @@ where `kind` is `"subscription"` when `subs_acc_id` is present, else `"tenant"`
 
 `/v1/restart` needs a `[[<agent>.path]]` block per agent in **three** files:
 `deploy/standalone/config.standalone.toml`, `deploy/prod/config.base.toml`,
-`deploy/dokploy/config.base.toml`. Because GET and POST have different
-permission gates (FR-1.2 / FR-2.2), it is **two blocks per agent**:
+`deploy/dokploy/config.base.toml`. **Verified during implementation:** the gateway matches routes by **path alone**
+(`adapters/mem_db/src/repositories/routes_read.rs` — `WildMatch::new(route.path)`
+against the request path, then an explicit error when more than one route
+matches: *"Multiple routes found for the specified path"*). Two blocks differing
+only in `methods` would therefore break the route entirely, not gate it.
+
+So `/v1/restart` is **one** block per agent covering both methods, gated on the
+role name (read), with the write requirement for POST enforced in-proxy by the
+same profile chain `/v1/secrets` uses. This is design §8's documented fallback,
+now the primary approach:
 
 ```toml
 [[alpha.path]]
@@ -257,21 +265,11 @@ group = { protectedByRoles = [{ name = "alpha" }] }
 path = "/v1/restart"
 secretName = "alpha-authorization-header"
 acceptInsecureRouting = true
-methods = ["GET"]
-
-[[alpha.path]]
-group = { protectedByRoles = [{ name = "alpha", permission = "write" }] }
-path = "/v1/restart"
-secretName = "alpha-authorization-header"
-acceptInsecureRouting = true
-methods = ["POST"]
+methods = ["GET", "POST"]
 ```
 
-> **Verify during implementation:** that mycelium tolerates two path blocks with
-> the same `path` differing only in `methods`. If it does not, the fallback is a
-> single read-gated block with the write check moved in-proxy (the profile
-> carries the licensed permission, so `authz` can answer it) — a documented
-> fallback, not a silent one.
+Added for every agent in all three deploy configs (`alpha`, `beta`,
+`hermes-glm`; dokploy has no hermes-glm).
 
 `openapi.json` is updated for both routes so the gateway's discovery stays
 accurate.
