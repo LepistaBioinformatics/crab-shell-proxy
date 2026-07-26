@@ -590,3 +590,104 @@ func TestMigrateWithholdsTheSchemaMarkerWhenACaptureFailed(t *testing.T) {
 		t.Errorf("SchemaVersion = %d after a clean re-run, want %d", v, modelRegistrySchemaVersion)
 	}
 }
+
+// seedWorkspaceRunningModelID writes a workspace running one model_name with a
+// specific provider-side model id, so two workspaces can disagree about the id
+// behind the same name — the state the old registry UI's free-text field allowed
+// and that provision never re-seeds away for a returning user.
+func seedWorkspaceRunningModelID(t *testing.T, root string, key WorkspaceKey, modelName, provider, modelID string) string {
+	t.Helper()
+	userDir := config.UserWorkspace(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{
+		"version": 3,
+		"agents":  map[string]any{"defaults": map[string]any{"provider": provider, "model_name": modelName}},
+		"model_list": []any{map[string]any{
+			"model_name": modelName, "provider": provider, "model": modelID,
+			"api_base": "https://api.anthropic.com/v1", "enabled": true,
+		}},
+	}
+	raw, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(userDir, "config.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, ".security.yml"),
+		[]byte("channel_list:\n  pico:\n    settings:\n      token: pico-x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return userDir
+}
+
+// TestMigrateDoesNotLetOneWorkspacesModelIDOverwriteAnothers guards the model-id
+// correction against being last-writer-wins across workspaces.
+//
+// captureWorkspaceModel refines every name already in the inventory, and step 4
+// walks workspaces in glob order (sorted, so u1 then u2). With the correction
+// unguarded, u2's id landed on the single shared record and was then materialized
+// into u1 at its next start — u1's active model changing as a result of the
+// migration alone, which is exactly what AC-11 forbids, and in the same direction
+// C-2 exists to fix.
+//
+// The correction is therefore limited to the config.yaml-seed PLACEHOLDER state
+// (Model == ModelName): the first workspace repairs it, and no later workspace can
+// flip a real id. One record cannot serve two different ids (model_name is unique,
+// FR-3), so the residual disagreement is logged for the admin rather than silently
+// resolved in iteration order.
+func TestMigrateDoesNotLetOneWorkspacesModelIDOverwriteAnothers(t *testing.T) {
+	m, reg, root := testManagerWithRegistry(t)
+	// config.yaml declares the model by NAME only — the placeholder step 1 imports.
+	m.cfg.Agents = map[string]config.Agent{
+		"alpha": {Key: "alpha", Template: "alpha", Model: &config.ModelConfig{
+			Provider: "anthropic", Name: "claude-sonnet-4.6",
+		}},
+	}
+	u1 := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+	u2 := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u2"}
+	dir1 := seedWorkspaceRunningModelID(t, root, u1, "claude-sonnet-4.6", "anthropic", "claude-sonnet-4-5")
+	dir2 := seedWorkspaceRunningModelID(t, root, u2, "claude-sonnet-4.6", "anthropic", "claude-sonnet-4-6")
+	before1, _ := os.ReadFile(filepath.Join(dir1, "config.json"))
+	before2, _ := os.ReadFile(filepath.Join(dir2, "config.json"))
+
+	var logs []string
+	m.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	if err := m.migrateModelRegistry(); err != nil {
+		t.Fatalf("migrateModelRegistry: %v", err)
+	}
+
+	got, err := reg.GetModel("claude-sonnet-4.6")
+	if err != nil {
+		t.Fatalf("GetModel: %v", err)
+	}
+	// The placeholder was repaired once, by the first workspace visited. The second
+	// workspace must NOT have replaced it: "claude-sonnet-4-6" here would mean the
+	// record — and therefore u1's next materialization — took the id of whichever
+	// workspace happened to be iterated last.
+	if got.Model != "claude-sonnet-4-5" {
+		t.Errorf("model = %q, want claude-sonnet-4-5 — a real model id must not be "+
+			"overwritten by another workspace's", got.Model)
+	}
+	// And the placeholder must genuinely have been repaired (C-2 still holds).
+	if got.Model == got.ModelName {
+		t.Errorf("model = %q, still the config.yaml placeholder", got.Model)
+	}
+	// The disagreement is the admin's to resolve, so it must be visible.
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "one inventory record cannot serve both") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("the declined model id was not logged; logs = %v", logs)
+	}
+	// AC-11: the migration only READS workspaces.
+	after1, _ := os.ReadFile(filepath.Join(dir1, "config.json"))
+	after2, _ := os.ReadFile(filepath.Join(dir2, "config.json"))
+	if string(before1) != string(after1) || string(before2) != string(after2) {
+		t.Error("the migration rewrote a workspace's config.json; it must only READ workspaces")
+	}
+}

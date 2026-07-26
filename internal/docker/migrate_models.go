@@ -230,12 +230,32 @@ var errNoRefinement = errors.New("no refinement needed")
 // workspace's real model id and api_base never reach the record, and the next
 // ensure writes a model the provider does not have into a workspace that worked.
 //
-// api_base and auth_method are backfilled only when empty (an admin may have
-// edited them, and a later source is not automatically better at those), while
-// model is corrected outright — a wrong model id is not a preference, it is a
-// request the provider rejects. A NON-EMPTY api_key is never touched: it is the
-// one field an earlier source may hold and a later one may not.
+// Every field is guarded, and each guard is a different question:
+//
+//   - api_base and auth_method are backfilled only when empty — an admin may have
+//     edited them, and a later source is not automatically better at those.
+//   - a NON-EMPTY api_key is never touched: it is the one field an earlier source
+//     may hold and a later one may not.
+//   - model is corrected only while it still carries the config.yaml-seed
+//     PLACEHOLDER, which is exactly the state `cur.Model == cur.ModelName`: step 1
+//     sets Model = mc.Name because config.ModelConfig has no real model id for
+//     picoclaw. Once a real id is in place it is unoverwritable.
+//
+// That last guard is not cosmetic. captureWorkspaceModel calls this for every name
+// already in the inventory, and step 4 walks workspaces in glob order, so an
+// unguarded correction is last-writer-wins across workspaces: where two workspaces
+// carry the same model_name with DIFFERENT model ids — reachable on a legacy
+// instance, since provision never re-seeds a returning user and the old registry UI
+// wrote model_list entries from a free-text field — the last workspace iterated
+// would impose its id on every other workspace using that name at its next start.
+// A workspace's active model changing as a result of the migration alone is exactly
+// what AC-11 forbids.
 func (m *Manager) refineLegacyModel(better registry.Model) {
+	// A model id this pass declined to overwrite. Recorded here and logged after the
+	// transaction: two workspaces naming one model_name with different ids cannot
+	// both be served by one record (model_name is unique, FR-3), so the divergence
+	// is the admin's to resolve and must not be silent.
+	conflict := ""
 	_, err := m.reg.UpdateModelRaw(better.ModelName, func(cur *registry.Model) error {
 		changed := false
 		if cur.APIKey == "" && better.APIKey != "" {
@@ -251,14 +271,22 @@ func (m *Manager) refineLegacyModel(better registry.Model) {
 			changed = true
 		}
 		if better.Model != "" && better.Model != cur.Model {
-			cur.Model = better.Model
-			changed = true
+			if cur.Model == cur.ModelName {
+				cur.Model = better.Model
+				changed = true
+			} else {
+				conflict = cur.Model
+			}
 		}
 		if !changed {
 			return errNoRefinement
 		}
 		return nil
 	})
+	if conflict != "" {
+		m.logf("migrate models: model %q keeps model id %q; another source declares %q — "+
+			"one inventory record cannot serve both, review", better.ModelName, conflict, better.Model)
+	}
 	if err != nil && !errors.Is(err, errNoRefinement) {
 		m.logf("migrate models: refine %q: %v", better.ModelName, err)
 	}
