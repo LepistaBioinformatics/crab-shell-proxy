@@ -104,7 +104,11 @@ func (s *Server) handleAdminAgents(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(keys)
 	agents := make([]map[string]any, 0, len(keys))
 	for _, key := range keys {
-		agents = append(agents, map[string]any{"key": key})
+		// harness is reported so a client can tell which agents an admin surface
+		// applies to. The model inventory governs picoclaw only — hermes reads its
+		// model from the proxy's config.yaml (CTX-MR-13) — so a picker that offered
+		// a hermes agent would let an admin pin a model nothing reads.
+		agents = append(agents, map[string]any{"key": key, "harness": s.Cfg.Agents[key].Harness})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 }

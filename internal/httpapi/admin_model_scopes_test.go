@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -182,5 +185,160 @@ func TestReorderDoesNotReapplyAnything(t *testing.T) {
 	// anything, so the fake must have recorded no reapply call at all.
 	if n := s.Mgr.(*fakeOrch).reapplyCalls; n != 0 {
 		t.Errorf("reorder triggered %d reapply calls, want 0", n)
+	}
+}
+
+// hermesService registers a second agent running a non-picoclaw harness and
+// returns the service-name header value that routes to it.
+func hermesService(s *Server) string {
+	s.Cfg.Agents["nous"] = config.Agent{
+		Key: "nous", ServiceName: "hermes-nous", ResolvedToken: "bearer",
+		Harness: config.HarnessHermes, Mode: config.ModeContinuous,
+	}
+	return "hermes-nous"
+}
+
+func doAdminAs(t *testing.T, s *Server, profile, service, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(profileHeaderName, profile)
+	req.Header.Set("Authorization", testAgentBearer)
+	req.Header.Set(serviceNameHeader, service)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestModelAssignmentRejectedForANonPicoclawAgent — hermes agents read their model
+// from the proxy's config.yaml, so a pin written for one is a record nothing reads:
+// it restarts the container for nothing and leaves a phantom workspace referrer that
+// blocks delete and disable of that model forever. The gate is server-side because
+// the proxy is the gate (NFR-6); the UI filter is secondary.
+func TestModelAssignmentRejectedForANonPicoclawAgent(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	service := hermesService(s)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
+
+	body := `{"tenant_id":"` + tenantT + `","subs_acc_id":"` + subsX +
+		`","user_acc_id":"` + accBob + `","model_name":"m"}`
+	for _, method := range []string{"POST", "DELETE"} {
+		rec := doAdminAs(t, s, admin, service, method, "/v1/admin/model-assignments", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s assignment for a hermes agent = %d, want 400: %s", method, rec.Code, rec.Body.String())
+		}
+	}
+	ref := registry.WorkspaceRef{TenantID: tenantT, SubsAccID: subsX, Agent: "nous", UserAccID: accBob}
+	if _, err := s.Reg.GetAssignment(ref); !errors.Is(err, registry.ErrNotFound) {
+		t.Errorf("a rejected assignment still wrote a record: %v", err)
+	}
+}
+
+func TestAgentModelDefaultRejectedForANonPicoclawAgent(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	service := hermesService(s)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
+
+	for _, tc := range []struct{ method, body string }{
+		{"PUT", `{"model_name":"m"}`},
+		{"DELETE", ""},
+	} {
+		rec := doAdminAs(t, s, admin, service, tc.method, "/v1/admin/model-defaults?scope=agent", tc.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s agent default for a hermes agent = %d, want 400: %s", tc.method, rec.Code, rec.Body.String())
+		}
+	}
+	if _, err := s.Reg.GetScopeDefault(registry.ScopeSel{Level: registry.LevelAgent, Agent: "nous"}); !errors.Is(err, registry.ErrNotFound) {
+		t.Errorf("a rejected agent default still wrote a record: %v", err)
+	}
+	// The picoclaw agent on the same instance must be unaffected.
+	if rec := doAdmin(t, s, admin, "PUT", "/v1/admin/model-defaults?scope=agent", `{"model_name":"m"}`); rec.Code != http.StatusOK {
+		t.Errorf("agent default for the picoclaw agent = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminAgentsReportsTheHarness(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	hermesService(s)
+
+	rec := doAdmin(t, s, admin, "GET", "/v1/admin/agents", "")
+	var body struct {
+		Agents []struct {
+			Key     string `json:"key"`
+			Harness string `json:"harness"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, a := range body.Agents {
+		got[a.Key] = a.Harness
+	}
+	// The client needs this to keep hermes agents out of the model picker.
+	if got["nous"] != "hermes" {
+		t.Errorf("agents = %s, want nous reported as hermes", rec.Body.String())
+	}
+	if _, present := got["alpha"]; !present {
+		t.Errorf("agents = %s, want alpha listed", rec.Body.String())
+	}
+}
+
+// TestModelAssignmentListReportsPinsAndItsGate covers FR-27's read: without it every
+// user renders as "inherited from scope", including the pinned ones, so an admin
+// cannot see who is pinned or to what.
+func TestModelAssignmentListReportsPinsAndItsGate(t *testing.T) {
+	s, admin, nonAdmin := newTestServer(t)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
+	body := `{"tenant_id":"` + tenantT + `","subs_acc_id":"` + subsX +
+		`","user_acc_id":"` + accBob + `","model_name":"m"}`
+	if rec := doAdmin(t, s, admin, "POST", "/v1/admin/model-assignments", body); rec.Code != http.StatusOK {
+		t.Fatalf("pin = %d: %s", rec.Code, rec.Body.String())
+	}
+	// An inherited record for another user, which must read differently.
+	if err := s.Reg.PutAssignment(registry.WorkspaceRef{
+		TenantID: tenantT, SubsAccID: subsX, Agent: "alpha", UserAccID: accAlice,
+	}, registry.Assignment{ModelName: "m", Source: registry.SourceInherited}); err != nil {
+		t.Fatal(err)
+	}
+
+	q := "/v1/admin/model-assignments?tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+	if deny := doAdmin(t, s, nonAdmin, "GET", q, ""); deny.Code != http.StatusForbidden {
+		t.Errorf("list outside authority = %d, want 403", deny.Code)
+	}
+
+	rec := doAdmin(t, s, admin, "GET", q, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Assignments []struct {
+			Agent     string `json:"agent"`
+			UserAccID string `json:"user_acc_id"`
+			ModelName string `json:"model_name"`
+			Source    string `json:"source"`
+		} `json:"assignments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string]string{}
+	for _, a := range out.Assignments {
+		sources[a.UserAccID] = a.Source
+	}
+	if sources[accBob] != "explicit" {
+		t.Errorf("bob's source = %q, want explicit; body = %s", sources[accBob], rec.Body.String())
+	}
+	if sources[accAlice] != "inherited" {
+		t.Errorf("alice's source = %q, want inherited; body = %s", sources[accAlice], rec.Body.String())
+	}
+	// Never a key, at any level of the response.
+	if strings.Contains(rec.Body.String(), "sk") {
+		t.Errorf("assignment listing leaked something key-shaped: %s", rec.Body.String())
 	}
 }

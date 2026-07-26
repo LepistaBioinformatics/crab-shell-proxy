@@ -1025,6 +1025,66 @@
       }
     },
     "/v1/admin/model-assignments": {
+      "get": {
+        "operationId": "adminListModelAssignments",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "List the recorded model assignments under one subscription",
+        "description": "Reports {agent, user_acc_id, model_name, chain, source, materialized} for every workspace under the (tenant, subscription), across agents, so an admin surface can show which users are pinned and tell a pin apart from a cascade (FR-27). Gated by AuthorizeUserManagement. Never returns a key.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The assignments recorded under this subscription.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed tenant_id / subs_acc_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "operationId": "adminSetModelAssignment",
         "tags": [
@@ -1087,7 +1147,7 @@
             }
           },
           "400": {
-            "description": "Unknown or disabled model_name.",
+            "description": "Unknown or disabled model_name, or an agent whose harness is not picoclaw (the inventory governs picoclaw agents only).",
             "content": {
               "application/json": {
                 "schema": {

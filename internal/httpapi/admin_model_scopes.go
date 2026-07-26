@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -33,11 +34,34 @@ func scopeSelFromQuery(get func(string) string, routedAgent string) (registry.Sc
 	}
 }
 
+// rejectNonPicoclawAgent writes a 400 and returns true when the routed agent is
+// not governed by the model inventory.
+//
+// The gate lives HERE, in the proxy, because the proxy is the gate (NFR-6) — a
+// webapp-only filter leaves this open. hermes agents read their model from the
+// proxy's config.yaml (CTX-MR-13), so an assignment or agent-level default written
+// for one is a record nothing ever reads: it restarts the container for nothing and
+// leaves a phantom workspace referrer that blocks delete and disable of that model
+// forever.
+func rejectNonPicoclawAgent(w http.ResponseWriter, agent config.Agent) bool {
+	if agent.Harness == "" || agent.Harness == config.HarnessPicoclaw {
+		return false
+	}
+	writeJSON(w, http.StatusBadRequest, errBody("agent "+agent.Key+" runs the "+agent.Harness+
+		" harness, which reads its model from the proxy configuration; the model inventory "+
+		"governs picoclaw agents only"))
+	return true
+}
+
 // authorizeScopeDefault gates a scope-default operation. global and agent are
 // instance-wide, so they need proxy-admin: AuthorizeSharedScope has no level above
 // tenant to express, and letting a tenant admin set them would hand them the whole
 // instance.
-func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request) (registry.ScopeSel, bool) {
+//
+// mutating narrows the agent-level check to writes: reading a hermes agent's
+// (never-consulted) default is harmless and lets a UI render what is stored, while
+// writing one is the operation that does nothing and blocks a model forever.
+func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request, mutating bool) (registry.ScopeSel, bool) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
 		return registry.ScopeSel{}, false
@@ -45,6 +69,9 @@ func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request) (
 	sel, err := scopeSelFromQuery(r.URL.Query().Get, agent.Key)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+		return registry.ScopeSel{}, false
+	}
+	if mutating && sel.Level == registry.LevelAgent && rejectNonPicoclawAgent(w, agent) {
 		return registry.ScopeSel{}, false
 	}
 	switch sel.Level {
@@ -64,7 +91,7 @@ func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request) (
 }
 
 func (s *Server) handleAdminModelDefaultGet(w http.ResponseWriter, r *http.Request) {
-	sel, ok := s.authorizeScopeDefault(w, r)
+	sel, ok := s.authorizeScopeDefault(w, r, false)
 	if !ok {
 		return
 	}
@@ -83,7 +110,7 @@ func (s *Server) handleAdminModelDefaultGet(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleAdminModelDefaultSet(w http.ResponseWriter, r *http.Request) {
-	sel, ok := s.authorizeScopeDefault(w, r)
+	sel, ok := s.authorizeScopeDefault(w, r, true)
 	if !ok {
 		return
 	}
@@ -104,7 +131,7 @@ func (s *Server) handleAdminModelDefaultSet(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleAdminModelDefaultClear(w http.ResponseWriter, r *http.Request) {
-	sel, ok := s.authorizeScopeDefault(w, r)
+	sel, ok := s.authorizeScopeDefault(w, r, true)
 	if !ok {
 		return
 	}
@@ -149,6 +176,9 @@ type modelAssignmentRequest struct {
 func (s *Server) resolveAssignmentTarget(w http.ResponseWriter, r *http.Request) (docker.WorkspaceKey, modelAssignmentRequest, bool) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
+		return docker.WorkspaceKey{}, modelAssignmentRequest{}, false
+	}
+	if rejectNonPicoclawAgent(w, agent) {
 		return docker.WorkspaceKey{}, modelAssignmentRequest{}, false
 	}
 	var req modelAssignmentRequest
@@ -220,4 +250,54 @@ func (s *Server) handleAdminModelAssignmentClear(w http.ResponseWriter, r *http.
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleAdminModelAssignmentList reports which users under a subscription are
+// pinned and to what, so the admin UI can show a pin and tell it apart from a
+// cascade (FR-27). Without this read every user renders as "inherited from scope",
+// including the pinned ones, and "Unpin" looks like it does nothing.
+//
+// It spans agents under the pair rather than reporting only the routed one: a
+// subscription's users may each have a workspace under a different agent, and a
+// routed-agent-only read would show exactly those users as unpinned. The authority
+// checked is authority over the (tenant, subscription), which is what
+// AuthorizeUserManagement expresses; a model name is not a credential.
+func (s *Server) handleAdminModelAssignmentList(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	tenantID, err := uuid.Parse(q.Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(q.Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
+		return
+	}
+	if !authz.AuthorizeUserManagement(ident.Profile, tenantID.String(), subsAccID.String()) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to manage this subscription's users"))
+		return
+	}
+	entries, err := s.Reg.AssignmentsUnder(tenantID.String(), subsAccID.String())
+	if err != nil {
+		status, body := registryErrStatus(err)
+		writeJSON(w, status, body)
+		return
+	}
+	out := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, map[string]any{
+			"agent":        e.Agent,
+			"user_acc_id":  e.UserAccID,
+			"model_name":   e.ModelName,
+			"chain":        e.Chain,
+			"source":       e.Source,
+			"materialized": e.MaterializedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignments": out})
 }

@@ -219,6 +219,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/model-defaults", s.handleAdminModelDefaultGet)
 	mux.HandleFunc("PUT /v1/admin/model-defaults", s.handleAdminModelDefaultSet)
 	mux.HandleFunc("DELETE /v1/admin/model-defaults", s.handleAdminModelDefaultClear)
+	mux.HandleFunc("GET /v1/admin/model-assignments", s.handleAdminModelAssignmentList)
 	mux.HandleFunc("POST /v1/admin/model-assignments", s.handleAdminModelAssignmentSet)
 	mux.HandleFunc("DELETE /v1/admin/model-assignments", s.handleAdminModelAssignmentClear)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
