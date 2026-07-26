@@ -77,6 +77,7 @@ needed — but the gateway allowlist and `openapi.json` must both be updated.
 |---|---|---|
 | `GET` `POST` | `/v1/admin/models` | `HasAdminPrivileges` |
 | `PUT` `DELETE` | `/v1/admin/models/{name}` | `HasAdminPrivileges` |
+| `PUT` | `/v1/admin/models/{name}/status` | `HasAdminPrivileges` |
 | `POST` | `/v1/admin/models/{name}/deprecate` | `HasAdminPrivileges` |
 | `PUT` | `/v1/admin/models/order` | `HasAdminPrivileges` |
 | `GET` | `/v1/admin/models/{name}/usage` | `HasAdminPrivileges` |
