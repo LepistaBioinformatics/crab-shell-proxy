@@ -198,7 +198,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		if syncErr != nil {
 			return Target{}, syncErr
 		}
-		authToken, err = provision(userDir, templateDir, effDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
+		authToken, err = provision(userDir, templateDir, effDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail, m.logf)
 		if err == nil {
 			// Materialize AFTER seeding, so the template's (now empty) model_list
 			// is replaced by the inventory's answer. A workspace with no
@@ -482,10 +482,11 @@ func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
 
 // WriteSecret validates and persists one secret into the per-(user, agent)
 // store under the chosen format, then — for native — merges it into the caller's
-// current workspace .security.yml. agent supplies the template used to validate a
-// native slot when the workspace has not been provisioned yet. Returns
-// ErrInvalidSecretName / ErrUnknownNativeSlot for a bad name or slot (the handler
-// maps these to 400).
+// current workspace .security.yml. A native model_list slot is validated
+// against the model inventory (m.reg), not against agent's template; agent only
+// supplies the .security.yml to merge into when the workspace has not been
+// provisioned yet. Returns ErrInvalidSecretName / ErrUnknownNativeSlot for a bad
+// name or slot (the handler maps these to 400).
 func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name, value string) error {
 	if err := validateSecretName(name); err != nil {
 		return err
@@ -502,7 +503,7 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 		// Apply immediately to the current workspace when it exists; otherwise the
 		// overlay is picked up at the next provision/ensure (design §6).
 		if _, err := os.Stat(secPath); err == nil {
-			if err := applyNativeSecrets(secPath, storeDir, m.cfg.PicoclawUser); err != nil {
+			if err := applyNativeSecrets(secPath, storeDir, m.cfg.PicoclawUser, m.logf); err != nil {
 				return err
 			}
 		}
@@ -547,9 +548,11 @@ func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
 	return nil
 }
 
-// workspaceSecurityPath returns the .security.yml to validate/merge native
-// secrets into: the caller's provisioned workspace when it exists, else the
-// agent template (so a native slot can be validated before the first chat).
+// workspaceSecurityPath returns the .security.yml a native secret write merges
+// into (secPath, for the immediate-apply check): the caller's provisioned
+// workspace when it exists, else the agent template. Model-name validation no
+// longer reads this file — that's the inventory now — but the merge target
+// still needs somewhere to write before the first chat.
 func (m *Manager) workspaceSecurityPath(agent config.Agent, key WorkspaceKey) string {
 	ws := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
 	if _, err := os.Stat(ws); err == nil {

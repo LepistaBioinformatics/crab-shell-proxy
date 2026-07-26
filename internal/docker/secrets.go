@@ -30,6 +30,15 @@ var (
 	ErrUnknownNativeSlot = errors.New("unknown native slot")
 )
 
+// errModelNotInWorkspace signals that a model_list slot named a model the
+// INVENTORY knows (it passed validateNativeSlot) but that is not part of THIS
+// workspace's materialized model_list — e.g. a scope-level secret set for a
+// model this workspace was never assigned. It is internal to
+// setNativeSlot/applyNativeSecrets: the accept-set (the inventory) is
+// necessarily wider than any one workspace's apply-set, and this is how
+// applyNativeSecrets tells "not applicable here" apart from a real failure.
+var errModelNotInWorkspace = errors.New("model not in this workspace's model_list")
+
 // SecretNames is the set of stored secret NAMES per format — never the values
 // (write-only-over-API store, CTX-AC-02). It is the GET /v1/secrets response.
 type SecretNames struct {
@@ -216,7 +225,19 @@ func isNativeModelSlot(slot string) bool {
 // .security.yml at the named slots (preserving all sibling keys — the pico token
 // and model api_keys survive), then re-locks the file 0444. No-op when no native
 // secret is set. Idempotent, run on every ensure.
-func applyNativeSecrets(secPath, storeDir, user string) error {
+//
+// A model_list slot can validly name a model this particular workspace never
+// resolved: the inventory (the accept-set) is wider than any one workspace's
+// materialized model_list (the apply-set) by design — a scope-level secret is
+// set once for models that may only be assigned to some workspaces, including
+// ones that don't exist yet. That slot is skipped and logged, not treated as a
+// failure; every other error still aborts the merge (so one bad slot never
+// silently drops the rest, e.g. a working web.* entry, from being written).
+// logf is required to record a skip; pass nil to no-op it (mirrors NewManager).
+func applyNativeSecrets(secPath, storeDir, user string, logf func(string, ...any)) error {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	overlay, err := readOverlay(filepath.Join(storeDir, "native.yml"))
 	if err != nil {
 		return err
@@ -230,6 +251,10 @@ func applyNativeSecrets(secPath, storeDir, user string) error {
 	}
 	for slot, value := range overlay {
 		if err := setNativeSlot(sec, slot, value); err != nil {
+			if errors.Is(err, errModelNotInWorkspace) {
+				logf("native secret %q not applied to %s: %v", slot, secPath, err)
+				continue
+			}
 			return err
 		}
 	}
@@ -247,11 +272,11 @@ func setNativeSlot(sec map[string]any, slot, value string) error {
 	case len(parts) == 3 && parts[0] == "model_list" && parts[2] == "api_keys":
 		ml, ok := sec["model_list"].(map[string]any)
 		if !ok {
-			return fmt.Errorf("%w: model_list absent", ErrUnknownNativeSlot)
+			return fmt.Errorf("%w: model_list absent from this workspace", errModelNotInWorkspace)
 		}
 		model, ok := ml[parts[1]].(map[string]any)
 		if !ok {
-			return fmt.Errorf("%w: model %q absent", ErrUnknownNativeSlot, parts[1])
+			return fmt.Errorf("%w: model %q absent from this workspace", errModelNotInWorkspace, parts[1])
 		}
 		model["api_keys"] = []string{value}
 		return nil

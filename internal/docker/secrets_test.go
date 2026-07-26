@@ -3,6 +3,7 @@ package docker
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,12 @@ func TestValidateNativeSlotChecksModelsAgainstTheInventory(t *testing.T) {
 	if err := validateNativeSlot(reg, "channel_list.pico.settings.token"); !errors.Is(err, ErrUnknownNativeSlot) {
 		t.Errorf("pico token slot = %v, want ErrUnknownNativeSlot", err)
 	}
+	// A model_list-shaped slot whose last segment isn't api_keys must stay
+	// rejected even for a known model, so the suffix check can never be dropped
+	// silently.
+	if err := validateNativeSlot(reg, "model_list.known.other"); !errors.Is(err, ErrUnknownNativeSlot) {
+		t.Errorf("model_list.known.other = %v, want ErrUnknownNativeSlot", err)
+	}
 }
 
 func TestDotenvRejectsNewlineValue(t *testing.T) {
@@ -147,7 +154,7 @@ func TestApplyNativeSecretsPreservesSiblings(t *testing.T) {
 		t.Fatal(err)
 	}
 	// user "" so chownTree is a no-op (test does not run as root).
-	if err := applyNativeSecrets(sec, store, ""); err != nil {
+	if err := applyNativeSecrets(sec, store, "", t.Logf); err != nil {
 		t.Fatalf("applyNativeSecrets: %v", err)
 	}
 
@@ -178,10 +185,54 @@ func TestApplyNativeSecretsPreservesSiblings(t *testing.T) {
 	}
 }
 
+// TestApplyNativeSecretsSkipsModelNotInThisWorkspace proves the accept-set
+// (the inventory) is wider than any one workspace's apply-set (its
+// materialized model_list): a model_list slot for a model the inventory
+// knows but this workspace never resolved must be skipped and logged, not
+// allowed to abort the merge of every other slot in the same overlay —
+// notably a working web.* entry. Against the old abort-on-first-error
+// behavior this test fails because applyNativeSecrets returns before ever
+// calling writeSecurityConfig, so web.brave never lands either.
+func TestApplyNativeSecretsSkipsModelNotInThisWorkspace(t *testing.T) {
+	store := t.TempDir()
+	sec := writeTestSecurity(t) // this workspace's model_list has only deepseek-chat
+	models := fakeModelChecker{"deepseek-chat": true, "unassigned-model": true}
+	if err := writeSecret(models, store, sec, FormatNative, "web.brave", "brave-key-xyz"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSecret(models, store, sec, FormatNative, "model_list.unassigned-model.api_keys", "orphan-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged []string
+	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	if err := applyNativeSecrets(sec, store, "", logf); err != nil {
+		t.Fatalf("applyNativeSecrets must skip the unassigned model, not abort: %v", err)
+	}
+
+	m, err := readSecurityConfig(sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, _ := m["web"].(map[string]any)
+	if web["brave"] != "brave-key-xyz" {
+		t.Errorf("web.brave must still be applied even though a sibling model_list slot was skipped; got %v", web["brave"])
+	}
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, "unassigned-model") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("skipping model_list.unassigned-model.api_keys must be logged, got logs: %v", logged)
+	}
+}
+
 func TestApplyNativeSecretsNoOverlayNoOp(t *testing.T) {
 	sec := writeTestSecurity(t)
 	before, _ := os.Stat(sec)
-	if err := applyNativeSecrets(sec, t.TempDir(), ""); err != nil {
+	if err := applyNativeSecrets(sec, t.TempDir(), "", t.Logf); err != nil {
 		t.Fatalf("applyNativeSecrets no overlay: %v", err)
 	}
 	after, _ := os.Stat(sec)
@@ -212,7 +263,7 @@ func TestDeleteSecret(t *testing.T) {
 	if err := writeSecret(nil, store, sec, FormatNative, "web.brave", "k"); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyNativeSecrets(sec, store, ""); err != nil {
+	if err := applyNativeSecrets(sec, store, "", t.Logf); err != nil {
 		t.Fatal(err)
 	}
 	if err := deleteSecret(store, sec, "", FormatNative, "web.brave"); err != nil {

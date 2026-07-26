@@ -119,7 +119,7 @@ func TestProvisionFirstSeedsWorkspace(t *testing.T) {
 	userDir := filepath.Join(t.TempDir(), "u")
 	storeDir := t.TempDir()
 	// user "" so chownTree is a no-op (this test does not run as root).
-	tok, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, "e@x")
+	tok, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, "e@x", nil)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestProvisionReturningUserNotReseeded(t *testing.T) {
 	mustWrite(t, filepath.Join(tmpl, "workspace", "AGENT.md"), "TEMPLATE-DEFAULT")
 
 	storeDir := t.TempDir()
-	if _, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, ""); err != nil {
+	if _, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, "", nil); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "AGENT.md"))

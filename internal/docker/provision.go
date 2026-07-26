@@ -35,7 +35,7 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // provision seeds a workspace from templateDir. The MODEL is not a parameter:
 // the caller materializes it from the inventory after seeding, because that is
 // the only place a model may come from.
-func provision(userDir, templateDir, secretsDir, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
+func provision(userDir, templateDir, secretsDir, home, user string, key WorkspaceKey, ownerEmail string, logf func(string, ...any)) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -83,7 +83,7 @@ func provision(userDir, templateDir, secretsDir, home, user string, key Workspac
 	// secrets (AC-04/AC-05, CTX-AC-03), and so an admin's scope-level native
 	// secret reaches a user who has never chatted (native-secrets-admin-only
 	// NFR-3). No-op when none are set.
-	if err := applyNativeSecrets(secPath, secretsDir, user); err != nil {
+	if err := applyNativeSecrets(secPath, secretsDir, user, logf); err != nil {
 		return "", fmt.Errorf("apply native secrets: %w", err)
 	}
 	tok, err := readPicoToken(secPath)

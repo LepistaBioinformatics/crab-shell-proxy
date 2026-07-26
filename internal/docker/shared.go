@@ -230,8 +230,9 @@ func (m *Manager) WriteSharedSecret(scope Scope, format, name, value string) err
 // writeSecret/validateNativeSlot.
 func (m *Manager) checkSharedSecretFormat(scope Scope, format, name string) error {
 	// The HTTP layer validates the agent target, but this is a public manager
-	// method: an unknown key here would silently resolve to an empty template
-	// path, which a web slot (needing no template) would then accept.
+	// method: without this check, a caller bypassing HTTP validation could pass
+	// an unknown agent key and get a scope with no real target instead of a
+	// clear error.
 	if scope.AgentKey != "" {
 		if _, ok := m.cfg.Agents[scope.AgentKey]; !ok {
 			return fmt.Errorf("%w: unknown agent %q", ErrInvalidSecretName, scope.AgentKey)
@@ -432,7 +433,7 @@ func (m *Manager) applyNativeToWorkspace(key WorkspaceKey, effDir string) error 
 	if _, err := os.Stat(secPath); err != nil {
 		return nil
 	}
-	return applyNativeSecrets(secPath, effDir, m.cfg.PicoclawUser)
+	return applyNativeSecrets(secPath, effDir, m.cfg.PicoclawUser, m.logf)
 }
 
 // UnsetNativeSlotForScope removes one native slot from the .security.yml of every

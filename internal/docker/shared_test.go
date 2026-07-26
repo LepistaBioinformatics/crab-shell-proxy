@@ -13,7 +13,12 @@ import (
 )
 
 // sharedManager builds a Manager over a temp root with no chown (PicoclawUser
-// empty) so the filesystem-only shared-content methods run unprivileged.
+// empty) so the filesystem-only shared-content methods run unprivileged. It
+// carries a real (initially empty) registry rather than nil: a nil
+// *registry.Registry boxed into modelNameChecker is a non-nil interface
+// wrapping a nil pointer, so a model_list native slot would panic on
+// GetModel instead of failing cleanly — a real, empty registry is the safe
+// default for any test added here later.
 func sharedManager(t *testing.T) *Manager {
 	t.Helper()
 	cfg := &config.Config{
@@ -21,7 +26,12 @@ func sharedManager(t *testing.T) *Manager {
 		ContainerDataRoot: t.TempDir(),
 		ContainerPrefix:   "picoclaw",
 	}
-	return NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil, nil)
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "r.db"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reg.Close() })
+	return NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, reg, nil)
 }
 
 func tenantScope() Scope {
@@ -265,18 +275,12 @@ func TestSharedNativeSecretTargetRules(t *testing.T) {
 	m.cfg.Agents = map[string]config.Agent{"alpha": {Key: "alpha", Template: "alpha"}}
 	// A model_list slot validates against the model inventory, not the agent
 	// template.
-	reg, err := registry.Open(filepath.Join(t.TempDir(), "r.db"), time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reg.Close()
-	if _, err := reg.CreateModel(registry.Model{
+	if _, err := m.reg.CreateModel(registry.Model{
 		ModelName: "known-model", Provider: "openai", Model: "known-model",
 		APIBase: "https://x", APIKey: "sk", Status: registry.StatusActive,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.reg = reg
 
 	all := Scope{Kind: ScopeTenant, TenantID: "t1"}
 	alpha := Scope{Kind: ScopeTenant, TenantID: "t1", AgentKey: "alpha"}
