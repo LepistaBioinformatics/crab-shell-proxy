@@ -47,6 +47,8 @@ func TestAdminModelsRequireProxyAdmin(t *testing.T) {
 		{"DELETE", "/v1/admin/models/m", ""},
 		{"PUT", "/v1/admin/models/order", `{"order":["m"]}`},
 		{"GET", "/v1/admin/model-catalog", ""},
+		{"GET", "/v1/admin/models/m/usage", ""},
+		{"PUT", "/v1/admin/models/m/status", `{"version":1,"status":"disabled"}`},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 		req.Header.Set(profileHeaderName, nonAdmin)
@@ -168,6 +170,122 @@ func TestAdminModelDeleteInUseReturnsTheReferrers(t *testing.T) {
 	// The rejection must name what to detach, or the admin has no next action.
 	if len(body.Referrers) == 0 || body.Referrers[0].Kind != "fallback" || body.Referrers[0].ID != "main" {
 		t.Errorf("referrers = %+v, want the fallback holder named", body.Referrers)
+	}
+}
+
+func TestAdminModelUsageReturnsTheReferrers(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"fb","provider":"openai","model":"fb","api_base":"https://x","api_key":"sk"}`)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"main","provider":"openai","model":"main","api_base":"https://x","api_key":"sk","fallbacks":["fb"]}`)
+
+	rec := doAdmin(t, s, admin, "GET", "/v1/admin/models/fb/usage", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Referrers []struct {
+			Kind string `json:"kind"`
+			ID   string `json:"id"`
+		} `json:"referrers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Referrers) == 0 || body.Referrers[0].Kind != "fallback" || body.Referrers[0].ID != "main" {
+		t.Errorf("referrers = %+v, want the fallback holder named", body.Referrers)
+	}
+}
+
+func TestAdminModelStatusDisableAndReenable(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
+
+	disabled := doAdmin(t, s, admin, "PUT", "/v1/admin/models/m/status", `{"version":1,"status":"disabled"}`)
+	if disabled.Code != http.StatusOK {
+		t.Fatalf("disable = %d: %s", disabled.Code, disabled.Body.String())
+	}
+	var disabledBody struct {
+		Model map[string]any `json:"model"`
+	}
+	if err := json.Unmarshal(disabled.Body.Bytes(), &disabledBody); err != nil {
+		t.Fatal(err)
+	}
+	if disabledBody.Model["status"] != "disabled" {
+		t.Errorf("status after disable = %#v, want disabled", disabledBody.Model["status"])
+	}
+
+	reenabled := doAdmin(t, s, admin, "PUT", "/v1/admin/models/m/status", `{"version":2,"status":"active"}`)
+	if reenabled.Code != http.StatusOK {
+		t.Fatalf("re-enable = %d: %s", reenabled.Code, reenabled.Body.String())
+	}
+	var reenabledBody struct {
+		Model map[string]any `json:"model"`
+	}
+	if err := json.Unmarshal(reenabled.Body.Bytes(), &reenabledBody); err != nil {
+		t.Fatal(err)
+	}
+	if reenabledBody.Model["status"] != "active" {
+		t.Errorf("status after re-enable = %#v, want active", reenabledBody.Model["status"])
+	}
+}
+
+func TestAdminModelStatusDisableInUseReturnsTheReferrers(t *testing.T) {
+	// disabled shares DeleteModel's precondition (I3): a model still in use must
+	// be deprecated instead, and the rejection must name the referrer.
+	s, admin, _ := newTestServer(t)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"fb","provider":"openai","model":"fb","api_base":"https://x","api_key":"sk"}`)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"main","provider":"openai","model":"main","api_base":"https://x","api_key":"sk","fallbacks":["fb"]}`)
+
+	rec := doAdmin(t, s, admin, "PUT", "/v1/admin/models/fb/status", `{"version":1,"status":"disabled"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("disable in use = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Referrers []struct {
+			Kind string `json:"kind"`
+			ID   string `json:"id"`
+		} `json:"referrers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Referrers) == 0 || body.Referrers[0].Kind != "fallback" || body.Referrers[0].ID != "main" {
+		t.Errorf("referrers = %+v, want the fallback holder named", body.Referrers)
+	}
+}
+
+// TestAdminModelUpdateOmittingFallbacksClearsThem pins the deliberate contrast
+// with api_key: fallbacks CAN be read back via GET, so PUT is a full replace
+// for it like every other readable field — an update body that omits
+// "fallbacks" clears the chain rather than preserving it. This is chosen
+// behaviour (see modelRequest's doc comment), not an oversight.
+func TestAdminModelUpdateOmittingFallbacksClearsThem(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"fb","provider":"openai","model":"fb","api_base":"https://x","api_key":"sk"}`)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"main","provider":"openai","model":"main","api_base":"https://x","api_key":"sk","fallbacks":["fb"]}`)
+
+	rec := doAdmin(t, s, admin, "PUT", "/v1/admin/models/main",
+		`{"version":1,"provider":"openai","model":"main","api_base":"https://y"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Model struct {
+			Fallbacks []string `json:"fallbacks"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Model.Fallbacks) != 0 {
+		t.Errorf("fallbacks = %v, want cleared by the full-replace PUT that omitted them", body.Model.Fallbacks)
 	}
 }
 

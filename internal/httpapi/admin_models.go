@@ -9,10 +9,16 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
-// modelRequest is the create/update body. api_key is a POINTER so an update can
-// distinguish "leave the stored key alone" (absent) from "clear it" (empty
-// string) — a client never receives the key, so it must be able to edit other
-// fields without wiping it.
+// modelRequest is the create/update body. PUT is a full replace of every
+// field a client can read back via GET — provider, model, api_base,
+// auth_method, extra_body and fallbacks are all overwritten with whatever the
+// request carries, including zero values, so omitting one of them from a PUT
+// body clears it. api_key is the sole exception, and deliberately so: it is
+// the one field a client is NEVER given back by any response (see
+// registry.PublicModel), so it cannot round-trip a value it never received.
+// That is why it alone is a POINTER — absent means "leave the stored key
+// alone", an explicit "" means "clear it" — while every other field stays a
+// plain value with ordinary full-replace semantics.
 type modelRequest struct {
 	ModelName  string          `json:"model_name"`
 	Provider   string          `json:"provider"`
