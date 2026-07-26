@@ -60,6 +60,7 @@ func main() {
 		Pico:     &pico.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Hermes:   &hermes.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Logf:     logger.Printf,
+		Reg:      reg,
 	}
 
 	// Reconcile (adopt running containers, re-arm timers, start continuous ones)

@@ -22,6 +22,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/google/uuid"
 )
@@ -133,6 +134,9 @@ type Server struct {
 	Pico   Turner
 	Hermes Turner
 	Logf   func(string, ...any)
+	// Reg is the model inventory. Handlers read and write it directly; Mgr is
+	// used only to make a change take effect on disk.
+	Reg *registry.Registry
 }
 
 // turnerFor selects the turn runner for a resolved target's harness.
@@ -195,6 +199,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)
 	mux.HandleFunc("POST /v1/admin/skills", s.handleAdminSkillsPost)
 	mux.HandleFunc("DELETE /v1/admin/skills", s.handleAdminSkillsDelete)
+	// model inventory: proxy-admin gated (internal/registry is the source of
+	// truth). /order is registered before /{name} — Go's mux prefers the more
+	// specific literal pattern regardless, but keeping them adjacent and ordered
+	// makes the intent obvious to the next reader.
+	mux.HandleFunc("GET /v1/admin/models", s.handleAdminModelsList)
+	mux.HandleFunc("POST /v1/admin/models", s.handleAdminModelCreate)
+	mux.HandleFunc("PUT /v1/admin/models/order", s.handleAdminModelsReorder)
+	mux.HandleFunc("PUT /v1/admin/models/{name}", s.handleAdminModelUpdate)
+	mux.HandleFunc("DELETE /v1/admin/models/{name}", s.handleAdminModelDelete)
+	mux.HandleFunc("PUT /v1/admin/models/{name}/status", s.handleAdminModelStatus)
+	mux.HandleFunc("POST /v1/admin/models/{name}/deprecate", s.handleAdminModelDeprecate)
+	mux.HandleFunc("GET /v1/admin/models/{name}/usage", s.handleAdminModelUsage)
+	mux.HandleFunc("GET /v1/admin/model-catalog", s.handleAdminModelCatalog)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
 	// directly from the service host via openapiPath, not through the gateway).
