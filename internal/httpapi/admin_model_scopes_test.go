@@ -2,8 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
+
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 func TestModelDefaultGlobalAndAgentRequireProxyAdmin(t *testing.T) {
@@ -48,6 +52,14 @@ func TestModelDefaultTenantUsesTheSharedScopeGate(t *testing.T) {
 	if allow.Code != http.StatusOK {
 		t.Errorf("tenant default for an owned tenant = %d: %s", allow.Code, allow.Body.String())
 	}
+	// A tenant-level change DOES re-apply, unlike global/agent — and it must
+	// name the right scope, or every workspace under a different tenant would
+	// be swept too.
+	orch := s.Mgr.(*fakeOrch)
+	if len(orch.reapplyScopes) != 1 || orch.reapplyScopes[0].Kind != docker.ScopeTenant ||
+		orch.reapplyScopes[0].TenantID != tenantT {
+		t.Errorf("reapplyScopes = %+v, want one ScopeTenant entry for %s", orch.reapplyScopes, tenantT)
+	}
 }
 
 func TestModelDefaultRoundTripAndClear(t *testing.T) {
@@ -83,6 +95,11 @@ func TestModelDefaultRoundTripAndClear(t *testing.T) {
 	if body.Default != nil {
 		t.Errorf("cleared default = %s, want null", rec.Body.String())
 	}
+	// global has no docker.Scope to express: neither the set nor the clear above
+	// may re-apply anything, unlike a tenant/subscription change.
+	if n := s.Mgr.(*fakeOrch).reapplyCalls; n != 0 {
+		t.Errorf("global default set+clear triggered %d reapply calls, want 0", n)
+	}
 }
 
 func TestModelDefaultRejectsAnInactiveModel(t *testing.T) {
@@ -107,6 +124,36 @@ func TestModelAssignmentSetRequiresUserManagementAuthority(t *testing.T) {
 	rec := doAdmin(t, s, nonAdmin, "POST", "/v1/admin/model-assignments", body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("assignment outside authority = %d, want 403", rec.Code)
+	}
+}
+
+func TestModelAssignmentSetAndClearRoundTrip(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+	doAdmin(t, s, admin, "POST", "/v1/admin/models",
+		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
+
+	body := `{"tenant_id":"` + tenantT + `","subs_acc_id":"` + subsX +
+		`","user_acc_id":"` + accBob + `","model_name":"m"}`
+	set := doAdmin(t, s, admin, "POST", "/v1/admin/model-assignments", body)
+	if set.Code != http.StatusOK {
+		t.Fatalf("set = %d: %s", set.Code, set.Body.String())
+	}
+
+	ref := registry.WorkspaceRef{TenantID: tenantT, SubsAccID: subsX, Agent: "alpha", UserAccID: accBob}
+	a, err := s.Reg.GetAssignment(ref)
+	if err != nil {
+		t.Fatalf("GetAssignment after set: %v", err)
+	}
+	if a.ModelName != "m" || a.Source != registry.SourceExplicit {
+		t.Errorf("assignment after set = %+v, want model m, source explicit", a)
+	}
+
+	clear := doAdmin(t, s, admin, "DELETE", "/v1/admin/model-assignments", body)
+	if clear.Code != http.StatusOK {
+		t.Fatalf("clear = %d: %s", clear.Code, clear.Body.String())
+	}
+	if _, err := s.Reg.GetAssignment(ref); !errors.Is(err, registry.ErrNotFound) {
+		t.Errorf("GetAssignment after clear = %v, want ErrNotFound", err)
 	}
 }
 
