@@ -140,6 +140,29 @@ func (m *Manager) scopeWorkspaceKeys(scope Scope) ([]WorkspaceKey, error) {
 	return keys, nil
 }
 
+// SetModelAssignment pins one workspace to a model and re-materializes it. The
+// pin is EXPLICIT, which is what makes it survive later scope-default changes.
+func (m *Manager) SetModelAssignment(key WorkspaceKey, modelName string) error {
+	ref := m.workspaceRef(key)
+	if err := m.reg.PutAssignment(ref, registry.Assignment{
+		ModelName: modelName, Source: registry.SourceExplicit,
+	}); err != nil {
+		return err
+	}
+	return m.ReapplyModelUser(key)
+}
+
+// ClearModelAssignment drops a per-user pin so the workspace falls back to its
+// scope default, then re-materializes it. The assignment is re-created as
+// INHERITED by the re-materialization, which is how the inventory keeps knowing
+// what this workspace runs.
+func (m *Manager) ClearModelAssignment(key WorkspaceKey) error {
+	if err := m.reg.DeleteAssignment(m.workspaceRef(key)); err != nil {
+		return err
+	}
+	return m.ReapplyModelUser(key)
+}
+
 // setModelListEntry upserts model_list[name] = {api_keys: [apiKey]} into the
 // parsed .security.yml, creating model_list only if absent and leaving every
 // sibling key untouched. materializeModels is its only caller.

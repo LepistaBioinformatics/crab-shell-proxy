@@ -14,6 +14,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/klauspost/compress/zstd"
 )
@@ -57,6 +58,13 @@ type fakeOrch struct {
 	reapplyScopes    []docker.Scope
 	reapplyUserKeys  []docker.WorkspaceKey
 	reapplyForModels []string
+	// reapplyCalls counts every ReapplyModel* call, so a test can assert a
+	// no-op operation (e.g. reorder) triggered none at all.
+	reapplyCalls int
+
+	// reg backs SetModelAssignment/ClearModelAssignment, mirroring what the real
+	// Manager does against the registry.
+	reg *registry.Registry
 }
 
 type secretWrite struct {
@@ -194,18 +202,33 @@ func (f *fakeOrch) RestartScope(scope docker.Scope) error {
 }
 
 func (f *fakeOrch) ReapplyModelScope(scope docker.Scope) error {
+	f.reapplyCalls++
 	f.reapplyScopes = append(f.reapplyScopes, scope)
 	return nil
 }
 
 func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey) error {
+	f.reapplyCalls++
 	f.reapplyUserKeys = append(f.reapplyUserKeys, key)
 	return nil
 }
 
 func (f *fakeOrch) ReapplyModelForModel(modelName string) error {
+	f.reapplyCalls++
 	f.reapplyForModels = append(f.reapplyForModels, modelName)
 	return nil
+}
+
+func (f *fakeOrch) SetModelAssignment(key docker.WorkspaceKey, modelName string) error {
+	return f.reg.PutAssignment(registry.WorkspaceRef{
+		TenantID: key.TenantID, SubsAccID: key.SubsAccID, Agent: key.Role, UserAccID: key.UserAccID,
+	}, registry.Assignment{ModelName: modelName, Source: registry.SourceExplicit})
+}
+
+func (f *fakeOrch) ClearModelAssignment(key docker.WorkspaceKey) error {
+	return f.reg.DeleteAssignment(registry.WorkspaceRef{
+		TenantID: key.TenantID, SubsAccID: key.SubsAccID, Agent: key.Role, UserAccID: key.UserAccID,
+	})
 }
 
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }

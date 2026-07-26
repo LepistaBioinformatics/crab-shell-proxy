@@ -104,6 +104,10 @@ type Orchestrator interface {
 	// ReapplyModelForModel re-materializes every workspace whose materialized set
 	// contains the model — primaries AND chain holders.
 	ReapplyModelForModel(modelName string) error
+	// SetModelAssignment pins one workspace to a model; ClearModelAssignment drops
+	// the pin so the scope default applies again.
+	SetModelAssignment(key docker.WorkspaceKey, modelName string) error
+	ClearModelAssignment(key docker.WorkspaceKey) error
 
 	// --- admin-shared-skills (per-scope skill dirs; keys never involved) ---
 
@@ -212,6 +216,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/models/{name}/deprecate", s.handleAdminModelDeprecate)
 	mux.HandleFunc("GET /v1/admin/models/{name}/usage", s.handleAdminModelUsage)
 	mux.HandleFunc("GET /v1/admin/model-catalog", s.handleAdminModelCatalog)
+	mux.HandleFunc("GET /v1/admin/model-defaults", s.handleAdminModelDefaultGet)
+	mux.HandleFunc("PUT /v1/admin/model-defaults", s.handleAdminModelDefaultSet)
+	mux.HandleFunc("DELETE /v1/admin/model-defaults", s.handleAdminModelDefaultClear)
+	mux.HandleFunc("POST /v1/admin/model-assignments", s.handleAdminModelAssignmentSet)
+	mux.HandleFunc("DELETE /v1/admin/model-assignments", s.handleAdminModelAssignmentClear)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
 	// directly from the service host via openapiPath, not through the gateway).

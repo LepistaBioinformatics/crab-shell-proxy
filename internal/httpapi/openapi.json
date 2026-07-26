@@ -9,7 +9,9 @@
     "/v1/chat/completions": {
       "post": {
         "operationId": "chatCompletion",
-        "tags": ["chat"],
+        "tags": [
+          "chat"
+        ],
         "summary": "Chat with the agent",
         "description": "Send an OpenAI-compatible chat completion to this agent and receive its reply. The agent's model is pinned server-side. Set stream=true for a Server-Sent Events stream of chat.completion.chunk deltas.",
         "requestBody": {
@@ -18,7 +20,9 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["messages"],
+                "required": [
+                  "messages"
+                ],
                 "properties": {
                   "model": {
                     "type": "string",
@@ -29,13 +33,22 @@
                     "description": "The conversation so far. The last user message is the turn to answer.",
                     "items": {
                       "type": "object",
-                      "required": ["role", "content"],
+                      "required": [
+                        "role",
+                        "content"
+                      ],
                       "properties": {
                         "role": {
                           "type": "string",
-                          "enum": ["system", "user", "assistant"]
+                          "enum": [
+                            "system",
+                            "user",
+                            "assistant"
+                          ]
                         },
-                        "content": { "type": "string" }
+                        "content": {
+                          "type": "string"
+                        }
                       }
                     }
                   },
@@ -53,7 +66,11 @@
           "200": {
             "description": "The assistant reply: an OpenAI chat.completion object, or (when stream=true) an SSE stream of chat.completion.chunk events terminated by data: [DONE].",
             "content": {
-              "application/json": { "schema": { "type": "object" } }
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
             }
           }
         }
@@ -62,14 +79,1100 @@
     "/v1/models": {
       "get": {
         "operationId": "listModels",
-        "tags": ["chat"],
+        "tags": [
+          "chat"
+        ],
         "summary": "List available models",
         "description": "Returns the OpenAI-compatible model list advertised by this agent.",
         "responses": {
           "200": {
             "description": "OpenAI-compatible model list.",
             "content": {
-              "application/json": { "schema": { "type": "object" } }
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/models": {
+      "get": {
+        "operationId": "adminListModels",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "List the model inventory",
+        "description": "Returns every model record (never the api_key). Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "responses": {
+          "200": {
+            "description": "The model list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "adminCreateModel",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Create a model",
+        "description": "Adds a model to the inventory. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model_name",
+                  "provider",
+                  "model",
+                  "api_base",
+                  "api_key"
+                ],
+                "properties": {
+                  "model_name": {
+                    "type": "string",
+                    "description": "The unique natural key; also the .security.yml model_list slot."
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "The upstream model id sent to the provider."
+                  },
+                  "api_base": {
+                    "type": "string"
+                  },
+                  "api_key": {
+                    "type": "string",
+                    "writeOnly": true,
+                    "description": "Never returned by any response; omit on update to keep the stored key."
+                  },
+                  "auth_method": {
+                    "type": "string"
+                  },
+                  "extra_body": {
+                    "type": "object"
+                  },
+                  "fallbacks": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The created model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "model_name already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/models/{name}": {
+      "put": {
+        "operationId": "adminUpdateModel",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Update a model",
+        "description": "Full-replace update, optimistic-locked by version. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The model's model_name."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "version",
+                  "provider",
+                  "model",
+                  "api_base"
+                ],
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "description": "The last-read version; a stale value is rejected with 409."
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "The upstream model id sent to the provider."
+                  },
+                  "api_base": {
+                    "type": "string"
+                  },
+                  "api_key": {
+                    "type": "string",
+                    "writeOnly": true,
+                    "description": "Never returned by any response; omit on update to keep the stored key."
+                  },
+                  "auth_method": {
+                    "type": "string"
+                  },
+                  "extra_body": {
+                    "type": "object"
+                  },
+                  "fallbacks": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "description": "A full replace of every readable field; omitting one clears it. api_key is the sole exception: absent keeps the stored key."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "adminDeleteModel",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Delete a model",
+        "description": "Rejected while the model is still referenced by any assignment, scope default, fallback or replaced_by. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The model's model_name."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Still in use; the response names the referrers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/models/{name}/status": {
+      "put": {
+        "operationId": "adminSetModelStatus",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Change a model's status",
+        "description": "disabled requires zero references and is reversible; deprecated requires a replaced_by and existing users keep the model. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The model's model_name."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "version",
+                  "status"
+                ],
+                "properties": {
+                  "version": {
+                    "type": "integer"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "disabled",
+                      "deprecated"
+                    ]
+                  },
+                  "replaced_by": {
+                    "type": "string",
+                    "description": "Required when status is deprecated."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid status or a missing replaced_by.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version, or still in use for a disable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/models/{name}/deprecate": {
+      "post": {
+        "operationId": "adminDeprecateModel",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Deprecate a model",
+        "description": "Marks the model not offered to new users while existing users keep it; deliberately no re-apply. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The model's model_name."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "version",
+                  "replaced_by"
+                ],
+                "properties": {
+                  "version": {
+                    "type": "integer"
+                  },
+                  "replaced_by": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid replaced_by.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/models/order": {
+      "put": {
+        "operationId": "adminReorderModels",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Reorder the model list",
+        "description": "Position is presentation only: never bumps version, never re-applies or restarts a workspace. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "order"
+                ],
+                "properties": {
+                  "order": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Every active model_name, in the desired display order."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reordered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or incomplete order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/models/{name}/usage": {
+      "get": {
+        "operationId": "adminModelUsage",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "List a model's referrers",
+        "description": "Returns every workspace, scope default, fallback and replaced_by that keeps the model alive. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The model's model_name."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The referrer list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/model-catalog": {
+      "get": {
+        "operationId": "adminModelCatalog",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "List the read-only suggestion catalog",
+        "description": "Provider/model/api_base suggestions for the create form; never a model_name (the admin's choice) and never a key. Gated by HasAdminPrivileges: the inventory holds API keys with instance-wide blast radius.",
+        "responses": {
+          "200": {
+            "description": "The catalog entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/model-defaults": {
+      "get": {
+        "operationId": "adminGetModelDefault",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Get one cascade level's default",
+        "description": "Returns {\"default\": null} with 200 when the level has no default set \u2014 a normal state, not an error.",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "global",
+                "agent",
+                "tenant",
+                "subscription"
+              ]
+            },
+            "description": "global and agent are instance-wide and gated by HasAdminPrivileges (agent is taken from the routed service, not this parameter, so it is not settable here). tenant and subscription are gated by AuthorizeSharedScope."
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for scope=tenant and scope=subscription."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for scope=subscription."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The default (possibly null).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "adminSetModelDefault",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Set one cascade level's default",
+        "description": "A tenant or subscription change re-applies to the workspaces it affects (skipping any with an explicit per-user pin); a global or agent change is left to each workspace's next start.",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "global",
+                "agent",
+                "tenant",
+                "subscription"
+              ]
+            },
+            "description": "global and agent are instance-wide and gated by HasAdminPrivileges (agent is taken from the routed service, not this parameter, so it is not settable here). tenant and subscription are gated by AuthorizeSharedScope."
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for scope=tenant and scope=subscription."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for scope=subscription."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model_name"
+                ],
+                "properties": {
+                  "model_name": {
+                    "type": "string",
+                    "description": "Must name an ACTIVE model."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid scope or an inactive model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The model is not active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "adminClearModelDefault",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Clear one cascade level's default",
+        "description": "Missing is treated as success \u2014 the admin's intent is already true.",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "global",
+                "agent",
+                "tenant",
+                "subscription"
+              ]
+            },
+            "description": "global and agent are instance-wide and gated by HasAdminPrivileges (agent is taken from the routed service, not this parameter, so it is not settable here). tenant and subscription are gated by AuthorizeSharedScope."
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for scope=tenant and scope=subscription."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Required for scope=subscription."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/model-assignments": {
+      "post": {
+        "operationId": "adminSetModelAssignment",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Pin one user to a model",
+        "description": "Writes an EXPLICIT assignment, which is what makes it survive a later scope-default change. Gated by AuthorizeUserManagement. A deprecated model may be assigned (an admin deliberately pinning a user to a model being retired is legitimate); a disabled model is rejected.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tenant_id",
+                  "subs_acc_id",
+                  "user_acc_id",
+                  "model_name"
+                ],
+                "properties": {
+                  "tenant_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "subs_acc_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "user_acc_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "model_name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Assigned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown or disabled model_name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The workspace has no resolvable model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "adminClearModelAssignment",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Drop one user's pin",
+        "description": "Removes the explicit assignment so the scope default applies again; re-materialization then records the fresh assignment as inherited. Gated by AuthorizeUserManagement.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tenant_id",
+                  "subs_acc_id",
+                  "user_acc_id"
+                ],
+                "properties": {
+                  "tenant_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "subs_acc_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "user_acc_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks the required authority over this target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The workspace has no resolvable model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
             }
           }
         }

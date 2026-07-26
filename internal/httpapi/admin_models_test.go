@@ -25,7 +25,9 @@ func newTestServer(t *testing.T) (s *Server, admin, nonAdmin string) {
 		t.Fatalf("open registry: %v", err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
-	s = testServer(newFakeOrch(), &fakeTurner{})
+	orch := newFakeOrch()
+	orch.reg = reg
+	s = testServer(orch, &fakeTurner{})
 	s.Reg = reg
 	return s, headersFor(t, instanceProfile())[identity.ProfileHeader],
 		headersFor(t, userProfile())[identity.ProfileHeader]
