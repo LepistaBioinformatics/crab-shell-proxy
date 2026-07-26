@@ -492,7 +492,7 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 	}
 	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
 	secPath := m.workspaceSecurityPath(agent, key)
-	if err := writeSecret(storeDir, secPath, format, name, value); err != nil {
+	if err := writeSecret(m.reg, storeDir, secPath, format, name, value); err != nil {
 		return err
 	}
 	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {

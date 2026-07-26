@@ -217,16 +217,17 @@ func (m *Manager) WriteSharedSecret(scope Scope, format, name, value string) err
 		return err
 	}
 	dir := m.sharedSecretsDir(scope)
-	if err := writeSecret(dir, m.scopeSecurityTemplate(scope), format, name, value); err != nil {
+	if err := writeSecret(m.reg, dir, m.scopeSecurityTemplate(scope), format, name, value); err != nil {
 		return err
 	}
 	return chownTree(dir, m.cfg.PicoclawUser)
 }
 
 // checkSharedSecretFormat gates which formats a scope accepts and validates the
-// name. A native slot is additionally constrained by scopeSecurityTemplate:
-// web.<provider> needs no model list so it works at any target, while a
-// model_list slot needs the target agent's template (FR-4).
+// name. A native slot is additionally constrained by target: web.<provider>
+// works at any target, while a model_list slot must name a single agent
+// (FR-4) — the model itself is validated against the inventory by
+// writeSecret/validateNativeSlot.
 func (m *Manager) checkSharedSecretFormat(scope Scope, format, name string) error {
 	// The HTTP layer validates the agent target, but this is a public manager
 	// method: an unknown key here would silently resolve to an empty template
@@ -252,10 +253,11 @@ func (m *Manager) checkSharedSecretFormat(scope Scope, format, name string) erro
 	}
 }
 
-// scopeSecurityTemplate is the .security.yml a scope-level native slot is
-// validated against: the target agent's template. Empty for an all-agents scope
+// scopeSecurityTemplate is the secPath writeSecret is given for a scope-level
+// native write: the target agent's template. Empty for an all-agents scope
 // (and for an unknown key, which checkSharedSecretFormat rejects first) —
-// harmless, because only model_list slots read it and those require an agent.
+// harmless, since validateNativeSlot no longer reads it; it is dead weight kept
+// only because writeSecret's signature still accepts a secPath argument.
 func (m *Manager) scopeSecurityTemplate(scope Scope) string {
 	agent, ok := m.cfg.Agents[scope.AgentKey]
 	if !ok {

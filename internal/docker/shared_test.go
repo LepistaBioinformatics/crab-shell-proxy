@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 // sharedManager builds a Manager over a temp root with no chown (PicoclawUser
@@ -261,15 +263,20 @@ func TestNativeCascadeAdminWinsOverUser(t *testing.T) {
 func TestSharedNativeSecretTargetRules(t *testing.T) {
 	m := sharedManager(t)
 	m.cfg.Agents = map[string]config.Agent{"alpha": {Key: "alpha", Template: "alpha"}}
-	// The agent template is what a model slot validates against.
-	tmpl := config.TemplatesDir(m.cfg.ContainerDataRoot, "alpha")
-	if err := os.MkdirAll(tmpl, 0o700); err != nil {
+	// A model_list slot validates against the model inventory, not the agent
+	// template.
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "r.db"), time.Now)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpl, ".security.yml"),
-		[]byte("model_list:\n  known-model:\n    api_keys: [placeholder]\n"), 0o600); err != nil {
+	defer reg.Close()
+	if _, err := reg.CreateModel(registry.Model{
+		ModelName: "known-model", Provider: "openai", Model: "known-model",
+		APIBase: "https://x", APIKey: "sk", Status: registry.StatusActive,
+	}); err != nil {
 		t.Fatal(err)
 	}
+	m.reg = reg
 
 	all := Scope{Kind: ScopeTenant, TenantID: "t1"}
 	alpha := Scope{Kind: ScopeTenant, TenantID: "t1", AgentKey: "alpha"}
@@ -281,10 +288,10 @@ func TestSharedNativeSecretTargetRules(t *testing.T) {
 		t.Error("a model_list slot must be rejected for an all-agents target")
 	}
 	if err := m.WriteSharedSecret(alpha, FormatNative, "model_list.known-model.api_keys", "k"); err != nil {
-		t.Errorf("a model_list slot in the agent template must be accepted: %v", err)
+		t.Errorf("a model_list slot for a model in the inventory must be accepted: %v", err)
 	}
 	if err := m.WriteSharedSecret(alpha, FormatNative, "model_list.absent-model.api_keys", "k"); err == nil {
-		t.Error("a model absent from the agent template must be rejected")
+		t.Error("a model absent from the inventory must be rejected")
 	}
 	if err := m.WriteSharedSecret(alpha, FormatNative, "channel_list.pico.settings.token", "k"); err == nil {
 		t.Error("the pico channel token must never be settable")
