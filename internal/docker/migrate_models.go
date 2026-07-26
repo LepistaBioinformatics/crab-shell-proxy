@@ -2,6 +2,7 @@ package docker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,14 +32,21 @@ type legacyModelSel struct {
 	Name     string `json:"name"`
 }
 
+// MigrateModels runs the one-time inventory import. It is exported because it must
+// complete BEFORE the HTTP server accepts requests: a chat arriving while the
+// inventory is still empty resolves nothing and fails, and the rest of Reconcile
+// (container adoption, continuous start) is what actually takes a long time.
+func (m *Manager) MigrateModels() error { return m.migrateModelRegistry() }
+
 // migrateModelRegistry seeds the inventory from every pre-existing source and
 // records what each existing workspace is currently running.
 //
 // It only READS workspaces — no workspace's active model changes as a result of
-// migrating. Later sources win on model_name collision, because a
-// registered-models entry or a live workspace holds a key an admin actually
-// entered, whereas the config.yaml seed may name an environment variable that is
-// no longer set.
+// migrating. Later sources win on model_name collision for the DEFINITION fields
+// (model, api_base, auth_method), because a registered-models entry or a live
+// workspace holds the shape that is actually in service, whereas the config.yaml
+// seed carries only a model_name. A non-empty api_key is never overwritten: it is
+// the one field an earlier source may hold and a later one may not.
 func (m *Manager) migrateModelRegistry() error {
 	have, err := m.reg.SchemaVersion()
 	if err != nil {
@@ -51,19 +59,42 @@ func (m *Manager) migrateModelRegistry() error {
 
 	// 1. config.yaml: declared models, and each agent's default.
 	//
-	// config.ModelConfig.BaseURL is a hermes-only field and is EMPTY for every
-	// picoclaw model — config.yaml never carried an api_base for them, because the
-	// template's model_list did. So these records import without one, and picoclaw
-	// falls back to its provider default. CreateModelRaw is used precisely because
-	// the public API would reject a record with no api_base and no auth_method: the
-	// shape is not the proxy's choice, it is what the old config expressed. An admin
-	// editing such a record in the UI supplies the api_base then.
+	// config.ModelConfig carries only a name for a picoclaw model: BaseURL is a
+	// hermes-only field and is EMPTY for every picoclaw one, and there is no field
+	// at all for the provider's own model id. Both lived in the TEMPLATE's
+	// model_list, where model_name and model differ for most entries
+	// (claude-sonnet-4.6 -> claude-sonnet-4-6, nearai-glm -> zai-org/GLM-5.1-FP8).
+	// Importing {Model: mc.Name, APIBase: ""} alone would write a model id the
+	// provider does not have into every workspace that lands on it, so the
+	// definition is taken from the template that was in service — the same file
+	// step 5 normalizes, read here BEFORE that happens (and from its
+	// .pre-registry backup on a re-run).
+	//
+	// This is not a template IMPORT (FR-20): a template-only model no source
+	// declares is still dropped. It corrects the definition of a model config.yaml
+	// already declares, from the only place that definition existed.
+	//
+	// CreateModelRaw is used because the public API would reject a record with no
+	// api_base and no auth_method, which is a shape the old config could express.
 	for _, agent := range m.cfg.Agents {
+		defs := m.templateModelDefs(agent.Template)
 		for _, mc := range agent.SelectableModels() {
-			m.importLegacyModel(registry.Model{
+			mod := registry.Model{
 				ModelName: mc.Name, Provider: mc.Provider, Model: mc.Name,
 				APIBase: mc.BaseURL, APIKey: mc.APIKey, Status: registry.StatusActive,
-			})
+			}
+			if def, ok := defs[mc.Name]; ok {
+				if def.Model != "" {
+					mod.Model = def.Model
+				}
+				if mod.APIBase == "" {
+					mod.APIBase = def.APIBase
+				}
+				if mod.AuthMethod == "" {
+					mod.AuthMethod = def.AuthMethod
+				}
+			}
+			m.importLegacyModel(mod)
 		}
 		if agent.Model != nil && agent.Model.Name != "" {
 			key, kerr := registry.ScopeSel{Level: registry.LevelAgent, Agent: agent.Key}.Key()
@@ -99,7 +130,9 @@ func (m *Manager) migrateModelRegistry() error {
 	// 3. Scope override files -> scope defaults.
 	m.importOverrideFiles(root)
 
-	// 4. Every existing workspace: capture what it is actually running.
+	// 4. Every existing workspace: capture what it is actually running. A capture
+	// failure is counted, not fatal: the other workspaces still get their
+	// assignment, and the schema marker is withheld below so the pass re-runs.
 	//
 	// Enumerated directly from disk (allExistingWorkspaces), not via
 	// m.existingWorkspaces(agent.Key) looped over m.cfg.Agents: an agent removed
@@ -107,8 +140,10 @@ func (m *Manager) migrateModelRegistry() error {
 	// (DisabledAgents), would otherwise make every workspace under its role
 	// invisible to this pass. This is the anti-orphaning step — it must see every
 	// workspace that exists, not only the ones the current config still declares.
+	captureFailures := 0
 	for _, key := range m.allExistingWorkspaces() {
 		if err := m.captureWorkspaceModel(key); err != nil {
+			captureFailures++
 			m.logf("migrate models: capture %+v: %v", key, err)
 		}
 	}
@@ -125,12 +160,49 @@ func (m *Manager) migrateModelRegistry() error {
 		"(registered-models/*.json, tenants/*/shared/model.json, " +
 		"tenants/*/subscriptions/*/shared/model.json, .crab-model.json); " +
 		"they are left on disk for rollback")
+
+	// The marker is what makes the pass a no-op forever after, so it must not be
+	// written while any workspace is still uncaptured: such a workspace has no
+	// assignment, and the first scope-default change re-resolves it — the exact
+	// failure step 4 exists to prevent. Withholding the marker keeps it visible for
+	// a retry, which is what the capture-failure path promises.
+	if captureFailures > 0 {
+		m.logf("migrate models: %d workspace(s) could not be captured; schema marker NOT set, "+
+			"the whole pass will re-run on the next boot", captureFailures)
+		return nil
+	}
 	return m.reg.SetSchemaVersion(modelRegistrySchemaVersion)
 }
 
-// importLegacyModel creates a record unless one already exists with that name.
-// Skipping an existing name is what makes the pass safe to re-run and keeps a
-// later, better source (a real key) from being overwritten by an earlier one.
+// templateModelDefs reads one per-instance disk template's model_list into
+// definitions keyed by model_name, for correcting a config.yaml seed that carries
+// only a name. The .pre-registry backup is read first so a re-run (after step 5
+// already emptied the live file) still finds the definitions; the live file wins
+// where it still has entries.
+//
+// No keys are read: a template never held one.
+func (m *Manager) templateModelDefs(template string) map[string]registry.Model {
+	path := filepath.Join(config.TemplatesDir(m.cfg.ContainerDataRoot, template), "config.json")
+	out := map[string]registry.Model{}
+	for _, p := range []string{path + ".pre-registry", path} {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			m.logf("migrate models: parse template %s: %v", p, err)
+			continue
+		}
+		for name, def := range modelDefsFromConfig(cfg) {
+			out[name] = def
+		}
+	}
+	return out
+}
+
+// importLegacyModel creates a record, or lets this source correct one an earlier
+// source already created (refineLegacyModel).
 func (m *Manager) importLegacyModel(mod registry.Model) {
 	if mod.ModelName == "" || mod.Provider == "" {
 		return
@@ -139,22 +211,56 @@ func (m *Manager) importLegacyModel(mod registry.Model) {
 		mod.Model = mod.ModelName
 	}
 	if _, err := m.reg.GetModel(mod.ModelName); err == nil {
-		// Already present. Fill in a key only if the record has none — a later
-		// source holding a real credential should win over an empty one.
-		if mod.APIKey != "" {
-			if _, uerr := m.reg.UpdateModelRaw(mod.ModelName, func(cur *registry.Model) error {
-				if cur.APIKey == "" {
-					cur.APIKey = mod.APIKey
-				}
-				return nil
-			}); uerr != nil {
-				m.logf("migrate models: backfill key for %q: %v", mod.ModelName, uerr)
-			}
-		}
+		m.refineLegacyModel(mod)
 		return
 	}
 	if _, err := m.reg.CreateModelRaw(mod); err != nil {
 		m.logf("migrate models: import %q: %v", mod.ModelName, err)
+	}
+}
+
+// errNoRefinement aborts refineLegacyModel's transaction when nothing would
+// change, so a no-op refine does not bump Version and UpdatedAt on every pass.
+var errNoRefinement = errors.New("no refinement needed")
+
+// refineLegacyModel lets a LATER source correct a record an EARLIER one created.
+// This is what makes the documented "later sources win" ordering true for the
+// definition fields, not just for a missing key: the config.yaml seed can only
+// supply a model_name, so without this a registered-models entry's or a live
+// workspace's real model id and api_base never reach the record, and the next
+// ensure writes a model the provider does not have into a workspace that worked.
+//
+// api_base and auth_method are backfilled only when empty (an admin may have
+// edited them, and a later source is not automatically better at those), while
+// model is corrected outright — a wrong model id is not a preference, it is a
+// request the provider rejects. A NON-EMPTY api_key is never touched: it is the
+// one field an earlier source may hold and a later one may not.
+func (m *Manager) refineLegacyModel(better registry.Model) {
+	_, err := m.reg.UpdateModelRaw(better.ModelName, func(cur *registry.Model) error {
+		changed := false
+		if cur.APIKey == "" && better.APIKey != "" {
+			cur.APIKey = better.APIKey
+			changed = true
+		}
+		if cur.APIBase == "" && better.APIBase != "" {
+			cur.APIBase = better.APIBase
+			changed = true
+		}
+		if cur.AuthMethod == "" && better.AuthMethod != "" {
+			cur.AuthMethod = better.AuthMethod
+			changed = true
+		}
+		if better.Model != "" && better.Model != cur.Model {
+			cur.Model = better.Model
+			changed = true
+		}
+		if !changed {
+			return errNoRefinement
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errNoRefinement) {
+		m.logf("migrate models: refine %q: %v", better.ModelName, err)
 	}
 }
 
@@ -294,13 +400,20 @@ func (m *Manager) captureWorkspaceModel(key WorkspaceKey) error {
 	}
 
 	// Recover any named model the inventory does not have, from this workspace's
-	// own model_list definition and .security.yml key.
+	// own model_list definition and .security.yml key — and, for one it DOES have,
+	// let this workspace correct the definition. A running workspace is the most
+	// authoritative source there is: its model_list entry is the shape a provider
+	// is currently accepting, which an earlier source (config.yaml, which carries
+	// only a name) cannot express.
 	secPath := filepath.Join(userDir, ".security.yml")
 	for _, name := range append([]string{primary}, chain...) {
+		mod, ok := recoverModelFromWorkspace(cfg, secPath, name)
 		if _, err := m.reg.GetModel(name); err == nil {
+			if ok {
+				m.refineLegacyModel(mod)
+			}
 			continue
 		}
-		mod, ok := recoverModelFromWorkspace(cfg, secPath, name)
 		if !ok {
 			m.logf("migrate models: workspace %+v names model %q that no source declares "+
 				"and its own config.json does not define — left unregistered for admin review", key, name)
@@ -324,49 +437,78 @@ func (m *Manager) captureWorkspaceModel(key WorkspaceKey) error {
 		}
 	}
 
-	// An imported per-user override file was a deliberate pin; anything else is
-	// inherited. Recording a pin as inherited would let the next scope change
-	// silently override it.
+	// The source decides whether the next scope-default change may move this
+	// workspace, so it is decided by REPRODUCIBILITY, not by which file happened to
+	// carry the choice.
+	//
+	// An imported per-user override file is a pin, unconditionally. But the deleted
+	// registry UI (ApplyRegisteredModelToUser) wrote the model straight into the
+	// workspace and left no override file anywhere — so "no override file" does NOT
+	// mean "inherited". Recording those as inherited would hand the next
+	// EnsureRunning a workspace whose model the cascade does not produce: it would
+	// silently replace it where a scope default exists, and refuse to boot where
+	// none does. That is the unrecoverable overwrite this whole feature removes.
+	//
+	// So: if the scope cascade would resolve exactly what this workspace runs, the
+	// assignment is genuinely inherited and the workspace keeps tracking its scope.
+	// If it would not, the current model is not reproducible from the cascade and is
+	// recorded as an explicit pin, which is the only shape that survives. The
+	// comparison uses the registry's own cascade function, so it cannot drift from
+	// what resolution will actually do afterwards.
+	ref := m.workspaceRef(key)
 	source := registry.SourceInherited
 	if _, err := os.Stat(config.UserModelOverrideFile(m.cfg.ContainerDataRoot,
 		key.TenantID, key.SubsAccID, key.Role, key.UserAccID)); err == nil {
 		source = registry.SourceExplicit
+	} else if cascade, level, cerr := m.reg.ScopeCandidate(ref); cerr != nil || cascade != primary {
+		source = registry.SourceExplicit
+		m.logf("migrate models: workspace %+v runs %q, which the scope cascade does not reproduce "+
+			"(cascade: %q at %q, err %v) — recorded as an explicit pin so the next resolve keeps it",
+			key, primary, cascade, level, cerr)
 	}
-	return m.reg.PutAssignment(m.workspaceRef(key), registry.Assignment{
+	return m.reg.PutAssignment(ref, registry.Assignment{
 		ModelName: primary, Chain: chain, Source: source,
 	})
 }
 
-// recoverModelFromWorkspace rebuilds a model record from one workspace's own
-// files — the only place a model that no other source declares still exists.
-func recoverModelFromWorkspace(cfg map[string]any, secPath, name string) (registry.Model, bool) {
+// modelDefsFromConfig reads a picoclaw config.json's model_list into definitions
+// keyed by model_name. One parser serves both callers — a workspace's own file and
+// a disk template — so the two cannot read the same shape differently.
+func modelDefsFromConfig(cfg map[string]any) map[string]registry.Model {
+	out := map[string]registry.Model{}
 	list, _ := cfg["model_list"].([]any)
 	for _, item := range list {
 		entry, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		if n, _ := entry["model_name"].(string); n != name {
+		name, _ := entry["model_name"].(string)
+		if name == "" {
 			continue
 		}
-		mod := registry.Model{
-			ModelName: name,
-			Status:    registry.StatusActive,
-		}
+		mod := registry.Model{ModelName: name, Status: registry.StatusActive}
 		mod.Provider, _ = entry["provider"].(string)
 		mod.Model, _ = entry["model"].(string)
 		mod.APIBase, _ = entry["api_base"].(string)
 		mod.AuthMethod, _ = entry["auth_method"].(string)
-		if mod.Model == "" {
-			mod.Model = name
-		}
-		if mod.Provider == "" {
-			return registry.Model{}, false
-		}
-		mod.APIKey = readWorkspaceModelKey(secPath, name)
-		return mod, true
+		out[name] = mod
 	}
-	return registry.Model{}, false
+	return out
+}
+
+// recoverModelFromWorkspace rebuilds a model record from one workspace's own
+// files — the only place a model that no other source declares still exists, and
+// the most authoritative definition of one that another source declares badly.
+func recoverModelFromWorkspace(cfg map[string]any, secPath, name string) (registry.Model, bool) {
+	mod, ok := modelDefsFromConfig(cfg)[name]
+	if !ok || mod.Provider == "" {
+		return registry.Model{}, false
+	}
+	if mod.Model == "" {
+		mod.Model = name
+	}
+	mod.APIKey = readWorkspaceModelKey(secPath, name)
+	return mod, true
 }
 
 // readWorkspaceModelKey pulls model_list.<name>.api_keys[0] out of a workspace's
