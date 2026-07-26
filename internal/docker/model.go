@@ -9,6 +9,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 )
 
 // This file holds the re-apply entry points only. Model RESOLUTION lives in
@@ -31,7 +32,7 @@ import (
 //
 // Per-workspace failures are logged and skipped rather than returned, so one bad
 // workspace does not block the pass for the others.
-func (m *Manager) ReapplyModelScope(scope Scope) error {
+func (m *Manager) ReapplyModelScope(scope Scope, bounce bool) error {
 	keys, err := m.scopeWorkspaceKeys(scope)
 	if err != nil {
 		return err
@@ -56,9 +57,7 @@ func (m *Manager) ReapplyModelScope(scope Scope) error {
 			m.logf("reapply model scope: workspace %+v: %v", key, err)
 			continue
 		}
-		if err := m.RestartWorkspace(key); err != nil {
-			m.logf("reapply model scope: restart %+v: %v", key, err)
-		}
+		m.bounceOrNotify(key, bounce, "reapply model scope")
 	}
 	return nil
 }
@@ -66,9 +65,12 @@ func (m *Manager) ReapplyModelScope(scope Scope) error {
 // ReapplyModelUser re-materializes one workspace and restarts it if running
 // (RestartWorkspace is a no-op when it is not — the next cold start picks up what
 // is already on disk).
-func (m *Manager) ReapplyModelUser(key WorkspaceKey) error {
+func (m *Manager) ReapplyModelUser(key WorkspaceKey, bounce bool) error {
 	if err := m.reapplyWorkspace(key); err != nil {
 		return err
+	}
+	if !bounce {
+		return m.RaiseWorkspaceRestartNotice(key, restart.ReasonModel)
 	}
 	return m.RestartWorkspace(key)
 }
@@ -80,7 +82,7 @@ func (m *Manager) ReapplyModelUser(key WorkspaceKey) error {
 // primaries would leave every workspace holding the model as a fallback on a
 // stale or revoked credential, which is exactly the failure fallback exists to
 // prevent.
-func (m *Manager) ReapplyModelForModel(modelName string) error {
+func (m *Manager) ReapplyModelForModel(modelName string, bounce bool) error {
 	refs, err := m.reg.WorkspacesUsing(modelName)
 	if err != nil {
 		return err
@@ -94,11 +96,29 @@ func (m *Manager) ReapplyModelForModel(modelName string) error {
 			m.logf("reapply model %q: workspace %+v: %v", modelName, key, err)
 			continue
 		}
-		if err := m.RestartWorkspace(key); err != nil {
-			m.logf("reapply model %q: restart %+v: %v", modelName, key, err)
-		}
+		m.bounceOrNotify(key, bounce, "reapply model "+modelName)
 	}
 	return nil
+}
+
+// bounceOrNotify applies a re-materialized change to one workspace the way the
+// caller's restart policy asked: bounce it now, or leave a notice on that
+// workspace alone.
+//
+// The notice is per workspace, not per scope, because these passes compute an
+// exact affected set — ReapplyModelScope deliberately skips workspaces carrying
+// an explicit pin, and ReapplyModelForModel spans tenants — so a scope notice
+// would banner members whose instance did not change.
+func (m *Manager) bounceOrNotify(key WorkspaceKey, bounce bool, what string) {
+	if !bounce {
+		if err := m.RaiseWorkspaceRestartNotice(key, restart.ReasonModel); err != nil {
+			m.logf("%s: raise notice %+v: %v", what, key, err)
+		}
+		return
+	}
+	if err := m.RestartWorkspace(key); err != nil {
+		m.logf("%s: restart %+v: %v", what, key, err)
+	}
 }
 
 // reapplyWorkspace re-materializes one ALREADY-PROVISIONED workspace. A missing
@@ -155,25 +175,25 @@ func (m *Manager) scopeWorkspaceKeys(scope Scope) ([]WorkspaceKey, error) {
 
 // SetModelAssignment pins one workspace to a model and re-materializes it. The
 // pin is EXPLICIT, which is what makes it survive later scope-default changes.
-func (m *Manager) SetModelAssignment(key WorkspaceKey, modelName string) error {
+func (m *Manager) SetModelAssignment(key WorkspaceKey, modelName string, bounce bool) error {
 	ref := m.workspaceRef(key)
 	if err := m.reg.PutAssignment(ref, registry.Assignment{
 		ModelName: modelName, Source: registry.SourceExplicit,
 	}); err != nil {
 		return err
 	}
-	return m.ReapplyModelUser(key)
+	return m.ReapplyModelUser(key, bounce)
 }
 
 // ClearModelAssignment drops a per-user pin so the workspace falls back to its
 // scope default, then re-materializes it. The assignment is re-created as
 // INHERITED by the re-materialization, which is how the inventory keeps knowing
 // what this workspace runs.
-func (m *Manager) ClearModelAssignment(key WorkspaceKey) error {
+func (m *Manager) ClearModelAssignment(key WorkspaceKey, bounce bool) error {
 	if err := m.reg.DeleteAssignment(m.workspaceRef(key)); err != nil {
 		return err
 	}
-	return m.ReapplyModelUser(key)
+	return m.ReapplyModelUser(key, bounce)
 }
 
 // setModelListEntry upserts model_list[name] = {api_keys: [apiKey]} into the

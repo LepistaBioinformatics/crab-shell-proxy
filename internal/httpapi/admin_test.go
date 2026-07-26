@@ -255,6 +255,8 @@ func TestSharedWriteTriggersRestartScope(t *testing.T) {
 	})
 
 	t.Run("secret-restarts", func(t *testing.T) {
+		// The default (no ?restart=) must stay byte-identical to the pre-policy
+		// behaviour — that is what makes restart-control additive.
 		orch := newFakeOrch()
 		s := testServer(orch, &fakeTurner{})
 
@@ -268,8 +270,14 @@ func TestSharedWriteTriggersRestartScope(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 		}
-		if len(orch.restartScopes) != 1 {
-			t.Errorf("restarts=%d, want 1 (env secrets need a recreate)", len(orch.restartScopes))
+		// Default policy is "now" (restart-control FR-4.2): propagate, then bounce.
+		if len(orch.propagatedScopes) != 1 {
+			t.Errorf("propagated=%d, want 1 (the change must reach disk whatever the policy)",
+				len(orch.propagatedScopes))
+		}
+		if len(orch.bouncedScopes) != 1 {
+			t.Errorf("bounces=%d, want 1 (no policy given means bounce now, as before)",
+				len(orch.bouncedScopes))
 		}
 	})
 }

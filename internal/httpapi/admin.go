@@ -12,6 +12,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/google/uuid"
 )
 
@@ -389,8 +390,8 @@ func (s *Server) handleAdminSharedSecretsPost(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after secret write failed scope=%+v: %v", scope, err)
+	if !s.applyRestartPolicyFromRequest(w, r, scope, restart.ReasonSharedSecret, ident.Email) {
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "format": req.Format, "name": req.Name})
 }
@@ -448,8 +449,8 @@ func (s *Server) handleAdminSharedSecretsDelete(w http.ResponseWriter, r *http.R
 	if format == docker.FormatNative {
 		s.Mgr.UnsetNativeSlotForScope(scope, name)
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after secret delete failed scope=%+v: %v", scope, err)
+	if !s.applyRestartPolicyFromRequest(w, r, scope, restart.ReasonSharedSecret, ident.Email) {
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "format": format, "name": name})
 }
@@ -707,8 +708,8 @@ func (s *Server) handleAdminSkillsPost(w http.ResponseWriter, r *http.Request) {
 	if err := s.Mgr.SyncEffectiveSkillsForScope(scope); err != nil {
 		s.logf("admin: sync effective skills failed scope=%+v: %v", scope, err)
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after skill write failed scope=%+v: %v", scope, err)
+	if !s.applyRestartPolicyFromRequest(w, r, scope, restart.ReasonSharedSkills, ident.Email) {
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "name": name})
 }
@@ -743,8 +744,8 @@ func (s *Server) handleAdminSkillsDelete(w http.ResponseWriter, r *http.Request)
 	if err := s.Mgr.SyncEffectiveSkillsForScope(scope); err != nil {
 		s.logf("admin: sync effective skills failed scope=%+v: %v", scope, err)
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after skill delete failed scope=%+v: %v", scope, err)
+	if !s.applyRestartPolicyFromRequest(w, r, scope, restart.ReasonSharedSkills, ident.Email) {
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "name": name})
 }

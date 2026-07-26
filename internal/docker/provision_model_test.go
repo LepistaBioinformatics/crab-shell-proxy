@@ -9,6 +9,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 )
 
 func testManagerWithRegistry(t *testing.T) (*Manager, *registry.Registry, string) {
@@ -21,10 +22,12 @@ func testManagerWithRegistry(t *testing.T) (*Manager, *registry.Registry, string
 	}
 	t.Cleanup(func() { _ = reg.Close() })
 	m := &Manager{
-		cfg:  &config.Config{ContainerDataRoot: root, PicoclawUser: ""},
-		reg:  reg,
-		logf: func(string, ...any) {},
-		keys: map[string]*keyState{},
+		cfg:      &config.Config{ContainerDataRoot: root, PicoclawUser: ""},
+		reg:      reg,
+		logf:     func(string, ...any) {},
+		restarts: restart.NewStore(root),
+		keys:     map[string]*keyState{},
+		sched:    map[string]*time.Timer{},
 	}
 	return m, reg, root
 }

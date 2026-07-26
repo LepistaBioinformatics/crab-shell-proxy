@@ -68,9 +68,19 @@ type scopeRecord struct {
 	Agents map[string]Notice `json:"agents"`
 }
 
-// marker is the on-disk shape of a workspace's last-restart stamp.
+// marker is the on-disk shape of a workspace's restart state: when it last
+// restarted, plus any notice that concerns only this member.
+//
+// The per-workspace notice lives here rather than in a scope record because
+// some changes affect an exact, computed set of workspaces rather than a scope:
+// a member's own secret write (only them), and a model re-apply (which skips
+// workspaces carrying an explicit pin). Raising a scope notice for either would
+// banner people whose instance did not change. It is compared exactly like a
+// scope notice — newest wins.
 type marker struct {
-	LastRestartAt time.Time `json:"lastRestartAt"`
+	LastRestartAt     time.Time `json:"lastRestartAt"`
+	WorkspaceNoticeAt time.Time `json:"workspaceNoticeAt,omitempty"`
+	WorkspaceReason   Reason    `json:"workspaceReason,omitempty"`
 }
 
 // Status is the derived answer handed to a member.
@@ -192,21 +202,49 @@ func (s *Store) resolveLocked(tenantID, subsAccID, agentKey string) (Notice, boo
 	return best, found, nil
 }
 
-// Stamp records that a workspace has just applied everything pending.
+// Stamp records that a workspace has just applied everything pending. The
+// workspace-notice fields are preserved, not cleared: the timestamp comparison
+// already resolves them, and rewriting history would lose the reason if a
+// second notice lands in the same instant.
 func (s *Store) Stamp(tenantID, subsAccID, role, userAccID string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := config.RestartWorkspaceFile(s.root, tenantID, subsAccID, role, userAccID)
-	return writeJSON(path, marker{LastRestartAt: at.UTC()})
+	m, err := readMarker(path)
+	if err != nil {
+		return err
+	}
+	m.LastRestartAt = at.UTC()
+	return writeJSON(path, m)
 }
 
-// LastRestart returns the workspace's marker. A missing marker is the zero
-// time, which reads as "older than any notice" — the safe direction: a spurious
-// banner, never a silently skipped restart.
+// RaiseWorkspace records a notice concerning exactly one workspace — a member's
+// own secret write (DEC-3), or a model re-apply that touched this workspace and
+// not its neighbours. It never reaches anyone else.
+func (s *Store) RaiseWorkspace(tenantID, subsAccID, role, userAccID string, reason Reason, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := config.RestartWorkspaceFile(s.root, tenantID, subsAccID, role, userAccID)
+	m, err := readMarker(path)
+	if err != nil {
+		return err
+	}
+	m.WorkspaceNoticeAt = at.UTC()
+	m.WorkspaceReason = reason
+	return writeJSON(path, m)
+}
+
+// LastRestart returns when the workspace last applied everything. A missing
+// marker is the zero time, which reads as "older than any notice" — the safe
+// direction: a spurious banner, never a silently skipped restart.
 func (s *Store) LastRestart(tenantID, subsAccID, role, userAccID string) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return readMarker(config.RestartWorkspaceFile(s.root, tenantID, subsAccID, role, userAccID))
+	m, err := readMarker(config.RestartWorkspaceFile(s.root, tenantID, subsAccID, role, userAccID))
+	if err != nil {
+		return time.Time{}, err
+	}
+	return m.LastRestartAt, nil
 }
 
 // Status is the derived answer for one workspace. The agent key doubles as the
@@ -220,17 +258,25 @@ func (s *Store) Status(tenantID, subsAccID, role, userAccID string) (Status, err
 	if err != nil {
 		return Status{}, err
 	}
-	last, err := readMarker(config.RestartWorkspaceFile(s.root, tenantID, subsAccID, role, userAccID))
+	m, err := readMarker(config.RestartWorkspaceFile(s.root, tenantID, subsAccID, role, userAccID))
 	if err != nil {
 		return Status{}, err
 	}
 
+	// The workspace's own notice competes with the scope's on the same footing:
+	// newest wins, so a shared-secret change after their own secret write
+	// replaces the reason they see.
+	if !m.WorkspaceNoticeAt.IsZero() && (!found || m.WorkspaceNoticeAt.After(n.NoticeAt)) {
+		n = Notice{NoticeAt: m.WorkspaceNoticeAt, Reason: m.WorkspaceReason}
+		found = true
+	}
+
 	st := Status{}
-	if !last.IsZero() {
-		l := last
+	if !m.LastRestartAt.IsZero() {
+		l := m.LastRestartAt
 		st.LastRestartAt = &l
 	}
-	if !found || !last.Before(n.NoticeAt) {
+	if !found || !m.LastRestartAt.Before(n.NoticeAt) {
 		return st, nil
 	}
 	at := n.NoticeAt
@@ -340,19 +386,19 @@ func readScope(path string) (scopeRecord, error) {
 	return rec, nil
 }
 
-func readMarker(path string) (time.Time, error) {
+func readMarker(path string) (marker, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return time.Time{}, nil
+		return marker{}, nil
 	}
 	if err != nil {
-		return time.Time{}, err
+		return marker{}, err
 	}
 	var m marker
 	if err := json.Unmarshal(b, &m); err != nil {
-		return time.Time{}, fmt.Errorf("restart: parse %s: %w", path, err)
+		return marker{}, fmt.Errorf("restart: parse %s: %w", path, err)
 	}
-	return m.LastRestartAt, nil
+	return m, nil
 }
 
 func writeScope(path string, rec scopeRecord) error { return writeJSON(path, rec) }

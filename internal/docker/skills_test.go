@@ -58,9 +58,9 @@ func TestParseSkillFrontmatter(t *testing.T) {
 	}
 	bad := []string{
 		"no frontmatter here",
-		"---\nname: x\n---\n",                    // missing description
-		"---\ndescription: y\n---\n",             // missing name
-		"---\nname: \ndescription: y\n---\n",     // empty name
+		"---\nname: x\n---\n",                // missing description
+		"---\ndescription: y\n---\n",         // missing name
+		"---\nname: \ndescription: y\n---\n", // empty name
 	}
 	for _, md := range bad {
 		if _, _, err := parseSkillFrontmatter(md); err == nil {
