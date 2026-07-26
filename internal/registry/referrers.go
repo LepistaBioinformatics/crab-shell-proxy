@@ -3,8 +3,11 @@ package registry
 import (
 	"errors"
 	"sort"
+	"strings"
 
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // referrersTx collects everything keeping name alive. It runs inside the
@@ -117,6 +120,45 @@ func (r *Registry) GetAssignment(ref WorkspaceRef) (Assignment, error) {
 		return Assignment{}, err
 	}
 	return a, nil
+}
+
+// AssignmentEntry is one assignment plus the workspace it belongs to, for a
+// listing that spans more than one workspace.
+type AssignmentEntry struct {
+	Agent     string
+	UserAccID string
+	Assignment
+}
+
+// AssignmentsUnder lists every recorded assignment under one (tenant,
+// subscription), across agents, so an admin surface can show which users are
+// pinned and to what. Ordered by key, which is the bucket's own order.
+//
+// It spans agents deliberately: a subscription's users may each have a workspace
+// under a different agent, and a per-agent read would render exactly those users
+// as unpinned. Authority over the pair is what the caller is checked for.
+func (r *Registry) AssignmentsUnder(tenantID, subsAccID string) ([]AssignmentEntry, error) {
+	prefix := identity.SanitizeID(tenantID) + "/" + identity.SanitizeID(subsAccID) + "/"
+	var out []AssignmentEntry
+	err := r.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bAssignments).Cursor()
+		for k, raw := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, raw = c.Next() {
+			var a Assignment
+			if err := jsonUnmarshal(raw, &a); err != nil {
+				return err
+			}
+			rest := strings.Split(strings.TrimPrefix(string(k), prefix), "/")
+			if len(rest) != 2 {
+				continue
+			}
+			out = append(out, AssignmentEntry{Agent: rest[0], UserAccID: rest[1], Assignment: a})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // DeleteAssignment removes a workspace's record (idempotent), for a workspace

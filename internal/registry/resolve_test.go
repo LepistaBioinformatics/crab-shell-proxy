@@ -2,7 +2,10 @@ package registry
 
 import (
 	"errors"
+	"strings"
 	"testing"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func ref() WorkspaceRef {
@@ -160,6 +163,80 @@ func TestResolveSkipsANonActiveFallbackAndReportsIt(t *testing.T) {
 	}
 	if len(got.Skipped) != 1 || got.Skipped[0] != "shelf" {
 		t.Errorf("Skipped = %v, want [shelf] so the caller can log it", got.Skipped)
+	}
+}
+
+// TestResolveSkipsADanglingCascadeLevelAndContinues covers the state the boot
+// migration can create: SetScopeDefaultRaw has no active-model check, so a stale
+// shared/model.json imports a tenant default naming a model nothing declares.
+// Failing there would refuse EVERY inherited workspace under that tenant; the
+// cascade must pass the level over and report it.
+func TestResolveSkipsADanglingCascadeLevelAndContinues(t *testing.T) {
+	r := testRegistry(t)
+	mustCreate(t, r, "global-fallback")
+	if err := r.SetScopeDefault(ScopeSel{Level: LevelGlobal}, "global-fallback"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetScopeDefaultRaw("tenant/t1", "deleted-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.Resolve(ref())
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Primary.ModelName != "global-fallback" || got.Level != LevelGlobal {
+		t.Errorf("Resolve = %q at %q, want global-fallback at global", got.Primary.ModelName, got.Level)
+	}
+	if len(got.SkippedLevels) != 1 || !strings.Contains(got.SkippedLevels[0], "deleted-model") {
+		t.Errorf("SkippedLevels = %v, want the dangling tenant level reported", got.SkippedLevels)
+	}
+}
+
+// TestResolveSurfacesACorruptAssignmentInsteadOfReadingItAsAbsent: "absent" and
+// "unreadable" are different answers. Collapsing them lets the cascade replace a
+// pin the workspace may well have.
+func TestResolveSurfacesACorruptAssignmentInsteadOfReadingItAsAbsent(t *testing.T) {
+	r := testRegistry(t)
+	mustCreate(t, r, "scope")
+	if err := r.SetScopeDefault(ScopeSel{Level: LevelGlobal}, "scope"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bAssignments).Put([]byte(ref().Key()), []byte("{not json"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.Resolve(ref()); err == nil {
+		t.Error("Resolve returned the scope default over an unreadable assignment")
+	}
+}
+
+// TestScopeCandidateIgnoresPinsAndTheDeprecationHop pins down what the migration
+// compares against: the SCOPE cascade only, with no hop — because once an
+// inherited assignment exists, Resolve stops hopping too.
+func TestScopeCandidateIgnoresPinsAndTheDeprecationHop(t *testing.T) {
+	r := testRegistry(t)
+	old := mustCreate(t, r, "old")
+	mustCreate(t, r, "new")
+	mustCreate(t, r, "pinned")
+	if err := r.SetScopeDefault(ScopeSel{Level: LevelTenant, TenantID: "t1"}, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Deprecate("old", old.Version, "new"); err != nil {
+		t.Fatalf("Deprecate: %v", err)
+	}
+	if err := r.PutAssignment(ref(), Assignment{ModelName: "pinned", Source: SourceExplicit}); err != nil {
+		t.Fatal(err)
+	}
+
+	name, level, err := r.ScopeCandidate(ref())
+	if err != nil {
+		t.Fatalf("ScopeCandidate: %v", err)
+	}
+	if name != "old" || level != LevelTenant {
+		t.Errorf("ScopeCandidate = %q at %q, want old at tenant", name, level)
 	}
 }
 

@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -19,6 +20,10 @@ type Resolution struct {
 	// Skipped names declared fallbacks left out because they are not active, so
 	// the caller can log the omission rather than silently shortening the chain.
 	Skipped []string
+	// SkippedLevels names cascade levels passed over because their default points
+	// at a model the inventory no longer has. The registry carries no logger, so
+	// the omission is reported here for the caller to log — same shape as Skipped.
+	SkippedLevels []string
 }
 
 // Names returns primary + chain model names in materialization order.
@@ -61,9 +66,19 @@ func (r *Registry) Resolve(ref WorkspaceRef) (Resolution, error) {
 		models := tx.Bucket(bModels)
 
 		var existing Assignment
-		hasAssignment := getJSON(tx.Bucket(bAssignments), ref.Key(), &existing) == nil
+		hasAssignment := false
+		switch err := getJSON(tx.Bucket(bAssignments), ref.Key(), &existing); {
+		case err == nil:
+			hasAssignment = true
+		case errors.Is(err, ErrNotFound):
+			// Never materialized — the condition the deprecation hop keys on.
+		default:
+			// A corrupt record is NOT "no assignment": reading it as absent would let
+			// the cascade replace a pin this workspace may well have.
+			return fmt.Errorf("read assignment %s: %w", ref.Key(), err)
+		}
 
-		candidate, level, err := candidateTx(tx, ref, existing, hasAssignment)
+		candidate, level, skippedLevels, err := candidateTx(tx, ref, existing, hasAssignment)
 		if err != nil {
 			return err
 		}
@@ -97,7 +112,10 @@ func (r *Registry) Resolve(ref WorkspaceRef) (Resolution, error) {
 			chain = append(chain, fb)
 		}
 
-		res = Resolution{Primary: primary, Chain: chain, Level: level, Skipped: skipped}
+		res = Resolution{
+			Primary: primary, Chain: chain, Level: level,
+			Skipped: skipped, SkippedLevels: skippedLevels,
+		}
 		return nil
 	})
 	if err != nil {
@@ -106,15 +124,27 @@ func (r *Registry) Resolve(ref WorkspaceRef) (Resolution, error) {
 	return res, nil
 }
 
-// candidateTx returns the model_name the cascade selects and the level that
-// selected it.
-func candidateTx(tx *bolt.Tx, ref WorkspaceRef, existing Assignment, hasAssignment bool) (string, ScopeLevel, error) {
+// candidateTx returns the model_name the cascade selects, the level that selected
+// it, and any levels skipped because their default is dangling.
+//
+// A level whose default names a model the inventory no longer has is SKIPPED, not
+// fatal: the boot migration imports pre-existing overrides with SetScopeDefaultRaw,
+// which has no active-model check, so a stale shared/model.json can name a model
+// nothing declares. Failing there would refuse every inherited workspace under
+// that tenant; continuing down the cascade keeps them bootable and reports the
+// dangling level to the caller for logging.
+//
+// An EXPLICIT pin naming a missing model is deliberately NOT skipped — it stays a
+// hard failure in Resolve. Falling through to a scope default would silently
+// replace a deliberate per-user choice, which is the failure this package exists
+// to remove; a delete cannot produce that state either (I2 blocks it).
+func candidateTx(tx *bolt.Tx, ref WorkspaceRef, existing Assignment, hasAssignment bool) (string, ScopeLevel, []string, error) {
 	// An EXPLICIT assignment is a pin and wins. An INHERITED one only records
 	// what was materialized — treating it as an override would freeze every
 	// workspace at its first model and make scope defaults inert after the first
 	// provision.
 	if hasAssignment && existing.Source == SourceExplicit && existing.ModelName != "" {
-		return existing.ModelName, LevelUser, nil
+		return existing.ModelName, LevelUser, nil, nil
 	}
 
 	sels := []ScopeSel{
@@ -123,7 +153,9 @@ func candidateTx(tx *bolt.Tx, ref WorkspaceRef, existing Assignment, hasAssignme
 		{Level: LevelAgent, Agent: ref.Agent},
 		{Level: LevelGlobal},
 	}
+	models := tx.Bucket(bModels)
 	defaults := tx.Bucket(bScopeDefaults)
+	var skippedLevels []string
 	for _, sel := range sels {
 		key, err := sel.Key()
 		if err != nil {
@@ -133,11 +165,37 @@ func candidateTx(tx *bolt.Tx, ref WorkspaceRef, existing Assignment, hasAssignme
 		if err := getJSON(defaults, key, &d); err != nil {
 			continue
 		}
-		if d.ModelName != "" {
-			return d.ModelName, sel.Level, nil
+		if d.ModelName == "" {
+			continue
 		}
+		if models.Get([]byte(d.ModelName)) == nil {
+			skippedLevels = append(skippedLevels, key+" -> "+d.ModelName)
+			continue
+		}
+		return d.ModelName, sel.Level, skippedLevels, nil
 	}
-	return "", "", fmt.Errorf("%w: workspace %s", ErrNoModelResolvable, ref.Key())
+	return "", "", skippedLevels, fmt.Errorf("%w: workspace %s", ErrNoModelResolvable, ref.Key())
+}
+
+// ScopeCandidate reports the model_name the SCOPE cascade selects for a
+// workspace, ignoring any per-user assignment and without the deprecation hop.
+//
+// It answers "is this workspace's current model reproducible from the cascade?",
+// which is what the boot migration needs to decide whether a captured model must
+// be recorded as an explicit pin to survive. It shares candidateTx with Resolve
+// on purpose: two functions answering the same question is how the answers drift.
+func (r *Registry) ScopeCandidate(ref WorkspaceRef) (string, ScopeLevel, error) {
+	var name string
+	var level ScopeLevel
+	err := r.db.View(func(tx *bolt.Tx) error {
+		var err error
+		name, level, _, err = candidateTx(tx, ref, Assignment{}, false)
+		return err
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return name, level, nil
 }
 
 // resolveReplacementTx is ResolveReplacement inside an existing transaction.

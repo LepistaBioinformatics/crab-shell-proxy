@@ -207,3 +207,38 @@ func TestRecordMaterializationKeepsInheritedSource(t *testing.T) {
 		t.Errorf("Source = %q, want inherited to remain inherited", a.Source)
 	}
 }
+
+// TestAssignmentsUnderSpansAgentsAndStopsAtTheSubscription covers the read FR-27's
+// override indicator needs: every pin under one subscription, across agents,
+// without leaking a sibling subscription's records.
+func TestAssignmentsUnderSpansAgentsAndStopsAtTheSubscription(t *testing.T) {
+	r := testRegistry(t)
+	mine := []WorkspaceRef{
+		{TenantID: "t", SubsAccID: "s", Agent: "alpha", UserAccID: "u1"},
+		{TenantID: "t", SubsAccID: "s", Agent: "beta", UserAccID: "u2"},
+	}
+	for i, ref := range mine {
+		if err := r.PutAssignment(ref, Assignment{ModelName: "m", Source: SourceExplicit}); err != nil {
+			t.Fatalf("PutAssignment %d: %v", i, err)
+		}
+	}
+	other := WorkspaceRef{TenantID: "t", SubsAccID: "s2", Agent: "alpha", UserAccID: "u3"}
+	if err := r.PutAssignment(other, Assignment{ModelName: "m", Source: SourceInherited}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.AssignmentsUnder("t", "s")
+	if err != nil {
+		t.Fatalf("AssignmentsUnder: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("AssignmentsUnder = %+v, want the two records under t/s only", got)
+	}
+	seen := map[string]string{}
+	for _, e := range got {
+		seen[e.Agent] = e.UserAccID
+	}
+	if seen["alpha"] != "u1" || seen["beta"] != "u2" {
+		t.Errorf("entries = %+v, want alpha/u1 and beta/u2", got)
+	}
+}
