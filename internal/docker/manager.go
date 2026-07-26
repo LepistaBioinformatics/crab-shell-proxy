@@ -14,6 +14,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 )
 
 // Reconciliation labels stamped on every managed container.
@@ -83,9 +84,19 @@ type Manager struct {
 	// workspace uses. Nothing else in this package may decide that.
 	reg  *registry.Registry
 	logf func(format string, args ...any)
+	// restarts holds the restart notices and the per-workspace lastRestartAt
+	// markers that make "does this workspace still need a bounce?" a derived
+	// question (restart-control design §1).
+	restarts *restart.Store
 
 	mu   sync.Mutex
 	keys map[string]*keyState
+
+	// schedMu guards the armed scheduled-bounce timers, keyed by scope. Kept
+	// separate from mu (which guards keys) because a scheduled bounce takes the
+	// per-container locks while it runs.
+	schedMu sync.Mutex
+	sched   map[string]*time.Timer
 
 	// The embedded operator-managed skills are materialized once per process to
 	// the read-only bind source shared by every container.
@@ -103,7 +114,26 @@ func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, reg *regis
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Manager{cfg: cfg, docker: dkr, health: health, reg: reg, logf: logf, keys: map[string]*keyState{}}
+	return &Manager{
+		cfg: cfg, docker: dkr, health: health, reg: reg, logf: logf,
+		restarts: restart.NewStore(cfg.ContainerDataRoot),
+		keys:     map[string]*keyState{},
+		sched:    map[string]*time.Timer{},
+	}
+}
+
+// Restarts exposes the restart-notice store so the HTTP layer can read a
+// member's status and raise notices without reaching through the Manager for
+// every accessor.
+func (m *Manager) Restarts() *restart.Store { return m.restarts }
+
+// stampRestart records that a workspace has just applied everything pending. A
+// failure here is logged, never propagated: a missing marker reads as "pending",
+// which is the safe direction — a spurious banner, never a skipped restart.
+func (m *Manager) stampRestart(key WorkspaceKey) {
+	if err := m.restarts.Stamp(key.TenantID, key.SubsAccID, key.Role, key.UserAccID, time.Now().UTC()); err != nil {
+		m.logf("restart marker for %s failed: %v", m.ContainerName(key), err)
+	}
 }
 
 // ContainerName is the deterministic name for one workspace's container:
@@ -245,6 +275,15 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 			_ = m.docker.Remove(context.Background(), name)
 		}
 		return Target{}, fmt.Errorf("%s %s did not become ready: %w", agent.Harness, name, err)
+	}
+
+	if createdNow {
+		// A container created just now has, by definition, already applied every
+		// pending change — everything above (effective secrets, materialize,
+		// native overlay) ran before it started. Stamping here is what makes a
+		// scaled-to-zero workspace clear its own notice on cold start, with no
+		// fan-out at admin-action time (restart-control FR-3.2).
+		m.stampRestart(key)
 	}
 
 	return Target{Name: name, Endpoint: m.endpoint(agent, name), AuthToken: authToken, Harness: agent.Harness}, nil
@@ -457,7 +496,12 @@ func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
 		return err
 	}
 	if !st.Exists || !st.Running {
-		return nil // scaled to zero / never created: next chat cold-starts with it
+		// Scaled to zero / never created: the next chat cold-starts with everything
+		// applied, so the pending notice is genuinely resolved — stamp the marker
+		// (restart-control FR-1.4) rather than leaving a banner the member can
+		// never clear by pressing the button.
+		m.stampRestart(key)
+		return nil
 	}
 	if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
 		return err
@@ -477,8 +521,78 @@ func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
 	if agent, ok := m.cfg.Agents[key.Role]; ok && agent.Mode == config.ModeScaleToZero {
 		m.armLocked(ks, name, agent.IdleTimeout.Std())
 	}
+	m.stampRestart(key)
 	m.logf("restarted container %s (secret injection)", name)
 	return nil
+}
+
+// ArmScheduledBounce schedules a scope bounce for `at`, replacing any timer
+// already armed for the same scope — re-scheduling never stacks two
+// (restart-control FR-6.3). An `at` already in the past fires immediately, which
+// is what a schedule that came due while the proxy was down must do (FR-6.2).
+func (m *Manager) ArmScheduledBounce(scope Scope, at time.Time) {
+	key := scheduleKey(scope)
+	d := time.Until(at)
+	if d < 0 {
+		d = 0
+	}
+	m.schedMu.Lock()
+	defer m.schedMu.Unlock()
+	if t, ok := m.sched[key]; ok {
+		t.Stop()
+	}
+	m.sched[key] = time.AfterFunc(d, func() {
+		m.schedMu.Lock()
+		delete(m.sched, key)
+		m.schedMu.Unlock()
+
+		if err := m.BounceScope(scope); err != nil {
+			m.logf("scheduled bounce %s failed: %v", key, err)
+		}
+		// Clear only ScheduledAt: NoticeAt stays so a container that was down at
+		// the appointed time still shows the notice until its cold start stamps
+		// its marker (FR-6.1).
+		if err := m.restarts.ClearSchedule(scope.TenantID, scope.SubsAccID, scope.AgentKey); err != nil {
+			m.logf("scheduled bounce %s: clear schedule failed: %v", key, err)
+		}
+	})
+	m.logf("scheduled bounce for %s in %s", key, d)
+}
+
+// CancelScheduledBounce disarms a pending scheduled bounce (an admin withdrawing
+// the notice). Unknown scopes are a no-op.
+func (m *Manager) CancelScheduledBounce(scope Scope) {
+	key := scheduleKey(scope)
+	m.schedMu.Lock()
+	defer m.schedMu.Unlock()
+	if t, ok := m.sched[key]; ok {
+		t.Stop()
+		delete(m.sched, key)
+	}
+}
+
+// RearmSchedules re-arms every schedule persisted on disk. Called at the end of
+// Reconcile so a proxy restart never silently drops an admin's scheduled window
+// (FR-6.2).
+func (m *Manager) RearmSchedules() {
+	refs, err := m.restarts.Schedules()
+	if err != nil {
+		m.logf("re-arm schedules: %v", err)
+		return
+	}
+	for _, ref := range refs {
+		kind := ScopeTenant
+		if ref.SubsAccID != "" {
+			kind = ScopeSubscription
+		}
+		m.ArmScheduledBounce(Scope{
+			Kind: kind, TenantID: ref.TenantID, SubsAccID: ref.SubsAccID, AgentKey: ref.AgentKey,
+		}, ref.At)
+	}
+}
+
+func scheduleKey(scope Scope) string {
+	return scope.TenantID + "|" + scope.SubsAccID + "|" + scope.AgentKey
 }
 
 // WriteSecret validates and persists one secret into the per-(user, agent)

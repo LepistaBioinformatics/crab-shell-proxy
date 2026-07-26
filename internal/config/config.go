@@ -637,6 +637,35 @@ func ManagedSkillsDir(root string) string {
 	return filepath.Join(root, "managed-skills")
 }
 
+// RestartRoot is where restart notices and per-workspace restart markers live:
+// <root>/restart. CRITICAL: this is OUTSIDE the tenant tree because the whole
+// UserWorkspace is bind-mounted into the agent container — a marker kept there
+// would be readable and writable by the agent itself.
+func RestartRoot(root string) string {
+	return filepath.Join(root, "restart")
+}
+
+// RestartScopeFile is the notice record for one scope:
+// <root>/restart/scopes/<t>/<s>.json, or <root>/restart/scopes/<t>/_tenant.json
+// when subsAccID is empty. Agent narrowing is a key INSIDE the file (mirroring
+// Scope.AgentKey == "" meaning "all agents"), not another path level.
+func RestartScopeFile(root, tenantID, subsAccID string) string {
+	name := "_tenant.json"
+	if subsAccID != "" {
+		name = identity.SanitizeID(subsAccID) + ".json"
+	}
+	return filepath.Join(RestartRoot(root), "scopes", identity.SanitizeID(tenantID), name)
+}
+
+// RestartWorkspaceFile is one workspace's lastRestartAt marker, under
+// <root>/restart/workspaces/<t>/<s>/<role>/<u>.json. Kept outside the tenant
+// tree for the same reason as RestartRoot.
+func RestartWorkspaceFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(RestartRoot(root), "workspaces",
+		identity.SanitizeID(tenantID), identity.SanitizeID(subsAccID),
+		identity.SanitizeID(role), identity.SanitizeID(userAccID)+".json")
+}
+
 // WorkspaceSeed is the allowlist of agent template workspace files copied into a
 // fresh user workspace on first provision (recursive for directories). CRITICAL:
 // sessions/ (conversation history), logs/, and .picoclaw.pid (runtime state) are
