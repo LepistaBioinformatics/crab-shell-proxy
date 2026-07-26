@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,19 @@ func (m *Manager) ReapplyModelScope(scope Scope) error {
 		return err
 	}
 	for _, key := range keys {
-		if a, err := m.reg.GetAssignment(m.workspaceRef(key)); err == nil && a.Source == registry.SourceExplicit {
+		// "No pin" and "could not read the pin" are different answers. Treating a
+		// read failure as "no pin" would re-materialize and RESTART a workspace
+		// whose deliberate per-user choice this pass is supposed to leave alone, so
+		// an unreadable record skips the workspace instead of overriding it.
+		switch a, err := m.reg.GetAssignment(m.workspaceRef(key)); {
+		case err == nil:
+			if a.Source == registry.SourceExplicit {
+				continue
+			}
+		case errors.Is(err, registry.ErrNotFound):
+			// Never materialized, or no record yet: nothing pinned to protect.
+		default:
+			m.logf("reapply model scope: workspace %+v: read assignment: %v — skipped", key, err)
 			continue
 		}
 		if err := m.reapplyWorkspace(key); err != nil {

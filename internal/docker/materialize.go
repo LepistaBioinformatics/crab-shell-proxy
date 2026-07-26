@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
@@ -18,6 +19,15 @@ import (
 // shipped template is "version": 3. Keys go to .security.yml, which is the only
 // sink that works — the containers receive no key environment variable
 // (manager.go: Env is PICOCLAW_GATEWAY_HOST and HOME only).
+//
+// The write ORDER is load-bearing, and neither of the two obvious orders is
+// fail-closed: writing config.json first names a model whose key is not in
+// .security.yml yet, and pruning .security.yml first strips the OLD model's key
+// while config.json still names it. Both leave an unbootable workspace if the
+// process dies between the two writes. So the sequence is three steps —
+// .security.yml with old ∪ new keys, then config.json, then .security.yml pruned
+// to the new set — and every intermediate state names a model whose key is
+// present.
 func materializeModels(configPath, secPath string, res registry.Resolution) error {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
@@ -43,30 +53,29 @@ func materializeModels(configPath, secPath string, res registry.Resolution) erro
 	}
 	cfg["model_list"] = list
 
-	if agents, ok := cfg["agents"].(map[string]any); ok {
-		if defaults, ok := agents["defaults"].(map[string]any); ok {
-			defaults["provider"] = res.Primary.Provider
-			defaults["model_name"] = res.Primary.ModelName
-			if names := res.ChainNames(); len(names) > 0 {
-				fb := make([]any, 0, len(names))
-				for _, n := range names {
-					fb = append(fb, n)
-				}
-				defaults["model_fallbacks"] = fb
-			} else {
-				// Clear a stale chain rather than leaving one behind: the primary
-				// may have had fallbacks and no longer does.
-				delete(defaults, "model_fallbacks")
-			}
+	// Create the structure rather than skipping the write: an ok-guard with no else
+	// branch produces a workspace with a correct model_list and no active model —
+	// picoclaw then boots with no model at all, silently, which is the failure mode
+	// this whole feature removes. An operator who edited agents.defaults out of a
+	// template gets it back, not a mystery.
+	defaults := childMap(childMap(cfg, "agents"), "defaults")
+	defaults["provider"] = res.Primary.Provider
+	defaults["model_name"] = res.Primary.ModelName
+	if names := res.ChainNames(); len(names) > 0 {
+		fb := make([]any, 0, len(names))
+		for _, n := range names {
+			fb = append(fb, n)
 		}
+		defaults["model_fallbacks"] = fb
+	} else {
+		// Clear a stale chain rather than leaving one behind: the primary
+		// may have had fallbacks and no longer does.
+		delete(defaults, "model_fallbacks")
 	}
 
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
-	}
-	if err := os.WriteFile(configPath, out, 0o600); err != nil {
-		return fmt.Errorf("write config.json: %w", err)
 	}
 
 	sec, err := readSecurityConfig(secPath)
@@ -84,9 +93,19 @@ func materializeModels(configPath, secPath string, res registry.Resolution) erro
 		setModelListEntry(sec, m.ModelName, m.APIKey)
 		keep = append(keep, m.ModelName)
 	}
-	pruneSecurityModelList(sec, keep)
+	// Step 1: old ∪ new keys. sec is read-modify-write, so it already holds the
+	// outgoing model's key alongside the incoming one.
 	if err := writeSecurityConfig(secPath, sec, ""); err != nil {
 		return fmt.Errorf("write .security.yml: %w", err)
+	}
+	// Step 2: config.json, whose named model's key is now present either way.
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		return fmt.Errorf("write config.json: %w", err)
+	}
+	// Step 3: drop the keys no model in the new set needs (FR-17b).
+	pruneSecurityModelList(sec, keep)
+	if err := writeSecurityConfig(secPath, sec, ""); err != nil {
+		return fmt.Errorf("prune .security.yml: %w", err)
 	}
 	return nil
 }
@@ -160,6 +179,13 @@ func (m *Manager) workspaceRef(key WorkspaceKey) registry.WorkspaceRef {
 // at startup when agents.defaults.model_name names a model absent from
 // model_list, so a silent default would produce a permanently unbootable
 // container. Nothing is written on refusal.
+// The native-secret overlay is applied HERE, after materialization, on every path
+// that materializes — not once at first provision. materializeModels rewrites
+// every .security.yml model_list entry and prunes the rest, so an overlay applied
+// before it is overwritten on the very next ensure: a scope admin's own key would
+// take effect once and then silently revert to the inventory's key, which is a
+// credential substitution with billing and isolation consequences (FR-32,
+// CTX-MR-12). Applying it last is what makes the documented precedence true.
 func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error {
 	ref := m.workspaceRef(key)
 	res, err := m.reg.Resolve(ref)
@@ -168,6 +194,9 @@ func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error 
 	}
 	for _, name := range res.Skipped {
 		m.logf("materialize %s: fallback %q is not active, skipped", ref.Key(), name)
+	}
+	for _, level := range res.SkippedLevels {
+		m.logf("materialize %s: cascade level %s names a model the inventory does not have, skipped", ref.Key(), level)
 	}
 
 	configPath := filepath.Join(userDir, "config.json")
@@ -182,6 +211,11 @@ func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error 
 	// scope-default change silently override it.
 	if err := m.reg.RecordMaterialization(ref, res.Primary.ModelName, res.ChainNames()); err != nil {
 		return fmt.Errorf("record assignment: %w", err)
+	}
+
+	effDir := config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	if err := applyNativeSecrets(secPath, effDir, m.cfg.PicoclawUser, m.logf); err != nil {
+		return fmt.Errorf("apply native secrets: %w", err)
 	}
 	return chownTree(userDir, m.cfg.PicoclawUser)
 }

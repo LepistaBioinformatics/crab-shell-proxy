@@ -117,9 +117,8 @@ func TestProvisionFirstSeedsWorkspace(t *testing.T) {
 	mustWrite(t, filepath.Join(tmpl, "workspace", "sessions", "leak.jsonl"), "LEAK")
 
 	userDir := filepath.Join(t.TempDir(), "u")
-	storeDir := t.TempDir()
 	// user "" so chownTree is a no-op (this test does not run as root).
-	tok, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, "e@x", nil)
+	tok, err := provision(userDir, tmpl, "/data", "", WorkspaceKey{}, "e@x")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -150,8 +149,7 @@ func TestProvisionReturningUserNotReseeded(t *testing.T) {
 		"channel_list:\n  pico:\n    settings:\n      token: tmpltok\n")
 	mustWrite(t, filepath.Join(tmpl, "workspace", "AGENT.md"), "TEMPLATE-DEFAULT")
 
-	storeDir := t.TempDir()
-	if _, err := provision(userDir, tmpl, storeDir, "/data", "", WorkspaceKey{}, "", nil); err != nil {
+	if _, err := provision(userDir, tmpl, "/data", "", WorkspaceKey{}, ""); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "AGENT.md"))

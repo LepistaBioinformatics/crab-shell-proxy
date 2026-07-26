@@ -191,18 +191,19 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	if agent.Harness == config.HarnessHermes {
 		authToken, err = provisionHermes(userDir, templateDir, m.cfg.PicoclawUser, model)
 	} else {
-		// Materialize the effective secret view BEFORE provisioning: provision
-		// merges the native overlay from it, and native slots now arrive from the
-		// admin cascade, not only from the user's own store.
-		effDir, syncErr := m.syncEffectiveSecrets(key)
-		if syncErr != nil {
+		// Materialize the effective secret view BEFORE provisioning: it is the
+		// bind-mount source, and resolveAndMaterialize reads the native overlay
+		// out of it — native slots now arrive from the admin cascade, not only
+		// from the user's own store.
+		if _, syncErr := m.syncEffectiveSecrets(key); syncErr != nil {
 			return Target{}, syncErr
 		}
-		authToken, err = provision(userDir, templateDir, effDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail, m.logf)
+		authToken, err = provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
 		if err == nil {
 			// Materialize AFTER seeding, so the template's (now empty) model_list
-			// is replaced by the inventory's answer. A workspace with no
-			// resolvable model fails here, before any container exists.
+			// is replaced by the inventory's answer, and the native overlay lands
+			// on top of THAT. A workspace with no resolvable model fails here,
+			// before any container exists.
 			err = m.resolveAndMaterialize(key, userDir)
 		}
 	}

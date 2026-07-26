@@ -214,3 +214,77 @@ func TestMaterializeCarriesOptionalFieldsOnlyWhenSet(t *testing.T) {
 		}
 	}
 }
+
+// TestMaterializeLeavesEveryIntermediateStateBootable pins the write ORDER down.
+// Neither obvious order is fail-closed: config.json first names a model whose key
+// is not in .security.yml yet, and pruning .security.yml first strips the OLD
+// model's key while config.json still names it. So the sequence writes old ∪ new
+// keys, then config.json, then prunes — and a failure at the config.json write
+// must leave the workspace running its OLD model with its key still present.
+//
+// Skipped as root (the Docker gate), where file mode does not gate the owner's
+// own write — the same environment caveat
+// TestMigrateLogsAnUnreadableWorkspaceConfigInsteadOfSkippingSilently carries.
+func TestMaterializeLeavesEveryIntermediateStateBootable(t *testing.T) {
+	_, configPath, secPath := seedWorkspaceFiles(t)
+	if err := os.Chmod(configPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0o600) })
+	if f, err := os.OpenFile(configPath, os.O_WRONLY, 0); err == nil {
+		_ = f.Close()
+		t.Skip("chmod 444 does not block this uid's write (running as root); the order is unobservable here")
+	}
+
+	err := materializeModels(configPath, secPath, testResolution())
+	if err == nil {
+		t.Fatal("materializeModels succeeded despite an unwritable config.json")
+	}
+
+	sec, rerr := readSecurityConfig(secPath)
+	if rerr != nil {
+		t.Fatalf("readSecurityConfig: %v", rerr)
+	}
+	ml, ok := sec["model_list"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_list = %#v", sec["model_list"])
+	}
+	// The old model config.json still names must keep its key: pruning it here is
+	// exactly as unbootable as naming a model with no key.
+	if _, present := ml["retired-model"]; !present {
+		t.Errorf("the outgoing model's key was pruned before config.json stopped naming it: %#v", ml)
+	}
+	// And the incoming one's key is already there, so the retried write completes a
+	// state that was never inconsistent.
+	if _, present := ml["main"]; !present {
+		t.Errorf("the incoming model's key was not written before config.json: %#v", ml)
+	}
+}
+
+// TestMaterializeCreatesAMissingAgentsDefaults covers the same ok-guard on the
+// workspace side, where the consequence is worse: a correct model_list and NO
+// active model, silently — picoclaw then boots with no model, which is the failure
+// mode this feature exists to remove.
+func TestMaterializeCreatesAMissingAgentsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	secPath := filepath.Join(dir, ".security.yml")
+	if err := os.WriteFile(configPath, []byte(`{"version":3,"model_list":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secPath, []byte("channel_list:\n  pico:\n    settings:\n      token: t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := materializeModels(configPath, secPath, testResolution()); err != nil {
+		t.Fatalf("materializeModels: %v", err)
+	}
+
+	defaults, ok := readConfig(t, configPath)["agents"].(map[string]any)["defaults"].(map[string]any)
+	if !ok {
+		t.Fatal("agents.defaults was not created")
+	}
+	if defaults["model_name"] != "main" || defaults["provider"] != "openai" {
+		t.Errorf("defaults = %#v, want the resolved primary", defaults)
+	}
+}

@@ -29,13 +29,13 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // home is the in-container HOME the spawned picoclaw will use; the config's
 // workspace path is aligned to <home>/.picoclaw/workspace so it matches the
 // mount point. user ("uid:gid", may be empty) is the non-root owner the data
-// dir is chowned to so a non-root container can write it. secretsDir is the
-// EFFECTIVE secret view (the merged user + shared cascade), which is where the
-// native overlay to merge into .security.yml is read from.
-// provision seeds a workspace from templateDir. The MODEL is not a parameter:
-// the caller materializes it from the inventory after seeding, because that is
-// the only place a model may come from.
-func provision(userDir, templateDir, secretsDir, home, user string, key WorkspaceKey, ownerEmail string, logf func(string, ...any)) (picoToken string, err error) {
+// dir is chowned to so a non-root container can write it.
+// provision seeds a workspace from templateDir. Neither the MODEL nor the native
+// secret overlay is a parameter: the caller materializes the model from the
+// inventory after seeding and applies the overlay after THAT, because
+// materialization rewrites .security.yml's whole model_list and would otherwise
+// overwrite the overlay it is supposed to sit under (see resolveAndMaterialize).
+func provision(userDir, templateDir, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -76,15 +76,6 @@ func provision(userDir, templateDir, secretsDir, home, user string, key Workspac
 		if err := chownTree(userDir, user); err != nil {
 			return "", fmt.Errorf("chown data dir to %q: %w", user, err)
 		}
-	}
-	// Merge the EFFECTIVE native overlay into this workspace's .security.yml on
-	// EVERY ensure (not just first provision), so a brand-new workspace of an
-	// existing pair — e.g. a second subscription — picks up the already-stored
-	// secrets (AC-04/AC-05, CTX-AC-03), and so an admin's scope-level native
-	// secret reaches a user who has never chatted (native-secrets-admin-only
-	// NFR-3). No-op when none are set.
-	if err := applyNativeSecrets(secPath, secretsDir, user, logf); err != nil {
-		return "", fmt.Errorf("apply native secrets: %w", err)
 	}
 	tok, err := readPicoToken(secPath)
 	if err != nil {

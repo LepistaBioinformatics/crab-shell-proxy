@@ -62,13 +62,13 @@ func normalizeTemplateFile(path string) error {
 	}
 
 	cfg["model_list"] = []any{}
-	if agents, ok := cfg["agents"].(map[string]any); ok {
-		if defaults, ok := agents["defaults"].(map[string]any); ok {
-			defaults["provider"] = ""
-			defaults["model_name"] = ""
-			delete(defaults, "model_fallbacks")
-		}
-	}
+	// Create the structure when a hand-edited template lacks it, rather than
+	// silently leaving the file half-normalized: the normalized shape IS an empty
+	// agents.defaults model, so writing it is both the fix and the goal.
+	defaults := childMap(childMap(cfg, "agents"), "defaults")
+	defaults["provider"] = ""
+	defaults["model_name"] = ""
+	delete(defaults, "model_fallbacks")
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

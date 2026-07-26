@@ -183,3 +183,34 @@ func TestCheckModelDriftDoesNotModifyAnything(t *testing.T) {
 		t.Error("drift check rewrote the assignment")
 	}
 }
+
+// TestNormalizeTemplateFileCreatesAMissingAgentsDefaults covers the ok-guard with
+// no else branch: a template an operator edited down to no agents.defaults used to
+// leave that structure absent, so the normalized shape was never actually written.
+func TestNormalizeTemplateFileCreatesAMissingAgentsDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"version":3,"model_list":[{"model_name":"x"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := normalizeTemplateFile(path); err != nil {
+		t.Fatalf("normalizeTemplateFile: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	agents, ok := cfg["agents"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents = %#v, want it created", cfg["agents"])
+	}
+	defaults, ok := agents["defaults"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents.defaults = %#v, want it created", agents["defaults"])
+	}
+	if defaults["provider"] != "" || defaults["model_name"] != "" {
+		t.Errorf("defaults = %#v, want the normalized empty shape", defaults)
+	}
+}

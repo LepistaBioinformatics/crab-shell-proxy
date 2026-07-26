@@ -36,7 +36,7 @@ func TestProvisionSelfHealsMissingTemplate(t *testing.T) {
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provision(userDir, templateDir, "", "/data", "", WorkspaceKey{}, "x@y", nil); err != nil {
+	if _, err := provision(userDir, templateDir, "/data", "", WorkspaceKey{}, "x@y"); err != nil {
 		t.Fatalf("provision should self-heal, got: %v", err)
 	}
 	// The fallback template was materialized...
