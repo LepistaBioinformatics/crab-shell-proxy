@@ -118,19 +118,28 @@ Every admin action that currently forces a bounce accepts a `restart` policy:
   behaviour.
 - **FR-4.3** The affected call sites, all of which must become policy-driven:
 
-  | # | Site | Current call | Reason stamped |
+  | # | Site | Was | Reason stamped |
   | --- | --- | --- | --- |
   | 1 | `handleAdminSharedSecretsPost` | `RestartScope` | `shared-secret` |
   | 2 | `handleAdminSharedSecretsDelete` | `RestartScope` | `shared-secret` |
   | 3 | `handleAdminSkillsPost` | `RestartScope` | `shared-skills` |
   | 4 | `handleAdminSkillsDelete` | `RestartScope` | `shared-skills` |
-  | 5 | `handleAdminRegisteredModelApply` | model reapply | `model` |
-  | 6 | `Manager.ReapplyModelScope` (admin model default/assignment) | `RestartWorkspace` per key | `model` |
-  | 7 | `Manager.ReapplyModelForModel` (registry edit) | `RestartWorkspace` per key | `model` |
+  | 5 | `handleAdminModelUpdate` → `ReapplyModelForModel` | `RestartWorkspace` per key | `model` |
+  | 6 | `reapplyForScope` → `ReapplyModelScope` (model default set/clear) | `RestartWorkspace` per key | `model` |
+  | 7 | `handleAdminModelAssignmentSet` / `…Clear` → `ReapplyModelUser` | `RestartWorkspace` | `model` |
 
-  The exact set is re-verified during implementation; the spec's claim is that
-  *every* inline forced restart becomes policy-driven, not that this table is
-  frozen.
+  **Verified during implementation.** An earlier draft of this table named
+  `handleAdminRegisteredModelApply` as site 5; that handler does not exist on
+  this branch — it belongs to the pre-model-registry code on `main` and was
+  replaced by the registry endpoints above. The gate is the grep, not the table:
+  `grep -n 'RestartScope\|RestartWorkspace\|BounceScope\|PropagateScope'
+  internal/httpapi internal/docker` must leave only the policy helper, the
+  member self-restart, the scheduler, and `BounceScope`'s own internals.
+
+  The unconditional `Manager.RestartScope` was **removed** rather than kept as a
+  composition: with every caller migrated it had none left, and leaving it on the
+  `Orchestrator` interface would be a standing invitation for a future handler to
+  bypass the policy silently.
 
 - **FR-4.4** A member's own secret write/delete (`POST`/`DELETE /v1/secrets`,
   sites in `handlers.go`) stops force-restarting and instead raises a
@@ -219,7 +228,7 @@ Every admin action that currently forces a bounce accepts a `restart` policy:
 | FR-3.4 | Unit: `RestartWorkspace` advances the marker and clears pending |
 | FR-4.1 | Unit: `notice` policy still rebuilds the effective secret view |
 | FR-4.2 | Unit: omitted `restart` behaves identically to today |
-| FR-4.3 | Grep gate: no unconditional `RestartScope`/`RestartWorkspace` left at an admin mutation site |
+| FR-4.3 | Grep gate (run): no unconditional restart left at an admin mutation site; `RestartScope` removed outright |
 | FR-5.4 | Unit: subscriptions-manager on another subscription → 403 |
 | FR-5.5 | Unit: past `at` and `at > 7d` → 400 |
 | FR-6.2 | Unit: `Reconcile` re-arms a persisted future schedule; elapsed one fires |

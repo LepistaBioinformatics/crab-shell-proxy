@@ -370,24 +370,6 @@ func (m *Manager) DeleteUserFile(key WorkspaceKey, name string) error {
 	return m.DeleteMedia(key, name)
 }
 
-// RestartScope is the best-effort propagation of a shared-content write/delete
-// (NFR-4): it puts the change on disk and restarts the running containers under
-// the affected scope so a changed shared file (live RO mount) is re-read and a
-// changed shared secret takes effect. Idled/absent containers pick up the change
-// on their next cold start regardless. Per-container failures are logged, not
-// returned — the write already succeeded.
-//
-// It is now PropagateScope + BounceScope, kept as one call so every existing
-// caller keeps its exact meaning. New callers that need to defer the bounce
-// (restart-control FR-4) use the two halves directly: propagation must never be
-// deferred — only the container stop/start is subject to the restart policy.
-func (m *Manager) RestartScope(scope Scope) error {
-	if err := m.PropagateScope(scope); err != nil {
-		return err
-	}
-	return m.BounceScope(scope)
-}
-
 // PropagateScope puts the change on disk for EVERY workspace in scope, running
 // or not: it rebuilds the effective secret view (bind-mounted read-only at
 // workspace/.secrets) and merges the native slots into each established

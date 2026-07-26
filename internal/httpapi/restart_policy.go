@@ -80,22 +80,27 @@ func (s *Server) applyRestartPolicy(
 	}
 }
 
-// applyRestartPolicyFromRequest is the form every migrated content-write site
-// uses: read the policy off the query string, then apply it. A malformed policy
-// is a 400 — the write has already happened, but telling the caller their
-// restart instruction was ignored is better than silently defaulting it.
-func (s *Server) applyRestartPolicyFromRequest(
-	w http.ResponseWriter, r *http.Request, scope docker.Scope, reason restart.Reason, by string,
-) bool {
+// parseRestartPolicy validates the policy BEFORE the mutation runs. Validating
+// it afterwards would 400 a write that already succeeded, telling the caller
+// their request failed when only the restart instruction was unusable.
+func (s *Server) parseRestartPolicy(w http.ResponseWriter, r *http.Request) (RestartPolicy, bool) {
 	p, err := restartPolicyFrom(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
-		return false
+		return RestartPolicy{}, false
 	}
+	return p, true
+}
+
+// applyParsedRestartPolicy runs after the mutation. A failure is logged, not
+// returned: the write already succeeded, and propagation/bounce is best-effort
+// exactly as the pre-policy code was.
+func (s *Server) applyParsedRestartPolicy(
+	scope docker.Scope, reason restart.Reason, p RestartPolicy, by string,
+) {
 	if err := s.applyRestartPolicy(scope, reason, p, by); err != nil {
 		s.logf("restart policy %q on scope=%+v failed: %v", p.Mode, scope, err)
 	}
-	return true
 }
 
 // bounceNow reads the restart policy off a request and reduces it to the single

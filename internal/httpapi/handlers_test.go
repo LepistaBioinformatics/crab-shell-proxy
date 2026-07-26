@@ -54,7 +54,6 @@ type fakeOrch struct {
 	sharedDeletes   []docker.Scope
 	nativeUnsets    []string
 	userFileDeletes []docker.WorkspaceKey
-	restartScopes   []docker.Scope
 
 	// model re-apply fakes: record calls, return canned results.
 	reapplyScopes    []docker.Scope
@@ -86,13 +85,6 @@ type secretWrite struct {
 }
 
 func newFakeOrch() *fakeOrch { return &fakeOrch{scaffolded: map[string]bool{}} }
-
-// newFakeOrchWithRestarts is newFakeOrch plus a handle on the notice store, for
-// the tests that seed or inspect it directly.
-func newFakeOrchWithRestarts(t *testing.T) *fakeOrch {
-	t.Helper()
-	return newFakeOrch()
-}
 
 // restarts_ is a REAL notice store over a per-fake temp dir, so the derived
 // pending/not-pending rules are exercised rather than faked. It must never fall
@@ -273,11 +265,6 @@ func (f *fakeOrch) ListUserFiles(docker.WorkspaceKey) ([]docker.FileMeta, error)
 
 func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _ string) error {
 	f.userFileDeletes = append(f.userFileDeletes, key)
-	return nil
-}
-
-func (f *fakeOrch) RestartScope(scope docker.Scope) error {
-	f.restartScopes = append(f.restartScopes, scope)
 	return nil
 }
 

@@ -36,7 +36,7 @@ func decodeBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 // query naming someone else must be ignored, not honoured — this is the endpoint
 // where getting it wrong lets any member restart anyone's container.
 func TestSelfRestartIgnoresACallerSuppliedUserID(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	s := testServer(orch, &fakeTurner{})
 
 	w := httptest.NewRecorder()
@@ -56,7 +56,7 @@ func TestSelfRestartIgnoresACallerSuppliedUserID(t *testing.T) {
 // FR-1.3: the member is waiting on the answer, so a Docker failure surfaces
 // rather than being swallowed the way the best-effort scope paths do.
 func TestSelfRestartSurfacesDockerFailure(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	orch.restartErr = errors.New("daemon unreachable")
 	s := testServer(orch, &fakeTurner{})
 
@@ -73,7 +73,7 @@ func TestSelfRestartSurfacesDockerFailure(t *testing.T) {
 // FR-1.4: a stopped container reports "noop" — nothing was bounced, but the
 // notice is resolved because the next cold start begins from the new state.
 func TestSelfRestartReportsNoopWhenNotRunning(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	orch.statusRunning = false
 	s := testServer(orch, &fakeTurner{})
 
@@ -90,7 +90,7 @@ func TestSelfRestartReportsNoopWhenNotRunning(t *testing.T) {
 // FR-2.1 + FR-3.3: the status endpoint reports a live scope notice, and the
 // member's own restart clears it.
 func TestRestartStatusReportsAndClearsPending(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	orch.statusRunning = true
 	s := testServer(orch, &fakeTurner{})
 
@@ -129,7 +129,7 @@ func TestRestartStatusReportsAndClearsPending(t *testing.T) {
 // bounce. The gateway gates the route too, but the check lives here as well so
 // it holds regardless of how the route is declared.
 func TestReadOnlyMemberSeesStatusButCannotRestart(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	s := testServer(orch, &fakeTurner{})
 	readOnly := headersFor(t, licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true))
 
@@ -216,7 +216,7 @@ func TestAdminRestartRejectsBadSchedule(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			orch := newFakeOrchWithRestarts(t)
+			orch := newFakeOrch()
 			s := testServer(orch, &fakeTurner{})
 			body := `{"tenant_id":"` + tenantT + `","mode":"schedule","at":"` + tc.at + `"}`
 			r := httptest.NewRequest(http.MethodPost, "/v1/admin/restart", strings.NewReader(body))
@@ -237,7 +237,7 @@ func TestAdminRestartRejectsBadSchedule(t *testing.T) {
 
 // A valid schedule raises the notice and arms the timer.
 func TestAdminRestartSchedules(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	s := testServer(orch, &fakeTurner{})
 
 	at := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
@@ -285,7 +285,7 @@ func TestAdminRestartAuthority(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			orch := newFakeOrchWithRestarts(t)
+			orch := newFakeOrch()
 			s := testServer(orch, &fakeTurner{})
 			r := httptest.NewRequest(http.MethodPost, "/v1/admin/restart", strings.NewReader(tc.body))
 			for k, v := range headersFor(t, tc.profile) {
@@ -302,7 +302,7 @@ func TestAdminRestartAuthority(t *testing.T) {
 
 // FR-5.3: withdrawing removes the notice so members stop being told to restart.
 func TestAdminRestartWithdraw(t *testing.T) {
-	orch := newFakeOrchWithRestarts(t)
+	orch := newFakeOrch()
 	s := testServer(orch, &fakeTurner{})
 	if err := orch.restarts_().Raise(tenantT, subsX, "",
 		restart.Notice{NoticeAt: time.Now().UTC(), Reason: restart.ReasonAdminRequest}); err != nil {

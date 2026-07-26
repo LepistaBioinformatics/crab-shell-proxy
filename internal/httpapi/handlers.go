@@ -112,8 +112,6 @@ type Orchestrator interface {
 	ListUserFiles(key docker.WorkspaceKey) ([]docker.FileMeta, error)
 	// DeleteUserFile removes one of a user's private files (never reads it — FR-7).
 	DeleteUserFile(key docker.WorkspaceKey, name string) error
-	// RestartScope best-effort recreates running containers under a scope (NFR-4).
-	RestartScope(scope docker.Scope) error
 
 	// --- model re-apply (internal/registry is the resolver; no keys transit here) ---
 

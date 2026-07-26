@@ -248,9 +248,9 @@ func TestSharedWriteTriggersRestartScope(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 		}
-		if len(orch.sharedWrites) != 1 || len(orch.restartScopes) != 0 {
-			t.Errorf("writes=%d restarts=%d, want 1/0 (files are live via RO mount)",
-				len(orch.sharedWrites), len(orch.restartScopes))
+		if len(orch.sharedWrites) != 1 || len(orch.bouncedScopes) != 0 {
+			t.Errorf("writes=%d bounces=%d, want 1/0 (files are live via RO mount)",
+				len(orch.sharedWrites), len(orch.bouncedScopes))
 		}
 	})
 
@@ -309,8 +309,8 @@ func TestAdminWriteForbiddenNoMutation(t *testing.T) {
 		if w.Code != http.StatusForbidden {
 			t.Errorf("status = %d, want 403", w.Code)
 		}
-		if len(orch.sharedWrites) != 0 || len(orch.restartScopes) != 0 {
-			t.Errorf("mutation ran despite 403: writes=%d restarts=%d", len(orch.sharedWrites), len(orch.restartScopes))
+		if len(orch.sharedWrites) != 0 || len(orch.bouncedScopes) != 0 {
+			t.Errorf("mutation ran despite 403: writes=%d bounces=%d", len(orch.sharedWrites), len(orch.bouncedScopes))
 		}
 	})
 	// Shared-secret write + delete at tenant scope by a subs-manager -> 403.
