@@ -30,13 +30,15 @@ The only code that knows the storage shape. Everything else calls it.
   `→ disabled` both blocked while referenced by any assignment (as primary or
   chain member), scope default, another model's `replaced_by`, or another model's
   `fallbacks`, with the referrers named; `→ deprecated` requires a `replaced_by`
-  naming an existing `active` model; acyclic deprecation chains; every
+  naming an existing model that is not `disabled` (a deprecated one is a valid chain
+  link — resolution hops onward from it); acyclic deprecation chains; every
   `fallbacks` name exists and no model lists itself; stale `version` rejected.
 - **`Assignment` records the primary *and* the materialized `chain`.** Without the
   chain, editing a model's key would reach only the workspaces where it is primary,
   leaving every workspace that has it as a fallback on a revoked credential.
-- **`APIKey` is `json:"-"`** on the wire type — leaking a key must require adding
-  code, not forgetting it.
+- **`PublicModel` has no key field at all** (`internal/registry/public.go`); the stored
+  `Model.APIKey` is tagged for persistence. Leaking a key must require ADDING a field,
+  not forgetting to strip one.
 
 ## Changes to existing code
 
