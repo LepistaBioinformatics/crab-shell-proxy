@@ -63,10 +63,26 @@ func main() {
 		Reg:      reg,
 	}
 
-	// Reconcile (adopt running containers, re-arm timers, start continuous ones)
-	// runs in the background so /healthz is responsive immediately — a long
-	// continuous-ensure over many user dirs must not delay readiness (the
-	// compose healthcheck and mycelium's dependency gate both poll /healthz).
+	// The model-inventory migration runs SYNCHRONOUSLY, before the server listens.
+	// It is the only thing here that a request can race: a chat arriving while the
+	// inventory is still empty resolves no model and fails, and on first boot after
+	// upgrade that is every chat. It is bounded work (reads the data root once), so
+	// it delays readiness by a little; the container work below is what could take
+	// minutes and stays in the background.
+	//
+	// A failure is fatal on purpose: serving with a half-seeded inventory means
+	// refusing or silently re-resolving workspaces, which is worse than not coming
+	// up. The pass withholds its schema marker on any capture failure, so a restart
+	// retries the whole thing.
+	if err := mgr.MigrateModels(); err != nil {
+		logger.Fatalf("migrate model registry: %v", err)
+	}
+
+	// Reconcile (drift check, adopt running containers, re-arm timers, start
+	// continuous ones) runs in the background so /healthz is responsive
+	// immediately — a long continuous-ensure over many user dirs must not delay
+	// readiness (the compose healthcheck and mycelium's dependency gate both poll
+	// /healthz).
 	go func() {
 		reconcileCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()

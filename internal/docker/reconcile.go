@@ -2,7 +2,6 @@ package docker
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,23 +10,21 @@ import (
 )
 
 // Reconcile brings the manager's in-memory state in line with reality at boot:
-//   - seeds the model inventory from every pre-existing source and normalizes
-//     disk templates, on first boot after upgrade (migrateModelRegistry),
 //   - logs any mismatch between a workspace's recorded model assignment and
 //     what it is actually running (checkModelDrift),
 //   - adopts already-running managed containers (re-arming scale-to-zero timers),
 //   - ensures continuous-mode containers are started (CSP-08/09/10).
 //
+// It does NOT run the model-inventory migration. That has to complete before the
+// HTTP server accepts a single request — a chat arriving against an empty
+// inventory resolves nothing and fails — whereas everything here is container
+// work that may take minutes and must not hold /healthz. So main calls
+// MigrateModels synchronously first and Reconcile in the background after.
+//
 // Continuous startup can only materialize containers whose per-user data dir
 // already exists (a brand-new continuous user still needs one API call to first
 // create the dir — documented limitation R3).
 func (m *Manager) Reconcile(ctx context.Context) error {
-	// The inventory must be seeded before anything resolves a model, and a
-	// migration failure must stop the boot: continuing would provision workspaces
-	// against an empty inventory and refuse every one of them.
-	if err := m.migrateModelRegistry(); err != nil {
-		return fmt.Errorf("migrate model registry: %w", err)
-	}
 	m.checkModelDrift()
 
 	summaries, err := m.docker.List(ctx, LabelManaged+"=true")
