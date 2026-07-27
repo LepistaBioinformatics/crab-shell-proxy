@@ -464,15 +464,33 @@ func writeJSONMap(path string, m map[string]string) error {
 
 // --- file sink ---
 
+// The one sink in this package where a request-supplied value becomes a path
+// segment instead of a literal filename, so it is the one that joins through
+// containedJoin. validateSecretName has already run at the entry point; this is
+// the check at the point of use, which is what a new caller cannot skip.
 func writeFileSecret(dir, name, value string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	path, err := containedJoin(dir, name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600)
+	return os.WriteFile(path, []byte(value), 0o600)
 }
 
 func deleteFileSecret(dir, name string) error {
-	if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	path, err := containedJoin(dir, name)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
