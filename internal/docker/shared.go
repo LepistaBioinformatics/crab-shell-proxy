@@ -120,18 +120,28 @@ func (m *Manager) sharedFilesDir(scope Scope) string {
 	}
 }
 
-func (m *Manager) sharedSecretsDir(scope Scope) string {
+// sharedSecretsDir resolves a scope to its shared-secret store, and refuses one
+// that has landed outside the data root.
+//
+// Unlike the per-user store, every component here — tenant, subscription, agent
+// key — arrives in the request body. They are reduced to single safe segments by
+// identity.SanitizeID and, for the agent, checked against m.cfg.Agents before a
+// write; the containment check is what makes that true AT THE POINT OF USE
+// rather than in whichever caller remembered to do it.
+func (m *Manager) sharedSecretsDir(scope Scope) (string, error) {
 	root := m.cfg.ContainerDataRoot
+	var dir string
 	switch {
 	case scope.Kind == ScopeTenant && scope.AgentKey == "":
-		return config.TenantSharedSecretsDir(root, scope.TenantID)
+		dir = config.TenantSharedSecretsDir(root, scope.TenantID)
 	case scope.Kind == ScopeTenant:
-		return config.TenantAgentSharedSecretsDir(root, scope.TenantID, scope.AgentKey)
+		dir = config.TenantAgentSharedSecretsDir(root, scope.TenantID, scope.AgentKey)
 	case scope.AgentKey == "":
-		return config.SubscriptionSharedSecretsDir(root, scope.TenantID, scope.SubsAccID)
+		dir = config.SubscriptionSharedSecretsDir(root, scope.TenantID, scope.SubsAccID)
 	default:
-		return config.SubscriptionAgentSharedSecretsDir(root, scope.TenantID, scope.SubsAccID, scope.AgentKey)
+		dir = config.SubscriptionAgentSharedSecretsDir(root, scope.TenantID, scope.SubsAccID, scope.AgentKey)
 	}
+	return underRoot(root, dir)
 }
 
 // ListSharedFiles returns the metadata of the files stored at a scope (never
@@ -216,7 +226,10 @@ func (m *Manager) WriteSharedSecret(scope Scope, format, name, value string) err
 	if err := m.checkSharedSecretFormat(scope, format, name); err != nil {
 		return err
 	}
-	dir := m.sharedSecretsDir(scope)
+	dir, err := m.sharedSecretsDir(scope)
+	if err != nil {
+		return err
+	}
 	if err := writeSecret(m.reg, dir, m.scopeSecurityTemplate(scope), format, name, value); err != nil {
 		return err
 	}
@@ -270,7 +283,11 @@ func (m *Manager) scopeSecurityTemplate(scope Scope) string {
 // ListSharedSecrets returns the names of a scope's shared secrets per format,
 // never a value (write-only API).
 func (m *Manager) ListSharedSecrets(scope Scope) (SecretNames, error) {
-	return listSecretNames(m.sharedSecretsDir(scope))
+	dir, err := m.sharedSecretsDir(scope)
+	if err != nil {
+		return SecretNames{}, err
+	}
+	return listSecretNames(dir)
 }
 
 // DeleteSharedSecret removes one shared secret from a scope. The empty secPath
@@ -281,7 +298,10 @@ func (m *Manager) DeleteSharedSecret(scope Scope, format, name string) error {
 	if err := m.checkSharedSecretFormat(scope, format, name); err != nil {
 		return err
 	}
-	dir := m.sharedSecretsDir(scope)
+	dir, err := m.sharedSecretsDir(scope)
+	if err != nil {
+		return err
+	}
 	if err := deleteSecret(dir, "", "", format, name); err != nil {
 		return err
 	}

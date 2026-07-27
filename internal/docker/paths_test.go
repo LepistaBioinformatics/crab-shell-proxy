@@ -11,15 +11,14 @@ import (
 // why the tests are here: they pin the LAST line of defence, the one a new entry
 // point cannot skip, and they fail if someone loosens it.
 
-func TestUnderRootAcceptsTheRootAndWhatIsBeneathIt(t *testing.T) {
+func TestUnderRootAcceptsWhatIsBeneathIt(t *testing.T) {
 	root := filepath.Join("/data", "crab")
 	for _, ok := range []string{
-		root,
 		filepath.Join(root, "user-secrets"),
 		filepath.Join(root, "user-secrets", "acc", "alpha", ".env"),
 		filepath.Join(root, "a", "..", "b"), // resolves inside; Clean must be applied
 	} {
-		if err := underRoot(root, ok); err != nil {
+		if _, err := underRoot(root, ok); err != nil {
 			t.Errorf("underRoot(%q) = %v, want nil", ok, err)
 		}
 	}
@@ -28,6 +27,10 @@ func TestUnderRootAcceptsTheRootAndWhatIsBeneathIt(t *testing.T) {
 func TestUnderRootRejectsEscapesAndLookalikeSiblings(t *testing.T) {
 	root := filepath.Join("/data", "crab")
 	for _, bad := range []string{
+		// The root itself: strictly beneath, so not accepted. Every caller builds
+		// root/<segments>, and keeping the condition a single HasPrefix is what
+		// CodeQL recognises as a barrier — see the note on underRoot.
+		root,
 		filepath.Join(root, ".."),
 		filepath.Join(root, "..", "etc", "passwd"),
 		filepath.Join(root, "user-secrets", "..", "..", "etc"),
@@ -36,7 +39,7 @@ func TestUnderRootRejectsEscapesAndLookalikeSiblings(t *testing.T) {
 		// this sibling shares the root's spelling and is NOT inside it.
 		"/data/crab-evil/secrets",
 	} {
-		if err := underRoot(root, bad); err == nil {
+		if _, err := underRoot(root, bad); err == nil {
 			t.Errorf("underRoot(%q) = nil, want an error", bad)
 		} else if !errors.Is(err, ErrInvalidSecretName) {
 			t.Errorf("underRoot(%q) error = %v, want ErrInvalidSecretName", bad, err)

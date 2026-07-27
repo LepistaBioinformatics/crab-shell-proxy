@@ -639,11 +639,8 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 // putting it in ONE builder rather than at each of the four call sites: the
 // check now costs nothing to keep and cannot be forgotten by the fifth.
 func (m *Manager) storeDirFor(key WorkspaceKey) (string, error) {
-	dir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
-	if err := underRoot(m.cfg.ContainerDataRoot, dir); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return underRoot(m.cfg.ContainerDataRoot,
+		config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role))
 }
 
 // ListSecrets returns the set secret names per format for the caller's store,
