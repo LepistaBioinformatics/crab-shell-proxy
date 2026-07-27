@@ -38,8 +38,58 @@ func (s *Server) handleRestartStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	writeJSON(w, http.StatusOK, restartStatusResponse{
+		RestartStatus: st,
+		CanRestart:    s.callerMayRestart(r, key),
+	})
 }
+
+// restartStatusResponse is the status plus whether THIS caller may act on it.
+// Without it a read-only member is shown a button that answers 403 — the UI
+// cannot infer the answer, because holding read on an agent says nothing about
+// holding write (restart-control FR-7.6).
+type restartStatusResponse struct {
+	docker.RestartStatus
+	CanRestart bool `json:"canRestart"`
+}
+
+// callerMayRestart runs POST /v1/restart's authorization as a question rather
+// than a gate: same profile chain, no response written. Keeping it beside
+// authorizeSecret is deliberate — if one changes, the other has to, or the
+// button and the endpoint disagree.
+func (s *Server) callerMayRestart(r *http.Request, key docker.WorkspaceKey) bool {
+	agent, ident, ok := s.resolveSecretCaller(discardWriter{}, r)
+	if !ok {
+		return false
+	}
+	tenantID, err := uuid.Parse(key.TenantID)
+	if err != nil {
+		return false
+	}
+	subsAccID, err := uuid.Parse(key.SubsAccID)
+	if err != nil {
+		return false
+	}
+	if ident.Profile.AccID == subsAccID {
+		return false
+	}
+	_, err = ident.Profile.
+		WithWriteAccess().
+		OnTenant(tenantID).
+		WithRoles([]string{agent.Key}).
+		OnAccount(subsAccID).
+		GetRelatedAccountOrError()
+	return err == nil
+}
+
+// discardWriter swallows the error response the resolve helpers write. The
+// caller has already been authorized for READ by the time this runs, so any
+// failure here is simply "no", not something to report twice.
+type discardWriter struct{}
+
+func (discardWriter) Header() http.Header         { return http.Header{} }
+func (discardWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (discardWriter) WriteHeader(int)             {}
 
 // handleRestartPost restarts the caller's OWN container.
 //

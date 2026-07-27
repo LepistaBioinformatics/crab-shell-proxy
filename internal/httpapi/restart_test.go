@@ -319,3 +319,33 @@ func TestAdminRestartWithdraw(t *testing.T) {
 		t.Error("notice survived the withdrawal")
 	}
 }
+
+// FR-7.6: the status tells the caller whether the button should be there at all.
+// A read-only member must see the notice; showing them a button that answers 403
+// is the failure this field exists to prevent, and the UI cannot infer the answer
+// (holding read on an agent says nothing about holding write).
+func TestRestartStatusReportsWhetherTheCallerMayRestart(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile string
+		want    bool
+	}{
+		{"write member", licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true), true},
+		{"read-only member", licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orch := newFakeOrch()
+			s := testServer(orch, &fakeTurner{})
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, restartReq(t, http.MethodGet,
+				"/v1/restart?"+selfQuery, headersFor(t, tc.profile)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+			}
+			if got := decodeBody(t, w)["canRestart"]; got != tc.want {
+				t.Fatalf("canRestart = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
