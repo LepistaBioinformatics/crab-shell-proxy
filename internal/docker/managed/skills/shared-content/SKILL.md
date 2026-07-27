@@ -15,7 +15,13 @@ edited — any change you make is discarded on restart.
 Cascaded from the levels above you, most-specific last:
 
 - `workspace/.shared/tenant/` — files shared with every workspace in the tenant.
+- `workspace/.shared/tenant-agent/` — tenant files meant for your agent only.
 - `workspace/.shared/subscription/` — files shared with your subscription.
+- `workspace/.shared/subscription-agent/` — subscription files meant for your
+  agent only.
+
+The two `-agent` dirs may be empty: they hold content a manager published for
+your agent specifically, rather than for every agent in the scope.
 
 They are mounted **read-only**: read them like any workspace file (open, read,
 reference by path). You cannot modify, rename, or delete them. If you need a

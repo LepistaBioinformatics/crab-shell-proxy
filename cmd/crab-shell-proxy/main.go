@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/pico"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 func main() {
@@ -41,7 +43,15 @@ func main() {
 		socket = "/var/run/docker.sock"
 	}
 	dkr := docker.NewUnixClient(socket)
-	mgr := docker.NewManager(cfg, dkr, nil, logger.Printf)
+
+	regPath := filepath.Join(cfg.ContainerDataRoot, "model-registry.db")
+	reg, err := registry.Open(regPath, nil)
+	if err != nil {
+		logger.Fatalf("open model registry: %v", err)
+	}
+	defer func() { _ = reg.Close() }()
+
+	mgr := docker.NewManager(cfg, dkr, nil, reg, logger.Printf)
 
 	srv := &httpapi.Server{
 		Cfg:      cfg,
@@ -50,12 +60,29 @@ func main() {
 		Pico:     &pico.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Hermes:   &hermes.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Logf:     logger.Printf,
+		Reg:      reg,
 	}
 
-	// Reconcile (adopt running containers, re-arm timers, start continuous ones)
-	// runs in the background so /healthz is responsive immediately — a long
-	// continuous-ensure over many user dirs must not delay readiness (the
-	// compose healthcheck and mycelium's dependency gate both poll /healthz).
+	// The model-inventory migration runs SYNCHRONOUSLY, before the server listens.
+	// It is the only thing here that a request can race: a chat arriving while the
+	// inventory is still empty resolves no model and fails, and on first boot after
+	// upgrade that is every chat. It is bounded work (reads the data root once), so
+	// it delays readiness by a little; the container work below is what could take
+	// minutes and stays in the background.
+	//
+	// A failure is fatal on purpose: serving with a half-seeded inventory means
+	// refusing or silently re-resolving workspaces, which is worse than not coming
+	// up. The pass withholds its schema marker on any capture failure, so a restart
+	// retries the whole thing.
+	if err := mgr.MigrateModels(); err != nil {
+		logger.Fatalf("migrate model registry: %v", err)
+	}
+
+	// Reconcile (drift check, adopt running containers, re-arm timers, start
+	// continuous ones) runs in the background so /healthz is responsive
+	// immediately — a long continuous-ensure over many user dirs must not delay
+	// readiness (the compose healthcheck and mycelium's dependency gate both poll
+	// /healthz).
 	go func() {
 		reconcileCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()

@@ -22,6 +22,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/google/uuid"
 )
@@ -70,12 +71,15 @@ type Orchestrator interface {
 	ReadSharedFile(scope docker.Scope, name string) (io.ReadCloser, docker.FileMeta, error)
 	// DeleteSharedFile removes one shared file from a scope.
 	DeleteSharedFile(scope docker.Scope, name string) error
-	// WriteSharedSecret upserts one shared secret at a scope (dotenv/json only).
+	// WriteSharedSecret upserts one shared secret at a scope (dotenv/json/native).
 	WriteSharedSecret(scope docker.Scope, format, name, value string) error
 	// ListSharedSecrets returns a scope's shared-secret names per format (never values).
 	ListSharedSecrets(scope docker.Scope) (docker.SecretNames, error)
 	// DeleteSharedSecret removes one shared secret from a scope.
 	DeleteSharedSecret(scope docker.Scope, format, name string) error
+	// UnsetNativeSlotForScope clears a deleted native slot from the .security.yml
+	// of every workspace the scope covers (the merge on restart only sets slots).
+	UnsetNativeSlotForScope(scope docker.Scope, slot string)
 	// ListTenants returns the tenant ids present on disk (scope discovery, Instance).
 	ListTenants() ([]string, error)
 	// ListTenantSubscriptions returns the subscription ids under a tenant on disk.
@@ -89,33 +93,21 @@ type Orchestrator interface {
 	// RestartScope best-effort recreates running containers under a scope (NFR-4).
 	RestartScope(scope docker.Scope) error
 
-	// --- admin-model-override (CTX-AMO-06: keys never transit these calls) ---
+	// --- model re-apply (internal/registry is the resolver; no keys transit here) ---
 
-	// EffectiveModel resolves the model in effect at a target, reporting which
-	// level set it ("tenant"|"subscription"|"user"|"default").
-	EffectiveModel(agent config.Agent, target docker.ModelTarget) (*config.ModelConfig, string)
-	// SetModelOverride writes a validated model selection at a target.
-	SetModelOverride(target docker.ModelTarget, sel docker.ModelSel) error
-	// ClearModelOverride removes a model override at a target (idempotent).
-	ClearModelOverride(target docker.ModelTarget) error
 	// ReapplyModelScope re-applies the resolved model to every established
 	// workspace under a scope, then restarts the running ones.
 	ReapplyModelScope(scope docker.Scope) error
 	// ReapplyModelUser re-applies the resolved model to one user's established
 	// workspace, then restarts it if running.
-	ReapplyModelUser(key docker.WorkspaceKey, agent config.Agent) error
-
-	// --- admin-model-registry (per-agent model definitions + keys) ---
-
-	// ListRegisteredModels returns an agent's registered models (never keys).
-	ListRegisteredModels(agentKey string) ([]docker.RegisteredModel, error)
-	// AddRegisteredModel upserts a model (definition + key) in an agent's registry.
-	AddRegisteredModel(agentKey string, rm docker.RegisteredModel) error
-	// DeleteRegisteredModel removes a model from an agent's registry.
-	DeleteRegisteredModel(agentKey, provider, name string) error
-	// ApplyRegisteredModelToUser writes a registered model (definition + key +
-	// active) into one user's workspace config.
-	ApplyRegisteredModelToUser(agentKey string, key docker.WorkspaceKey, provider, name string) error
+	ReapplyModelUser(key docker.WorkspaceKey) error
+	// ReapplyModelForModel re-materializes every workspace whose materialized set
+	// contains the model — primaries AND chain holders.
+	ReapplyModelForModel(modelName string) error
+	// SetModelAssignment pins one workspace to a model; ClearModelAssignment drops
+	// the pin so the scope default applies again.
+	SetModelAssignment(key docker.WorkspaceKey, modelName string) error
+	ClearModelAssignment(key docker.WorkspaceKey) error
 
 	// --- admin-shared-skills (per-scope skill dirs; keys never involved) ---
 
@@ -146,6 +138,9 @@ type Server struct {
 	Pico   Turner
 	Hermes Turner
 	Logf   func(string, ...any)
+	// Reg is the model inventory. Handlers read and write it directly; Mgr is
+	// used only to make a change take effect on disk.
+	Reg *registry.Registry
 }
 
 // turnerFor selects the turn runner for a resolved target's harness.
@@ -192,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	// internal/authz. There is deliberately NO users/files/content route and no
 	// user-file write route (FR-7 privacy invariant).
 	mux.HandleFunc("GET /v1/admin/scopes", s.handleAdminScopes)
+	mux.HandleFunc("GET /v1/admin/agents", s.handleAdminAgents)
 	mux.HandleFunc("GET /v1/admin/shared", s.handleAdminSharedList)
 	mux.HandleFunc("POST /v1/admin/shared", s.handleAdminSharedPost)
 	mux.HandleFunc("GET /v1/admin/shared/content", s.handleAdminSharedContent)
@@ -202,22 +198,30 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/users", s.handleAdminUsersList)
 	mux.HandleFunc("GET /v1/admin/users/files", s.handleAdminUserFilesList)
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
-	// admin-model-override: keys never transit the API (CTX-AMO-06); the
-	// models list is provider/name only.
-	mux.HandleFunc("GET /v1/admin/models", s.handleAdminModelsList)
-	mux.HandleFunc("GET /v1/admin/model", s.handleAdminModelGet)
-	mux.HandleFunc("PUT /v1/admin/model", s.handleAdminModelSet)
-	mux.HandleFunc("DELETE /v1/admin/model", s.handleAdminModelClear)
-	mux.HandleFunc("GET /v1/admin/model/users", s.handleAdminModelUsers)
-	mux.HandleFunc("GET /v1/admin/registered-models", s.handleAdminRegisteredModelsList)
-	mux.HandleFunc("POST /v1/admin/registered-models", s.handleAdminRegisteredModelsPost)
-	mux.HandleFunc("DELETE /v1/admin/registered-models", s.handleAdminRegisteredModelsDelete)
-	mux.HandleFunc("POST /v1/admin/registered-models/apply", s.handleAdminRegisteredModelApply)
 	mux.HandleFunc("GET /v1/admin/skills", s.handleAdminSkillsList)
 	mux.HandleFunc("GET /v1/admin/skills/doc", s.handleAdminSkillsDoc)
 	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)
 	mux.HandleFunc("POST /v1/admin/skills", s.handleAdminSkillsPost)
 	mux.HandleFunc("DELETE /v1/admin/skills", s.handleAdminSkillsDelete)
+	// model inventory: proxy-admin gated (internal/registry is the source of
+	// truth). /order is registered before /{name} — Go's mux prefers the more
+	// specific literal pattern regardless, but keeping them adjacent and ordered
+	// makes the intent obvious to the next reader.
+	mux.HandleFunc("GET /v1/admin/models", s.handleAdminModelsList)
+	mux.HandleFunc("POST /v1/admin/models", s.handleAdminModelCreate)
+	mux.HandleFunc("PUT /v1/admin/models/order", s.handleAdminModelsReorder)
+	mux.HandleFunc("PUT /v1/admin/models/{name}", s.handleAdminModelUpdate)
+	mux.HandleFunc("DELETE /v1/admin/models/{name}", s.handleAdminModelDelete)
+	mux.HandleFunc("PUT /v1/admin/models/{name}/status", s.handleAdminModelStatus)
+	mux.HandleFunc("POST /v1/admin/models/{name}/deprecate", s.handleAdminModelDeprecate)
+	mux.HandleFunc("GET /v1/admin/models/{name}/usage", s.handleAdminModelUsage)
+	mux.HandleFunc("GET /v1/admin/model-catalog", s.handleAdminModelCatalog)
+	mux.HandleFunc("GET /v1/admin/model-defaults", s.handleAdminModelDefaultGet)
+	mux.HandleFunc("PUT /v1/admin/model-defaults", s.handleAdminModelDefaultSet)
+	mux.HandleFunc("DELETE /v1/admin/model-defaults", s.handleAdminModelDefaultClear)
+	mux.HandleFunc("GET /v1/admin/model-assignments", s.handleAdminModelAssignmentList)
+	mux.HandleFunc("POST /v1/admin/model-assignments", s.handleAdminModelAssignmentSet)
+	mux.HandleFunc("DELETE /v1/admin/model-assignments", s.handleAdminModelAssignmentClear)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
 	// directly from the service host via openapiPath, not through the gateway).
@@ -708,6 +712,28 @@ func (s *Server) resolveSecretCaller(w http.ResponseWriter, r *http.Request) (co
 	return agent, ident, true
 }
 
+// rejectNativeForUser writes a 403 and returns true when a per-user secret WRITE
+// names the native format. Native slots (picoclaw's own .security.yml —
+// search-provider and model keys) are an administrative surface: they are
+// published at tenant/subscription scope via /v1/admin/shared-secrets and reach
+// workspaces through the cascade (native-secrets-admin-only FR-1). The gate lives
+// here, in the proxy, and not only in the webapp BFF — the reverted first attempt
+// gated the BFF alone and left this layer open.
+//
+// It gates WRITES only. Listing still reports a user's pre-gate native NAMES
+// (never a value), and deleting one is still allowed: those entries are the
+// user's own data, and removing the only way to clean them up would strand them
+// permanently. Deletion cannot inject a credential, so it is outside what this
+// feature moves to admins.
+func rejectNativeForUser(w http.ResponseWriter, format string) bool {
+	if format != docker.FormatNative {
+		return false
+	}
+	writeJSON(w, http.StatusForbidden, errBody(
+		"native secrets are administered at tenant/subscription scope; ask a scope administrator to set this credential"))
+	return true
+}
+
 // handleSecretsPost injects/updates one secret for the caller's (user, agent)
 // pair and restarts the container so picoclaw re-reads it (AC-02, CTX-AC-04).
 func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
@@ -723,6 +749,9 @@ func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
 	if !knownSecretFormats[req.Format] {
 		writeJSON(w, http.StatusBadRequest,
 			errBody(`"format" must be one of dotenv, json, file, native`))
+		return
+	}
+	if rejectNativeForUser(w, req.Format) {
 		return
 	}
 	tenantID, err := uuid.Parse(req.TenantID)

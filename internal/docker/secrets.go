@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +29,15 @@ var (
 	ErrInvalidSecretName = errors.New("invalid secret name")
 	ErrUnknownNativeSlot = errors.New("unknown native slot")
 )
+
+// errModelNotInWorkspace signals that a model_list slot named a model the
+// INVENTORY knows (it passed validateNativeSlot) but that is not part of THIS
+// workspace's materialized model_list — e.g. a scope-level secret set for a
+// model this workspace was never assigned. It is internal to
+// setNativeSlot/applyNativeSecrets: the accept-set (the inventory) is
+// necessarily wider than any one workspace's apply-set, and this is how
+// applyNativeSecrets tells "not applicable here" apart from a real failure.
+var errModelNotInWorkspace = errors.New("model not in this workspace's model_list")
 
 // SecretNames is the set of stored secret NAMES per format — never the values
 // (write-only-over-API store, CTX-AC-02). It is the GET /v1/secrets response.
@@ -64,9 +74,9 @@ func validateSecretName(name string) error {
 }
 
 // writeSecret upserts one secret into the store under the chosen format. For
-// native it first validates the slot against secPath's config; the caller
+// native it first validates the slot against the model inventory; the caller
 // merges the overlay into the workspace separately.
-func writeSecret(storeDir, secPath, format, name, value string) error {
+func writeSecret(models modelNameChecker, storeDir, secPath, format, name, value string) error {
 	switch format {
 	case FormatDotenv:
 		if strings.ContainsAny(value, "\n\r") {
@@ -78,7 +88,7 @@ func writeSecret(storeDir, secPath, format, name, value string) error {
 	case FormatFile:
 		return writeFileSecret(filepath.Join(storeDir, "secrets"), name, value)
 	case FormatNative:
-		if err := validateNativeSlot(secPath, name); err != nil {
+		if err := validateNativeSlot(models, name); err != nil {
 			return err
 		}
 		return upsertOverlay(filepath.Join(storeDir, "native.yml"), name, value)
@@ -165,13 +175,28 @@ func listSecretNames(storeDir string) (SecretNames, error) {
 	return names, nil
 }
 
-// validateNativeSlot accepts only the two families named in design §4:
-// web.<provider> (provider from the fixed enum; may create the web section) and
-// model_list.<model>.api_keys (model must already exist in secPath's config, so
-// a validated slot is guaranteed to key a model picoclaw knows). Everything else
-// — notably channel_list.pico.settings.token, the proxy↔picoclaw auth token — is
-// rejected so a user can never overwrite it.
-func validateNativeSlot(secPath, slot string) error {
+// modelNameChecker is the slice of the registry this validation needs. Taking an
+// interface keeps secrets.go testable without a Manager and documents that the
+// only question being asked is "does this model exist".
+type modelNameChecker interface {
+	GetModel(name string) (registry.Model, error)
+}
+
+// validateNativeSlot accepts only two families: web.<provider> from the fixed
+// enum, and model_list.<model>.api_keys where the model exists in the INVENTORY.
+// Everything else — notably channel_list.pico.settings.token, the
+// proxy<->picoclaw auth token — is rejected so a user can never overwrite it.
+//
+// The model check reads the inventory rather than a template's .security.yml: the
+// inventory is now the only place a model exists, so a name it does not know would
+// key a credential nothing reads. A model registered through the admin UI
+// therefore always passes, and a typo never does.
+//
+// A slot that passes becomes a scope-level OVERLAY over the inventory's own key:
+// applyNativeSecrets runs after materialization, so a scope admin can supply their
+// own credential for a registered model. That is a layered override with defined
+// precedence, not a second writer.
+func validateNativeSlot(models modelNameChecker, slot string) error {
 	parts := strings.Split(slot, ".")
 	switch {
 	case len(parts) == 2 && parts[0] == "web":
@@ -180,26 +205,39 @@ func validateNativeSlot(secPath, slot string) error {
 		}
 		return fmt.Errorf("%w: unknown web provider %q", ErrUnknownNativeSlot, parts[1])
 	case len(parts) == 3 && parts[0] == "model_list" && parts[2] == "api_keys":
-		sec, err := readSecurityConfig(secPath)
-		if err != nil {
-			return fmt.Errorf("%w: cannot read model_list to validate %q: %v", ErrUnknownNativeSlot, slot, err)
+		if _, err := models.GetModel(parts[1]); err != nil {
+			return fmt.Errorf("%w: model %q is not in the model inventory", ErrUnknownNativeSlot, parts[1])
 		}
-		if ml, ok := sec["model_list"].(map[string]any); ok {
-			if _, ok := ml[parts[1]]; ok {
-				return nil
-			}
-		}
-		return fmt.Errorf("%w: model %q not present in model_list", ErrUnknownNativeSlot, parts[1])
-	default:
-		return fmt.Errorf("%w: %q (only web.<provider> and model_list.<model>.api_keys are supported)", ErrUnknownNativeSlot, slot)
+		return nil
 	}
+	return fmt.Errorf("%w: %q", ErrUnknownNativeSlot, slot)
+}
+
+// isNativeModelSlot reports whether a native slot addresses a model's api_keys —
+// the family that must target a single agent's workspace set, so it cannot
+// be published to an all-agents scope (native-secrets-admin-only FR-4).
+func isNativeModelSlot(slot string) bool {
+	parts := strings.Split(slot, ".")
+	return len(parts) == 3 && parts[0] == "model_list" && parts[2] == "api_keys"
 }
 
 // applyNativeSecrets merges the native.yml overlay from storeDir into secPath's
 // .security.yml at the named slots (preserving all sibling keys — the pico token
 // and model api_keys survive), then re-locks the file 0444. No-op when no native
 // secret is set. Idempotent, run on every ensure.
-func applyNativeSecrets(secPath, storeDir, user string) error {
+//
+// A model_list slot can validly name a model this particular workspace never
+// resolved: the inventory (the accept-set) is wider than any one workspace's
+// materialized model_list (the apply-set) by design — a scope-level secret is
+// set once for models that may only be assigned to some workspaces, including
+// ones that don't exist yet. That slot is skipped and logged, not treated as a
+// failure; every other error still aborts the merge (so one bad slot never
+// silently drops the rest, e.g. a working web.* entry, from being written).
+// logf is required to record a skip; pass nil to no-op it (mirrors NewManager).
+func applyNativeSecrets(secPath, storeDir, user string, logf func(string, ...any)) error {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	overlay, err := readOverlay(filepath.Join(storeDir, "native.yml"))
 	if err != nil {
 		return err
@@ -213,6 +251,10 @@ func applyNativeSecrets(secPath, storeDir, user string) error {
 	}
 	for slot, value := range overlay {
 		if err := setNativeSlot(sec, slot, value); err != nil {
+			if errors.Is(err, errModelNotInWorkspace) {
+				logf("native secret %q not applied to %s: %v", slot, secPath, err)
+				continue
+			}
 			return err
 		}
 	}
@@ -230,11 +272,11 @@ func setNativeSlot(sec map[string]any, slot, value string) error {
 	case len(parts) == 3 && parts[0] == "model_list" && parts[2] == "api_keys":
 		ml, ok := sec["model_list"].(map[string]any)
 		if !ok {
-			return fmt.Errorf("%w: model_list absent", ErrUnknownNativeSlot)
+			return fmt.Errorf("%w: model_list absent from this workspace", errModelNotInWorkspace)
 		}
 		model, ok := ml[parts[1]].(map[string]any)
 		if !ok {
-			return fmt.Errorf("%w: model %q absent", ErrUnknownNativeSlot, parts[1])
+			return fmt.Errorf("%w: model %q absent from this workspace", errModelNotInWorkspace, parts[1])
 		}
 		model["api_keys"] = []string{value}
 		return nil

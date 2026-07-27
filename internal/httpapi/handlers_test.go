@@ -14,6 +14,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/klauspost/compress/zstd"
 )
@@ -49,18 +50,21 @@ type fakeOrch struct {
 	tenantSubs      []string
 	sharedWrites    []docker.Scope
 	sharedDeletes   []docker.Scope
+	nativeUnsets    []string
 	userFileDeletes []docker.WorkspaceKey
 	restartScopes   []docker.Scope
 
-	// admin-model-override fakes: record calls, return canned results.
-	effectiveModel  *config.ModelConfig
-	effectiveLevel  string
-	modelSetErr     error
-	modelClearErr   error
-	modelSets       []docker.ModelTarget
-	modelClears     []docker.ModelTarget
-	reapplyScopes   []docker.Scope
-	reapplyUserKeys []docker.WorkspaceKey
+	// model re-apply fakes: record calls, return canned results.
+	reapplyScopes    []docker.Scope
+	reapplyUserKeys  []docker.WorkspaceKey
+	reapplyForModels []string
+	// reapplyCalls counts every ReapplyModel* call, so a test can assert a
+	// no-op operation (e.g. reorder) triggered none at all.
+	reapplyCalls int
+
+	// reg backs SetModelAssignment/ClearModelAssignment, mirroring what the real
+	// Manager does against the registry.
+	reg *registry.Registry
 }
 
 type secretWrite struct {
@@ -89,11 +93,6 @@ func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error   
 func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error               { return nil }
 func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error                           { return nil }
 func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error                         { return nil }
-
-func (f *fakeOrch) ListRegisteredModels(string) ([]docker.RegisteredModel, error)              { return nil, nil }
-func (f *fakeOrch) AddRegisteredModel(string, docker.RegisteredModel) error                    { return nil }
-func (f *fakeOrch) DeleteRegisteredModel(string, string, string) error                         { return nil }
-func (f *fakeOrch) ApplyRegisteredModelToUser(string, docker.WorkspaceKey, string, string) error { return nil }
 
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
@@ -172,6 +171,10 @@ func (f *fakeOrch) DeleteSharedSecret(scope docker.Scope, _, _ string) error {
 	return nil
 }
 
+func (f *fakeOrch) UnsetNativeSlotForScope(scope docker.Scope, slot string) {
+	f.nativeUnsets = append(f.nativeUnsets, scope.AgentKey+"|"+slot)
+}
+
 func (f *fakeOrch) ListTenants() ([]string, error) {
 	return f.tenants, nil
 }
@@ -198,34 +201,34 @@ func (f *fakeOrch) RestartScope(scope docker.Scope) error {
 	return nil
 }
 
-func (f *fakeOrch) EffectiveModel(config.Agent, docker.ModelTarget) (*config.ModelConfig, string) {
-	return f.effectiveModel, f.effectiveLevel
-}
-
-func (f *fakeOrch) SetModelOverride(target docker.ModelTarget, _ docker.ModelSel) error {
-	if f.modelSetErr != nil {
-		return f.modelSetErr
-	}
-	f.modelSets = append(f.modelSets, target)
-	return nil
-}
-
-func (f *fakeOrch) ClearModelOverride(target docker.ModelTarget) error {
-	if f.modelClearErr != nil {
-		return f.modelClearErr
-	}
-	f.modelClears = append(f.modelClears, target)
-	return nil
-}
-
 func (f *fakeOrch) ReapplyModelScope(scope docker.Scope) error {
+	f.reapplyCalls++
 	f.reapplyScopes = append(f.reapplyScopes, scope)
 	return nil
 }
 
-func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey, _ config.Agent) error {
+func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey) error {
+	f.reapplyCalls++
 	f.reapplyUserKeys = append(f.reapplyUserKeys, key)
 	return nil
+}
+
+func (f *fakeOrch) ReapplyModelForModel(modelName string) error {
+	f.reapplyCalls++
+	f.reapplyForModels = append(f.reapplyForModels, modelName)
+	return nil
+}
+
+func (f *fakeOrch) SetModelAssignment(key docker.WorkspaceKey, modelName string) error {
+	return f.reg.PutAssignment(registry.WorkspaceRef{
+		TenantID: key.TenantID, SubsAccID: key.SubsAccID, Agent: key.Role, UserAccID: key.UserAccID,
+	}, registry.Assignment{ModelName: modelName, Source: registry.SourceExplicit})
+}
+
+func (f *fakeOrch) ClearModelAssignment(key docker.WorkspaceKey) error {
+	return f.reg.DeleteAssignment(registry.WorkspaceRef{
+		TenantID: key.TenantID, SubsAccID: key.SubsAccID, Agent: key.Role, UserAccID: key.UserAccID,
+	})
 }
 
 func skey(tenantID, subsAccID string) string { return tenantID + "/" + subsAccID }
@@ -573,7 +576,7 @@ func realMgrServer(t *testing.T, webhookSecret string) (*Server, string) {
 				Mode: config.ModeScaleToZero},
 		},
 	}
-	mgr := docker.NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil)
+	mgr := docker.NewManager(cfg, nil, func(context.Context, string, int) error { return nil }, nil, nil)
 	return &Server{Cfg: cfg, Resolver: identity.NewSDKResolver(), Mgr: mgr}, root
 }
 
@@ -788,7 +791,9 @@ func secretsReq(t *testing.T, method, query string, headers map[string]string) *
 }
 
 func TestSecretsPostEachFormat(t *testing.T) {
-	for _, format := range []string{"dotenv", "json", "file", "native"} {
+	// native is deliberately absent: it moved to the admin surface
+	// (native-secrets-admin-only AC-1, asserted by TestSecretsNativeRejected).
+	for _, format := range []string{"dotenv", "json", "file"} {
 		t.Run(format, func(t *testing.T) {
 			orch := scaffoldedOrch()
 			s := testServer(orch, &fakeTurner{})
@@ -818,7 +823,7 @@ func TestSecretsPostValidationMapsTo400(t *testing.T) {
 		orch.writeErr = sentinel
 		s := testServer(orch, &fakeTurner{})
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("native", "bad.slot", "v"), goodHeaders(t)))
+		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("dotenv", "BAD NAME", "v"), goodHeaders(t)))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("sentinel %v: status = %d, want 400", sentinel, w.Code)
 		}
@@ -826,6 +831,43 @@ func TestSecretsPostValidationMapsTo400(t *testing.T) {
 			t.Errorf("sentinel %v: restart must not run when write is rejected", sentinel)
 		}
 	}
+}
+
+// TestSecretsNativeRejected proves native-secrets-admin-only AC-1: the per-user
+// endpoint refuses to WRITE the native format, in the PROXY (not only the webapp
+// BFF), and nothing is written or restarted. The caller here is a normal chat
+// user; the gate is unconditional, so tier does not matter. Deleting a pre-gate
+// entry stays allowed — it is the user's own data and cannot inject a credential.
+func TestSecretsNativeRejected(t *testing.T) {
+	t.Run("post", func(t *testing.T) {
+		orch := scaffoldedOrch()
+		s := testServer(orch, &fakeTurner{})
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, secretsPostReq(t, secretBody("native", "web.brave", "sekret"), goodHeaders(t)))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403: %s", w.Code, w.Body.String())
+		}
+		if len(orch.writes) != 0 {
+			t.Errorf("native write reached the manager: %+v", orch.writes)
+		}
+		if len(orch.restarts) != 0 {
+			t.Errorf("restart must not run for a rejected native write")
+		}
+	})
+	t.Run("delete of a legacy entry stays allowed", func(t *testing.T) {
+		orch := scaffoldedOrch()
+		s := testServer(orch, &fakeTurner{})
+		w := httptest.NewRecorder()
+		url := "/v1/secrets?format=native&name=web.brave&tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+		req := httptest.NewRequest(http.MethodDelete, url, nil)
+		for k, v := range goodHeaders(t) {
+			req.Header.Set(k, v)
+		}
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+	})
 }
 
 func TestSecretsPostUnknownFormat400(t *testing.T) {

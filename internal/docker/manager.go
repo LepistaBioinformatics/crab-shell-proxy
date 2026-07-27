@@ -13,6 +13,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 // Reconciliation labels stamped on every managed container.
@@ -78,7 +79,10 @@ type Manager struct {
 	cfg    *config.Config
 	docker Docker
 	health HealthChecker
-	logf   func(format string, args ...any)
+	// reg is the model inventory: the single source of truth for which model a
+	// workspace uses. Nothing else in this package may decide that.
+	reg  *registry.Registry
+	logf func(format string, args ...any)
 
 	mu   sync.Mutex
 	keys map[string]*keyState
@@ -90,14 +94,16 @@ type Manager struct {
 }
 
 // NewManager builds a Manager. If health is nil, an HTTP /health poller is used.
-func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, logf func(string, ...any)) *Manager {
+// reg is required: without the inventory there is no way to resolve a model, and
+// a workspace provisioned without one cannot boot.
+func NewManager(cfg *config.Config, dkr Docker, health HealthChecker, reg *registry.Registry, logf func(string, ...any)) *Manager {
 	if health == nil {
 		health = httpHealth
 	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Manager{cfg: cfg, docker: dkr, health: health, logf: logf, keys: map[string]*keyState{}}
+	return &Manager{cfg: cfg, docker: dkr, health: health, reg: reg, logf: logf, keys: map[string]*keyState{}}
 }
 
 // ContainerName is the deterministic name for one workspace's container:
@@ -175,7 +181,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
-	model := m.resolveModel(agent, key)
+	model := agent.Model
 
 	// Provision the per-user data dir and obtain the auth token to reach the
 	// container: picoclaw's pico channel token, or hermes' generated API server
@@ -185,8 +191,21 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	if agent.Harness == config.HarnessHermes {
 		authToken, err = provisionHermes(userDir, templateDir, m.cfg.PicoclawUser, model)
 	} else {
-		storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
-		authToken, err = provision(userDir, templateDir, storeDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, model, key, ownerEmail)
+		// Materialize the effective secret view BEFORE provisioning: it is the
+		// bind-mount source, and resolveAndMaterialize reads the native overlay
+		// out of it — native slots now arrive from the admin cascade, not only
+		// from the user's own store.
+		if _, syncErr := m.syncEffectiveSecrets(key); syncErr != nil {
+			return Target{}, syncErr
+		}
+		authToken, err = provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
+		if err == nil {
+			// Materialize AFTER seeding, so the template's (now empty) model_list
+			// is replaced by the inventory's answer, and the native overlay lands
+			// on top of THAT. A workspace with no resolvable model fails here,
+			// before any container exists.
+			err = m.resolveAndMaterialize(key, userDir)
+		}
 	}
 	if err != nil {
 		return Target{}, err
@@ -261,20 +280,16 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// workspace (FR-4/NFR-3). Ensure the container-side dirs exist and are
 	// readable by the non-root agent, mirroring the secret store above, so the
 	// bind source is always present (they are normally pre-created on scaffold).
-	tenantSharedContainer := config.TenantSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID)
-	subsSharedContainer := config.SubscriptionSharedFilesDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID)
-	for _, d := range []string{tenantSharedContainer, subsSharedContainer} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	sharedMounts := make([]string, 0, 4)
+	for _, sm := range sharedFileBinds(m.cfg, key, mountDest) {
+		if err := os.MkdirAll(sm.container, 0o700); err != nil {
 			return fmt.Errorf("create shared files dir: %w", err)
 		}
-		if err := chownTree(d, m.cfg.PicoclawUser); err != nil {
+		if err := chownTree(sm.container, m.cfg.PicoclawUser); err != nil {
 			return fmt.Errorf("chown shared files dir: %w", err)
 		}
+		sharedMounts = append(sharedMounts, sm.bind)
 	}
-	tenantSharedMount := config.TenantSharedFilesDir(m.cfg.HostDataRoot, key.TenantID) +
-		":" + mountDest + "/workspace/.shared/tenant:ro"
-	subsSharedMount := config.SubscriptionSharedFilesDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
-		":" + mountDest + "/workspace/.shared/subscription:ro"
 	// Operator-managed content bind-mounted READ-ONLY into the workspace: the
 	// shared-content skill (where shared files/secrets are + never copy secrets)
 	// and the context-recovery note (how to read the durable transcript back).
@@ -297,10 +312,10 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// skills root. New/edited/removed skills reach picoclaw on the next
 	// stop/start (RestartScope) — no recreate, no transcript loss — mirroring
 	// the effective-secrets discipline.
-	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID); err != nil {
+	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID, key.Role); err != nil {
 		return fmt.Errorf("sync effective skills: %w", err)
 	}
-	skillsMount := config.EffectiveSkillsDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID) +
+	skillsMount := config.EffectiveSkillsDir(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role) +
 		":" + mountDest + "/skills:ro"
 	env := []string{
 		"PICOCLAW_GATEWAY_HOST=0.0.0.0",
@@ -319,8 +334,8 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds: []string{hostDir + ":" + mountDest, secretsMount, tenantSharedMount, subsSharedMount,
-			managedSkillMount, managedMemoryMount, skillsMount},
+		Binds: append([]string{hostDir + ":" + mountDest, secretsMount},
+			append(sharedMounts, managedSkillMount, managedMemoryMount, skillsMount)...),
 		Network: m.cfg.Network,
 		Init:    true,
 	}
@@ -377,7 +392,19 @@ func (m *Manager) ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
 		config.SubscriptionSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
 		config.TenantSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID),
 		config.SubscriptionSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
-		config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID),
+	}
+	// The per-agent layer and the effective-skills view are keyed by agent, so
+	// scaffold one of each per configured agent.
+	for agentKey := range m.cfg.Agents {
+		dirs = append(dirs,
+			config.TenantAgentSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, agentKey),
+			config.TenantAgentSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, agentKey),
+			config.TenantAgentSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, agentKey),
+			config.SubscriptionAgentSharedFilesDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+			config.SubscriptionAgentSharedSecretsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+			config.SubscriptionAgentSharedSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+			config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, tenantID, subsAccID, agentKey),
+		)
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -456,17 +483,18 @@ func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
 
 // WriteSecret validates and persists one secret into the per-(user, agent)
 // store under the chosen format, then — for native — merges it into the caller's
-// current workspace .security.yml. agent supplies the template used to validate a
-// native slot when the workspace has not been provisioned yet. Returns
-// ErrInvalidSecretName / ErrUnknownNativeSlot for a bad name or slot (the handler
-// maps these to 400).
+// current workspace .security.yml. A native model_list slot is validated
+// against the model inventory (m.reg), not against agent's template; agent only
+// supplies the .security.yml to merge into when the workspace has not been
+// provisioned yet. Returns ErrInvalidSecretName / ErrUnknownNativeSlot for a bad
+// name or slot (the handler maps these to 400).
 func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name, value string) error {
 	if err := validateSecretName(name); err != nil {
 		return err
 	}
 	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
 	secPath := m.workspaceSecurityPath(agent, key)
-	if err := writeSecret(storeDir, secPath, format, name, value); err != nil {
+	if err := writeSecret(m.reg, storeDir, secPath, format, name, value); err != nil {
 		return err
 	}
 	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
@@ -476,7 +504,7 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 		// Apply immediately to the current workspace when it exists; otherwise the
 		// overlay is picked up at the next provision/ensure (design §6).
 		if _, err := os.Stat(secPath); err == nil {
-			if err := applyNativeSecrets(secPath, storeDir, m.cfg.PicoclawUser); err != nil {
+			if err := applyNativeSecrets(secPath, storeDir, m.cfg.PicoclawUser, m.logf); err != nil {
 				return err
 			}
 		}
@@ -508,13 +536,24 @@ func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
 	if err := chownTree(storeDir, m.cfg.PicoclawUser); err != nil {
 		return err
 	}
-	_, err := m.syncEffectiveSecrets(key)
-	return err
+	effDir, err := m.syncEffectiveSecrets(key)
+	if err != nil {
+		return err
+	}
+	// deleteSecret unsets the slot in .security.yml outright, but an admin scope
+	// layer may still provide it — re-apply the remaining cascade so removing a
+	// legacy personal entry never strips the admin's value.
+	if format == FormatNative {
+		return m.applyNativeToWorkspace(key, effDir)
+	}
+	return nil
 }
 
-// workspaceSecurityPath returns the .security.yml to validate/merge native
-// secrets into: the caller's provisioned workspace when it exists, else the
-// agent template (so a native slot can be validated before the first chat).
+// workspaceSecurityPath returns the .security.yml a native secret write merges
+// into (secPath, for the immediate-apply check): the caller's provisioned
+// workspace when it exists, else the agent template. Model-name validation no
+// longer reads this file — that's the inventory now — but the merge target
+// still needs somewhere to write before the first chat.
 func (m *Manager) workspaceSecurityPath(agent config.Agent, key WorkspaceKey) string {
 	ws := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
 	if _, err := os.Stat(ws); err == nil {

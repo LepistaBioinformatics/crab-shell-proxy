@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
-	"gopkg.in/yaml.v3"
 )
 
 // templateFiles is the config-only allowlist copied into a fresh per-user data
@@ -31,7 +30,12 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // workspace path is aligned to <home>/.picoclaw/workspace so it matches the
 // mount point. user ("uid:gid", may be empty) is the non-root owner the data
 // dir is chowned to so a non-root container can write it.
-func provision(userDir, templateDir, storeDir, home, user string, model *config.ModelConfig, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
+// provision seeds a workspace from templateDir. Neither the MODEL nor the native
+// secret overlay is a parameter: the caller materializes the model from the
+// inventory after seeding and applies the overlay after THAT, because
+// materialization rewrites .security.yml's whole model_list and would otherwise
+// overwrite the overlay it is supposed to sit under (see resolveAndMaterialize).
+func provision(userDir, templateDir, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -51,13 +55,11 @@ func provision(userDir, templateDir, storeDir, home, user string, model *config.
 		if err := alignWorkspace(configPath, home); err != nil {
 			return "", fmt.Errorf("align workspace path: %w", err)
 		}
-		// When an agent pins a model in config.yaml, the proxy owns the picoclaw
-		// provider/model + pico token + API key (sourced from env), overriding
-		// whatever the template shipped.
-		if model != nil {
-			if err := applyModel(configPath, secPath, model); err != nil {
-				return "", fmt.Errorf("apply model config: %w", err)
-			}
+		// The pico channel token is generated here; the model is materialized
+		// by the caller from the inventory. Splitting these is what lets the
+		// model come from exactly one place.
+		if err := seedPicoToken(secPath); err != nil {
+			return "", fmt.Errorf("seed pico token: %w", err)
 		}
 		// Seed the allowlisted agent template workspace files (persona/skills/
 		// memory) so the agent starts customized. Only on first provision, so a
@@ -75,13 +77,6 @@ func provision(userDir, templateDir, storeDir, home, user string, model *config.
 			return "", fmt.Errorf("chown data dir to %q: %w", user, err)
 		}
 	}
-	// Merge any per-(user, agent) native secrets into this workspace's
-	// .security.yml on EVERY ensure (not just first provision), so a brand-new
-	// workspace of an existing pair — e.g. a second subscription — picks up the
-	// already-stored secrets (AC-04/AC-05, CTX-AC-03). No-op when none are set.
-	if err := applyNativeSecrets(secPath, storeDir, user); err != nil {
-		return "", fmt.Errorf("apply native secrets: %w", err)
-	}
 	tok, err := readPicoToken(secPath)
 	if err != nil {
 		return "", fmt.Errorf("read pico token: %w", err)
@@ -90,61 +85,6 @@ func provision(userDir, templateDir, storeDir, home, user string, model *config.
 		return "", fmt.Errorf("no pico channel token found in %s/.security.yml", userDir)
 	}
 	return tok, nil
-}
-
-// applyModel enables the pico channel and pins the provider/model in
-// config.json, and writes .security.yml with a freshly generated pico token and
-// the model's API key (from config.yaml's apiKeyEnv). The key thus lives in the
-// environment, not in any committed file.
-func applyModel(configPath, secPath string, model *config.ModelConfig) error {
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		return err
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return err
-	}
-	// channel_list.pico.enabled = true
-	if cl, ok := cfg["channel_list"].(map[string]any); ok {
-		if pico, ok := cl["pico"].(map[string]any); ok {
-			pico["enabled"] = true
-		}
-	}
-	// agents.defaults.provider / model_name
-	if agents, ok := cfg["agents"].(map[string]any); ok {
-		if defaults, ok := agents["defaults"].(map[string]any); ok {
-			defaults["provider"] = model.Provider
-			defaults["model_name"] = model.Name
-		}
-	}
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(configPath, out, 0o600); err != nil {
-		return err
-	}
-
-	token, err := randomToken()
-	if err != nil {
-		return err
-	}
-	sec := map[string]any{
-		"channel_list": map[string]any{
-			"pico": map[string]any{
-				"settings": map[string]any{"token": token},
-			},
-		},
-		"model_list": map[string]any{
-			model.Name: map[string]any{"api_keys": []string{model.APIKey}},
-		},
-	}
-	secBytes, err := yaml.Marshal(sec)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(secPath, secBytes, 0o600)
 }
 
 // writeOwnerFile drops a small JSON marker in the user's data dir recording the
@@ -172,6 +112,27 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return "pico-" + hex.EncodeToString(b), nil
+}
+
+// seedPicoToken writes a fresh proxy<->picoclaw channel token into a new
+// workspace's .security.yml, preserving anything the template already put there.
+func seedPicoToken(secPath string) error {
+	token, err := randomToken()
+	if err != nil {
+		return err
+	}
+	sec, err := readSecurityConfig(secPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		sec = map[string]any{}
+	}
+	cl := childMap(sec, "channel_list")
+	pico := childMap(cl, "pico")
+	settings := childMap(pico, "settings")
+	settings["token"] = token
+	return writeSecurityConfig(secPath, sec, "")
 }
 
 // alignWorkspace rewrites agents.defaults.workspace in config.json to

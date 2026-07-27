@@ -523,6 +523,63 @@ func SubscriptionSharedSecretsDir(root, tenantID, subsAccID string) string {
 		"subscriptions", identity.SanitizeID(subsAccID), "shared", "secrets")
 }
 
+// The per-agent shared stores sit one level deeper than the agent-less ones,
+// under `shared/agents/<agent>/`. The agent-less dirs above keep their paths and
+// mean "all agents", so nothing already published needs migrating
+// (per-agent-injection-scope AD-2). `agents` can never collide with stored
+// content: the children of `shared/` are the fixed names files/secrets/skills/
+// model.json, and file and skill names live inside those.
+
+// TenantAgentSharedFilesDir is the tenant-scope, single-agent shared-files store:
+// <root>/tenants/<t>/shared/agents/<agent>/files.
+func TenantAgentSharedFilesDir(root, tenantID, agentKey string) string {
+	return filepath.Join(tenantAgentSharedRoot(root, tenantID, agentKey), "files")
+}
+
+// TenantAgentSharedSecretsDir is the tenant-scope, single-agent shared-secret
+// store: <root>/tenants/<t>/shared/agents/<agent>/secrets.
+func TenantAgentSharedSecretsDir(root, tenantID, agentKey string) string {
+	return filepath.Join(tenantAgentSharedRoot(root, tenantID, agentKey), "secrets")
+}
+
+// TenantAgentSharedSkillsDir is the tenant-scope, single-agent shared-skills
+// store: <root>/tenants/<t>/shared/agents/<agent>/skills.
+func TenantAgentSharedSkillsDir(root, tenantID, agentKey string) string {
+	return filepath.Join(tenantAgentSharedRoot(root, tenantID, agentKey), "skills")
+}
+
+// SubscriptionAgentSharedFilesDir is the subscription-scope, single-agent
+// shared-files store:
+// <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/files.
+func SubscriptionAgentSharedFilesDir(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey), "files")
+}
+
+// SubscriptionAgentSharedSecretsDir is the subscription-scope, single-agent
+// shared-secret store:
+// <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/secrets.
+func SubscriptionAgentSharedSecretsDir(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey), "secrets")
+}
+
+// SubscriptionAgentSharedSkillsDir is the subscription-scope, single-agent
+// shared-skills store:
+// <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/skills.
+func SubscriptionAgentSharedSkillsDir(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey), "skills")
+}
+
+func tenantAgentSharedRoot(root, tenantID, agentKey string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"shared", "agents", identity.SanitizeID(agentKey))
+}
+
+func subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(root, "tenants", identity.SanitizeID(tenantID),
+		"subscriptions", identity.SanitizeID(subsAccID),
+		"shared", "agents", identity.SanitizeID(agentKey))
+}
+
 // TenantSharedSkillsDir is the tenant-scope shared-skills store, cascaded
 // read-only into every user container under the tenant:
 // <root>/tenants/<t>/shared/skills. Each skill is a directory <name>/ with a
@@ -538,15 +595,17 @@ func SubscriptionSharedSkillsDir(root, tenantID, subsAccID string) string {
 		"subscriptions", identity.SanitizeID(subsAccID), "shared", "skills")
 }
 
-// EffectiveSkillsDir is the per-(tenant, subscription) MERGED skills view
+// EffectiveSkillsDir is the per-(tenant, subscription, agent) MERGED skills view
 // bind-mounted read-only at the container's global skills root
-// (<mountDest>/skills): subscription-scope skills override tenant-scope by name.
-// Materialized whenever a shared skill changes so additions/edits/removals reach
-// picoclaw live (via the mount) on the next stop/start, without a recreate:
-// <root>/effective-skills/<t>/<s>.
-func EffectiveSkillsDir(root, tenantID, subsAccID string) string {
+// (<mountDest>/skills). Merge order, later winning by skill name: tenant
+// all-agents → tenant this-agent → subscription all-agents → subscription
+// this-agent. Materialized whenever a shared skill changes so
+// additions/edits/removals reach picoclaw live (via the mount) on the next
+// stop/start, without a recreate: <root>/effective-skills/<t>/<s>/<agent>.
+func EffectiveSkillsDir(root, tenantID, subsAccID, agentKey string) string {
 	return filepath.Join(root, "effective-skills",
-		identity.SanitizeID(tenantID), identity.SanitizeID(subsAccID))
+		identity.SanitizeID(tenantID), identity.SanitizeID(subsAccID),
+		identity.SanitizeID(agentKey))
 }
 
 // StoreDir is the per-(user, agent) secret store, kept OUTSIDE the
