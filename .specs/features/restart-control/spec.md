@@ -200,6 +200,35 @@ Every admin action that currently forces a bounce accepts a `restart` policy:
 - **FR-8.3** A scope with a pending notice/schedule shows it in the admin
   screen, with a withdraw action (FR-5.3).
 
+**FR-8.3 shipped late.** The webapp's first pass built FR-8.1/8.2 and stopped:
+`GET`/`POST`/`DELETE` on `/api/admin/restart` were routed end to end and left
+with no caller, so an admin who armed a notice from a save could not see it,
+amend it or withdraw it — and no scope could be bounced without inventing a
+change to save. Closed in crab-exoskeleton-webapp#11; the webapp-side detail is
+recorded in that repo's `restart-control/spec.md`. Two things about it constrain
+this side:
+
+- The admin read uses `Store.Get`, which returns the notice at **exactly** the
+  scope asked for. Only the member path (`Store.Resolve`) walks the four cascade
+  positions. So an admin standing on a subscription cannot see a tenant-wide
+  notice, and one filtered to an agent cannot see the all-agents record. The UI
+  mitigates by naming the slot it read rather than claiming nothing is armed
+  anywhere; showing the cascade instead would be worse, because `DELETE`
+  withdraws the exact slot and a withdraw button under a wider scope's notice
+  would appear to do nothing. Reading the cascade honestly needs a proxy change
+  — a read that reports which position each notice came from — which is why the
+  webapp did not attempt it.
+- The immediate action reaches whatever `BounceScope` reaches: every **running**
+  container under the scope. The confirmation dialog states that reach, so a
+  change to `BounceScope`'s filtering makes that copy wrong.
+
+**Not built, and deliberately.** An admin-initiated restart of ONE member's
+workspace. `Manager.RestartWorkspace` takes a full `WorkspaceKey` and would serve
+it, but there is no admin-authorized route: `POST /v1/restart` builds the key
+from the caller's own profile and `TestSelfRestartIgnoresACallerSuppliedUserID`
+exists to keep it that way (FR-1.1). Adding one is proxy work, and since the
+notice model is per scope it would be a bounce with no notice attached.
+
 ### NFR
 
 - **NFR-1** No new dependency; scheduling uses `time.AfterFunc` as the idle
@@ -233,3 +262,5 @@ Every admin action that currently forces a bounce accepts a `restart` policy:
 | FR-5.5 | Unit: past `at` and `at > 7d` → 400 |
 | FR-6.2 | Unit: `Reconcile` re-arms a persisted future schedule; elapsed one fires |
 | FR-7.x | Component tests + manual UAT |
+| FR-8.1, FR-8.2 | Component tests in crab-exoskeleton-webapp (`restart-policy-select.test.tsx`) |
+| FR-8.3 | Component + client tests in crab-exoskeleton-webapp (`restart-notice.test.tsx`, `adminRestart.test.ts`) |
