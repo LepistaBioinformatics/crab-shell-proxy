@@ -1270,7 +1270,7 @@
         ],
         "responses": {
           "200": {
-            "description": "pending, reason, note, noticeAt, scheduledAt, lastRestartAt, running.",
+            "description": "pending, reason, note, noticeAt, scheduledAt, lastRestartAt, running, and canRestart \u2014 whether THIS caller may act on it. A read-only member sees the notice with canRestart=false; the client cannot infer that, because holding read on an agent says nothing about holding write.",
             "content": {
               "application/json": {
                 "schema": {
