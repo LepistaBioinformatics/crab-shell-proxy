@@ -35,7 +35,7 @@ type ContainerSummary struct {
 type CreateSpec struct {
 	Name    string
 	Image   string
-	User    string // optional "uid:gid"; empty => image default (root)
+	User    string   // optional "uid:gid"; empty => image default (root)
 	Cmd     []string // optional; nil => use the image's default command
 	Env     []string
 	Labels  map[string]string

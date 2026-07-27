@@ -192,8 +192,8 @@ func (m *Manager) createHermes(ctx context.Context, agent config.Agent, key Work
 		// NOT the image's default interactive CLI — the CLI reads stdin, hits EOF
 		// with no TTY, prints "Goodbye!" and exits, so s6 tears the container down
 		// seconds after boot. `gateway run` is the headless daemon.
-		Cmd:   []string{"gateway", "run"},
-		Env:   env,
+		Cmd: []string{"gateway", "run"},
+		Env: env,
 		Labels: map[string]string{
 			LabelManaged:      "true",
 			LabelAgent:        key.Role,

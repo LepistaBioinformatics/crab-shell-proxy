@@ -70,6 +70,11 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			}
 		}
 	}
+
+	// Re-arm admin-scheduled bounces last. Without this a proxy restart silently
+	// drops every scheduled window an admin set (restart-control FR-6.2); one
+	// that came due while the proxy was down fires immediately.
+	m.RearmSchedules()
 	return nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/google/uuid"
 )
 
@@ -380,6 +381,14 @@ func (s *Server) handleAdminSharedSecretsPost(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
 		return
 	}
+	// Validate the restart policy BEFORE mutating: a 400 after a successful write
+	// would tell the caller their request failed when only the restart
+	// instruction was unusable.
+	policy, ok := s.parseRestartPolicy(w, r)
+	if !ok {
+		return
+	}
+
 	if err := s.Mgr.WriteSharedSecret(scope, req.Format, req.Name, req.Value); err != nil {
 		if errors.Is(err, docker.ErrInvalidSecretName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
@@ -389,9 +398,7 @@ func (s *Server) handleAdminSharedSecretsPost(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after secret write failed scope=%+v: %v", scope, err)
-	}
+	s.applyParsedRestartPolicy(scope, restart.ReasonSharedSecret, policy, ident.Email)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "format": req.Format, "name": req.Name})
 }
 
@@ -432,6 +439,14 @@ func (s *Server) handleAdminSharedSecretsDelete(w http.ResponseWriter, r *http.R
 	}
 	format := r.URL.Query().Get("format")
 	name := r.URL.Query().Get("name")
+	// Validate the restart policy BEFORE mutating: a 400 after a successful write
+	// would tell the caller their request failed when only the restart
+	// instruction was unusable.
+	policy, ok := s.parseRestartPolicy(w, r)
+	if !ok {
+		return
+	}
+
 	if err := s.Mgr.DeleteSharedSecret(scope, format, name); err != nil {
 		if errors.Is(err, docker.ErrInvalidSecretName) || errors.Is(err, docker.ErrUnknownNativeSlot) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
@@ -448,9 +463,7 @@ func (s *Server) handleAdminSharedSecretsDelete(w http.ResponseWriter, r *http.R
 	if format == docker.FormatNative {
 		s.Mgr.UnsetNativeSlotForScope(scope, name)
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after secret delete failed scope=%+v: %v", scope, err)
-	}
+	s.applyParsedRestartPolicy(scope, restart.ReasonSharedSecret, policy, ident.Email)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "format": format, "name": name})
 }
 
@@ -681,6 +694,14 @@ func (s *Server) handleAdminSkillsPost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("a `name` field is required"))
 		return
 	}
+	// Validate the restart policy BEFORE mutating: a 400 after a successful write
+	// would tell the caller their request failed when only the restart
+	// instruction was unusable.
+	policy, ok := s.parseRestartPolicy(w, r)
+	if !ok {
+		return
+	}
+
 	var writeErr error
 	if file, _, err := r.FormFile("file"); err == nil {
 		defer file.Close()
@@ -707,9 +728,7 @@ func (s *Server) handleAdminSkillsPost(w http.ResponseWriter, r *http.Request) {
 	if err := s.Mgr.SyncEffectiveSkillsForScope(scope); err != nil {
 		s.logf("admin: sync effective skills failed scope=%+v: %v", scope, err)
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after skill write failed scope=%+v: %v", scope, err)
-	}
+	s.applyParsedRestartPolicy(scope, restart.ReasonSharedSkills, policy, ident.Email)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "name": name})
 }
 
@@ -731,6 +750,14 @@ func (s *Server) handleAdminSkillsDelete(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, errBody(`"name" query parameter is required`))
 		return
 	}
+	// Validate the restart policy BEFORE mutating: a 400 after a successful write
+	// would tell the caller their request failed when only the restart
+	// instruction was unusable.
+	policy, ok := s.parseRestartPolicy(w, r)
+	if !ok {
+		return
+	}
+
 	if err := s.Mgr.DeleteSharedSkill(scope, name); err != nil {
 		if st, ok := skillErrStatus(err); ok {
 			writeJSON(w, st, errBody(err.Error()))
@@ -743,8 +770,6 @@ func (s *Server) handleAdminSkillsDelete(w http.ResponseWriter, r *http.Request)
 	if err := s.Mgr.SyncEffectiveSkillsForScope(scope); err != nil {
 		s.logf("admin: sync effective skills failed scope=%+v: %v", scope, err)
 	}
-	if err := s.Mgr.RestartScope(scope); err != nil {
-		s.logf("admin: restart scope after skill delete failed scope=%+v: %v", scope, err)
-	}
+	s.applyParsedRestartPolicy(scope, restart.ReasonSharedSkills, policy, ident.Email)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "name": name})
 }

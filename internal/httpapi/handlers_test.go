@@ -10,11 +10,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/klauspost/compress/zstd"
 )
@@ -52,7 +54,6 @@ type fakeOrch struct {
 	sharedDeletes   []docker.Scope
 	nativeUnsets    []string
 	userFileDeletes []docker.WorkspaceKey
-	restartScopes   []docker.Scope
 
 	// model re-apply fakes: record calls, return canned results.
 	reapplyScopes    []docker.Scope
@@ -65,6 +66,17 @@ type fakeOrch struct {
 	// reg backs SetModelAssignment/ClearModelAssignment, mirroring what the real
 	// Manager does against the registry.
 	reg *registry.Registry
+
+	// restart-control recording. The notice store is real (over a temp dir) so
+	// the derived pending/not-pending rules are exercised rather than faked;
+	// only the container side is recorded.
+	restartStore     *restart.Store
+	propagatedScopes []docker.Scope
+	bouncedScopes    []docker.Scope
+	armedSchedules   []docker.Scope
+	workspaceNotices []docker.WorkspaceKey
+	statusRunning    bool
+	restartErr       error
 }
 
 type secretWrite struct {
@@ -73,6 +85,61 @@ type secretWrite struct {
 }
 
 func newFakeOrch() *fakeOrch { return &fakeOrch{scaffolded: map[string]bool{}} }
+
+// restarts_ is a REAL notice store over a per-fake temp dir, so the derived
+// pending/not-pending rules are exercised rather than faked. It must never fall
+// back to a shared directory: two tests sharing one root leak notices into each
+// other and a "no notice was raised" assertion silently passes on someone else's
+// state.
+func (f *fakeOrch) restarts_() *restart.Store {
+	if f.restartStore == nil {
+		dir, err := os.MkdirTemp("", "fakeorch-restart-")
+		if err != nil {
+			panic("fakeOrch: temp restart root: " + err.Error())
+		}
+		f.restartStore = restart.NewStore(dir)
+	}
+	return f.restartStore
+}
+
+func (f *fakeOrch) RestartStatus(key docker.WorkspaceKey) (docker.RestartStatus, error) {
+	st, err := f.restarts_().Status(key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if err != nil {
+		return docker.RestartStatus{}, err
+	}
+	return docker.RestartStatus{Status: st, Running: f.statusRunning}, nil
+}
+
+func (f *fakeOrch) RaiseWorkspaceRestartNotice(key docker.WorkspaceKey, reason restart.Reason) error {
+	f.workspaceNotices = append(f.workspaceNotices, key)
+	return f.restarts_().RaiseWorkspace(key.TenantID, key.SubsAccID, key.Role, key.UserAccID, reason, time.Now().UTC())
+}
+
+func (f *fakeOrch) RaiseRestartNotice(scope docker.Scope, n restart.Notice) error {
+	return f.restarts_().Raise(scope.TenantID, scope.SubsAccID, scope.AgentKey, n)
+}
+
+func (f *fakeOrch) RestartNotice(scope docker.Scope) (restart.Notice, bool, error) {
+	return f.restarts_().Get(scope.TenantID, scope.SubsAccID, scope.AgentKey)
+}
+
+func (f *fakeOrch) WithdrawRestartNotice(scope docker.Scope) error {
+	return f.restarts_().Withdraw(scope.TenantID, scope.SubsAccID, scope.AgentKey)
+}
+
+func (f *fakeOrch) PropagateScope(scope docker.Scope) error {
+	f.propagatedScopes = append(f.propagatedScopes, scope)
+	return nil
+}
+
+func (f *fakeOrch) BounceScope(scope docker.Scope) error {
+	f.bouncedScopes = append(f.bouncedScopes, scope)
+	return nil
+}
+
+func (f *fakeOrch) ArmScheduledBounce(scope docker.Scope, _ time.Time) {
+	f.armedSchedules = append(f.armedSchedules, scope)
+}
 
 func (f *fakeOrch) WriteSecret(_ config.Agent, key docker.WorkspaceKey, format, name, value string) error {
 	if f.writeErr != nil {
@@ -86,13 +153,15 @@ func (f *fakeOrch) ListSecrets(docker.WorkspaceKey) (docker.SecretNames, error) 
 	return f.listResult, nil
 }
 
-func (f *fakeOrch) ListSharedSkills(docker.Scope) ([]docker.SkillMeta, error)              { return nil, nil }
-func (f *fakeOrch) ReadSharedSkillDoc(docker.Scope, string) (string, docker.SkillMeta, error) { return "", docker.SkillMeta{}, nil }
-func (f *fakeOrch) WriteSharedSkillDoc(docker.Scope, string, string) error                 { return nil }
-func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error              { return nil }
-func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error               { return nil }
-func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error                           { return nil }
-func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error                         { return nil }
+func (f *fakeOrch) ListSharedSkills(docker.Scope) ([]docker.SkillMeta, error) { return nil, nil }
+func (f *fakeOrch) ReadSharedSkillDoc(docker.Scope, string) (string, docker.SkillMeta, error) {
+	return "", docker.SkillMeta{}, nil
+}
+func (f *fakeOrch) WriteSharedSkillDoc(docker.Scope, string, string) error    { return nil }
+func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error { return nil }
+func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error  { return nil }
+func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error              { return nil }
+func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error            { return nil }
 
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
@@ -103,8 +172,11 @@ func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) er
 }
 
 func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
+	if f.restartErr != nil {
+		return f.restartErr
+	}
 	f.restarts = append(f.restarts, key)
-	return nil
+	return f.restarts_().Stamp(key.TenantID, key.SubsAccID, key.Role, key.UserAccID, time.Now().UTC())
 }
 
 func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error) {
@@ -196,36 +268,31 @@ func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _ string) error {
 	return nil
 }
 
-func (f *fakeOrch) RestartScope(scope docker.Scope) error {
-	f.restartScopes = append(f.restartScopes, scope)
-	return nil
-}
-
-func (f *fakeOrch) ReapplyModelScope(scope docker.Scope) error {
+func (f *fakeOrch) ReapplyModelScope(scope docker.Scope, _ bool) error {
 	f.reapplyCalls++
 	f.reapplyScopes = append(f.reapplyScopes, scope)
 	return nil
 }
 
-func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey) error {
+func (f *fakeOrch) ReapplyModelUser(key docker.WorkspaceKey, _ bool) error {
 	f.reapplyCalls++
 	f.reapplyUserKeys = append(f.reapplyUserKeys, key)
 	return nil
 }
 
-func (f *fakeOrch) ReapplyModelForModel(modelName string) error {
+func (f *fakeOrch) ReapplyModelForModel(modelName string, _ bool) error {
 	f.reapplyCalls++
 	f.reapplyForModels = append(f.reapplyForModels, modelName)
 	return nil
 }
 
-func (f *fakeOrch) SetModelAssignment(key docker.WorkspaceKey, modelName string) error {
+func (f *fakeOrch) SetModelAssignment(key docker.WorkspaceKey, modelName string, _ bool) error {
 	return f.reg.PutAssignment(registry.WorkspaceRef{
 		TenantID: key.TenantID, SubsAccID: key.SubsAccID, Agent: key.Role, UserAccID: key.UserAccID,
 	}, registry.Assignment{ModelName: modelName, Source: registry.SourceExplicit})
 }
 
-func (f *fakeOrch) ClearModelAssignment(key docker.WorkspaceKey) error {
+func (f *fakeOrch) ClearModelAssignment(key docker.WorkspaceKey, _ bool) error {
 	return f.reg.DeleteAssignment(registry.WorkspaceRef{
 		TenantID: key.TenantID, SubsAccID: key.SubsAccID, Agent: key.Role, UserAccID: key.UserAccID,
 	})
@@ -810,8 +877,14 @@ func TestSecretsPostEachFormat(t *testing.T) {
 				orch.writes[0].key.SubsAccID != subsX || orch.writes[0].key.TenantID != tenantT {
 				t.Errorf("routed key = %+v", orch.writes[0].key)
 			}
-			if len(orch.restarts) != 1 {
-				t.Errorf("restart invoked %d times, want 1", len(orch.restarts))
+			// DEC-3: a member's own secret write no longer force-restarts them
+			// mid-conversation. It leaves a notice on their own marker; they press
+			// the button.
+			if len(orch.restarts) != 0 {
+				t.Errorf("container bounced %d times, want 0 (the member decides when)", len(orch.restarts))
+			}
+			if len(orch.workspaceNotices) != 1 {
+				t.Errorf("workspace notices = %d, want 1", len(orch.workspaceNotices))
 			}
 		})
 	}
@@ -974,8 +1047,11 @@ func TestSecretsDelete(t *testing.T) {
 	if len(orch.deletes) != 1 || orch.deletes[0].name != "BRAVE_KEY" || orch.deletes[0].format != "dotenv" {
 		t.Errorf("delete not recorded: %+v", orch.deletes)
 	}
-	if len(orch.restarts) != 1 {
-		t.Errorf("restart after delete invoked %d times, want 1", len(orch.restarts))
+	if len(orch.restarts) != 0 {
+		t.Errorf("container bounced %d times after delete, want 0 (DEC-3)", len(orch.restarts))
+	}
+	if len(orch.workspaceNotices) != 1 {
+		t.Errorf("workspace notices after delete = %d, want 1", len(orch.workspaceNotices))
 	}
 }
 

@@ -10,8 +10,9 @@ import (
 // Operator-managed workspace content, bind-mounted read-only into every
 // container so the agent can neither alter it nor keep an edit past a restart.
 // Relative to the container-side ManagedSkillsDir:
-//   skills/<managedSkillName>/  -> workspace/skills/<managedSkillName> (guidance)
-//   memory/<managedMemoryFile>  -> workspace/memory/<managedMemoryFile> (recovery)
+//
+//	skills/<managedSkillName>/  -> workspace/skills/<managedSkillName> (guidance)
+//	memory/<managedMemoryFile>  -> workspace/memory/<managedMemoryFile> (recovery)
 const (
 	managedSkillRel  = "skills/shared-content"
 	managedMemoryRel = "memory/CONTEXT_RECOVERY.md"

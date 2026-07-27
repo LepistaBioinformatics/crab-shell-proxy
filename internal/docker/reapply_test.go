@@ -50,7 +50,7 @@ func TestReapplyModelForModelTouchesOnlyWorkspacesHoldingIt(t *testing.T) {
 	beforeBystander, _ := os.ReadFile(filepath.Join(bystanderDir, "config.json"))
 
 	// Editing fb's key must reach the holder even though fb is only its FALLBACK.
-	if err := m.ReapplyModelForModel("fb"); err != nil {
+	if err := m.ReapplyModelForModel("fb", true); err != nil {
 		t.Fatalf("ReapplyModelForModel: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestReapplyModelScopeLeavesAPinnedWorkspaceCompletelyAlone(t *testing.T) {
 	rec := &recordingDocker{}
 	m.docker = rec
 
-	if err := m.ReapplyModelScope(Scope{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1"}); err != nil {
+	if err := m.ReapplyModelScope(Scope{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1"}, true); err != nil {
 		t.Fatalf("ReapplyModelScope: %v", err)
 	}
 
@@ -154,7 +154,7 @@ func TestReapplyModelUserRewritesFromTheRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := m.ReapplyModelUser(key); err != nil {
+	if err := m.ReapplyModelUser(key, true); err != nil {
 		t.Fatalf("ReapplyModelUser: %v", err)
 	}
 

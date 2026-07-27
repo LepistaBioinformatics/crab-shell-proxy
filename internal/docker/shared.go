@@ -370,13 +370,39 @@ func (m *Manager) DeleteUserFile(key WorkspaceKey, name string) error {
 	return m.DeleteMedia(key, name)
 }
 
-// RestartScope is the best-effort propagation of a shared-content write/delete
-// (NFR-4): it recreates the running containers under the affected scope so a
-// changed shared file (live RO mount) is re-read and a changed shared secret
-// (injected as env at create time) takes effect. Idled/absent containers pick
-// up the change on their next cold start regardless. Per-container failures are
-// logged, not returned — the write already succeeded.
-func (m *Manager) RestartScope(scope Scope) error {
+// PropagateScope puts the change on disk for EVERY workspace in scope, running
+// or not: it rebuilds the effective secret view (bind-mounted read-only at
+// workspace/.secrets) and merges the native slots into each established
+// .security.yml. Native slots are not sink files — they live inside
+// .security.yml — so the mount alone does not deliver them
+// (native-secrets-admin-only FR-6).
+//
+// Unlike the bounce, this covers stopped and scaled-to-zero workspaces, so a
+// deferred restart still finds the new data waiting when it finally happens.
+// Per-workspace failures are logged, not returned: the admin's write already
+// succeeded.
+func (m *Manager) PropagateScope(scope Scope) error {
+	for _, key := range m.workspacesInScope(scope) {
+		effDir, err := m.syncEffectiveSecrets(key)
+		if err != nil {
+			m.logf("propagate scope %s/%s: sync secrets %s failed: %v",
+				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
+			continue
+		}
+		if err := m.applyNativeToWorkspace(key, effDir); err != nil {
+			m.logf("propagate scope %s/%s: apply native %s failed: %v",
+				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
+		}
+	}
+	return nil
+}
+
+// BounceScope stops+starts the RUNNING containers under the scope so the harness
+// re-reads what PropagateScope just wrote. Stop/start — NOT recreate — so the
+// live session survives; a recreate would truncate the transcript. Idled and
+// absent containers need nothing: they pick the change up on their next cold
+// start. Per-container failures are logged, not returned.
+func (m *Manager) BounceScope(scope Scope) error {
 	ctx := context.Background()
 	summaries, err := m.docker.List(ctx, LabelManaged+"=true")
 	if err != nil {
@@ -400,24 +426,8 @@ func (m *Manager) RestartScope(scope Scope) error {
 			Role:      s.Labels[LabelAgent],
 			UserAccID: s.Labels[LabelUser],
 		}
-		// Rebuild the effective secret view (so the change is on disk) then
-		// stop/start — NOT recreate — so picoclaw reloads it while keeping its
-		// live session; a recreate would truncate the transcript.
-		effDir, err := m.syncEffectiveSecrets(key)
-		if err != nil {
-			m.logf("restart scope %s/%s: sync secrets %s failed: %v",
-				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
-			continue
-		}
-		// Native slots are not sink files — they live inside .security.yml — so the
-		// mount alone does not deliver them. Merge them into this workspace before
-		// the restart (native-secrets-admin-only FR-6).
-		if err := m.applyNativeToWorkspace(key, effDir); err != nil {
-			m.logf("restart scope %s/%s: apply native %s failed: %v",
-				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
-		}
 		if err := m.RestartWorkspace(key); err != nil {
-			m.logf("restart scope %s/%s: restart %s failed: %v",
+			m.logf("bounce scope %s/%s: restart %s failed: %v",
 				scope.TenantID, scope.SubsAccID, m.ContainerName(key), err)
 		}
 	}

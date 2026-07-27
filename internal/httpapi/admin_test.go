@@ -248,13 +248,15 @@ func TestSharedWriteTriggersRestartScope(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 		}
-		if len(orch.sharedWrites) != 1 || len(orch.restartScopes) != 0 {
-			t.Errorf("writes=%d restarts=%d, want 1/0 (files are live via RO mount)",
-				len(orch.sharedWrites), len(orch.restartScopes))
+		if len(orch.sharedWrites) != 1 || len(orch.bouncedScopes) != 0 {
+			t.Errorf("writes=%d bounces=%d, want 1/0 (files are live via RO mount)",
+				len(orch.sharedWrites), len(orch.bouncedScopes))
 		}
 	})
 
 	t.Run("secret-restarts", func(t *testing.T) {
+		// The default (no ?restart=) must stay byte-identical to the pre-policy
+		// behaviour — that is what makes restart-control additive.
 		orch := newFakeOrch()
 		s := testServer(orch, &fakeTurner{})
 
@@ -268,8 +270,14 @@ func TestSharedWriteTriggersRestartScope(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 		}
-		if len(orch.restartScopes) != 1 {
-			t.Errorf("restarts=%d, want 1 (env secrets need a recreate)", len(orch.restartScopes))
+		// Default policy is "now" (restart-control FR-4.2): propagate, then bounce.
+		if len(orch.propagatedScopes) != 1 {
+			t.Errorf("propagated=%d, want 1 (the change must reach disk whatever the policy)",
+				len(orch.propagatedScopes))
+		}
+		if len(orch.bouncedScopes) != 1 {
+			t.Errorf("bounces=%d, want 1 (no policy given means bounce now, as before)",
+				len(orch.bouncedScopes))
 		}
 	})
 }
@@ -301,8 +309,8 @@ func TestAdminWriteForbiddenNoMutation(t *testing.T) {
 		if w.Code != http.StatusForbidden {
 			t.Errorf("status = %d, want 403", w.Code)
 		}
-		if len(orch.sharedWrites) != 0 || len(orch.restartScopes) != 0 {
-			t.Errorf("mutation ran despite 403: writes=%d restarts=%d", len(orch.sharedWrites), len(orch.restartScopes))
+		if len(orch.sharedWrites) != 0 || len(orch.bouncedScopes) != 0 {
+			t.Errorf("mutation ran despite 403: writes=%d bounces=%d", len(orch.sharedWrites), len(orch.bouncedScopes))
 		}
 	})
 	// Shared-secret write + delete at tenant scope by a subs-manager -> 403.

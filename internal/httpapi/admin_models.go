@@ -153,7 +153,11 @@ func (s *Server) handleAdminModelUpdate(w http.ResponseWriter, r *http.Request) 
 	// A definition or key change must reach every workspace holding this model —
 	// as primary OR as a chain member. Reaching only primaries would leave the
 	// fallback holders on a stale credential.
-	if err := s.Mgr.ReapplyModelForModel(name); err != nil {
+	bounce, ok := s.bounceNow(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.ReapplyModelForModel(name, bounce); err != nil {
 		s.logf("admin models: reapply after updating %q: %v", name, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"model": registry.Public(updated, 0)})

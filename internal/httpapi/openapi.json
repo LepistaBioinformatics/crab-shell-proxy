@@ -1237,6 +1237,295 @@
           }
         }
       }
+    },
+    "/v1/restart": {
+      "get": {
+        "operationId": "getRestartStatus",
+        "tags": [
+          "restart"
+        ],
+        "summary": "Whether the caller's instance still needs a restart",
+        "description": "Derived, not stored: the workspace is pending when its last restart predates the newest notice reaching it (its own, or one raised at its agent / subscription / tenant scope). Read access is enough \u2014 a read-only member cannot trigger a restart but must still see a scheduled one coming.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenant the caller's workspace belongs to."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The subscription account the caller's workspace belongs to."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "pending, reason, note, noticeAt, scheduledAt, lastRestartAt, running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not licensed for this subscription and agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "restartOwnInstance",
+        "tags": [
+          "restart"
+        ],
+        "summary": "Restart the caller's own instance",
+        "description": "Restarts only the caller's own container: the workspace is resolved from the mycelium profile and the routed agent, so a user id supplied in the request is ignored, never honoured. Requires WRITE on the agent role \u2014 enforced in-proxy, because the gateway matches routes by path alone and cannot gate GET and POST differently. Answers {\"status\":\"noop\"} when the container was already stopped: nothing was bounced, but the notice is resolved because the next cold start begins from the new state.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenant the caller's workspace belongs to."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The subscription account the caller's workspace belongs to."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "status (restarted|noop) and the new lastRestartAt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks write access on this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The container could not be restarted; the message carries the reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/restart": {
+      "get": {
+        "operationId": "adminGetRestartNotice",
+        "tags": [
+          "restart"
+        ],
+        "summary": "The restart notice recorded at exactly this scope",
+        "description": "No cascade \u2014 this is the record the admin screen shows and amends.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The target tenant."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Present narrows the target to one subscription; absent targets the whole tenant."
+          },
+          {
+            "name": "agent_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Present narrows the notice to one agent; absent covers every agent in the scope."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"notice\": {...}} or {\"notice\": null}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks authority over this scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "adminRequestRestart",
+        "tags": [
+          "restart"
+        ],
+        "summary": "Restart a scope now, schedule it, or just notify",
+        "description": "mode is now | notice | schedule. \"schedule\" requires an RFC3339 \"at\" in the future and within 7 days; the timer is re-armed from disk when the proxy restarts, and one that came due while it was down fires immediately. Authority over the target follows the same rule as shared content: a subscriptions-manager owns their subscription, a tenant manager the tenant.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "status and the applied mode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown mode, or an \"at\" that is absent, past, unparseable or beyond 7 days.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks authority over this scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "adminWithdrawRestartNotice",
+        "tags": [
+          "restart"
+        ],
+        "summary": "Withdraw a scope's restart notice and disarm its schedule",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The target tenant."
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Present narrows the target to one subscription; absent targets the whole tenant."
+          },
+          {
+            "name": "agent_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Present narrows the notice to one agent; absent covers every agent in the scope."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "status: withdrawn.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller lacks authority over this scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

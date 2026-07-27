@@ -126,7 +126,7 @@ func (s *Server) handleAdminModelDefaultSet(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, status, body)
 		return
 	}
-	s.reapplyForScope(sel)
+	s.reapplyForScope(r, sel)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
@@ -140,7 +140,7 @@ func (s *Server) handleAdminModelDefaultClear(w http.ResponseWriter, r *http.Req
 		writeJSON(w, status, body)
 		return
 	}
-	s.reapplyForScope(sel)
+	s.reapplyForScope(r, sel)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
@@ -148,7 +148,7 @@ func (s *Server) handleAdminModelDefaultClear(w http.ResponseWriter, r *http.Req
 // A global or agent change has no docker.Scope to express, so it is left to each
 // workspace's next start rather than sweeping the whole instance — a fleet-wide
 // restart is not something a single admin click should trigger.
-func (s *Server) reapplyForScope(sel registry.ScopeSel) {
+func (s *Server) reapplyForScope(r *http.Request, sel registry.ScopeSel) {
 	var scope docker.Scope
 	switch sel.Level {
 	case registry.LevelTenant:
@@ -159,8 +159,19 @@ func (s *Server) reapplyForScope(sel registry.ScopeSel) {
 		s.logf("model default %s changed: workspaces pick it up on their next start", sel.Level)
 		return
 	}
-	if err := s.Mgr.ReapplyModelScope(scope); err != nil {
+	// A malformed policy here cannot be reported — the default is already saved
+	// and this runs past the response — so fall back to bouncing, which is the
+	// behaviour this path always had.
+	p, err := restartPolicyFrom(r)
+	if err != nil {
+		s.logf("model default: bad restart policy, bouncing: %v", err)
+		p = RestartPolicy{Mode: PolicyNow}
+	}
+	if err := s.Mgr.ReapplyModelScope(scope, p.Mode == PolicyNow); err != nil {
 		s.logf("model default: reapply scope %+v: %v", scope, err)
+	}
+	if p.Mode == PolicySchedule {
+		s.Mgr.ArmScheduledBounce(scope, *p.ScheduledAt)
 	}
 }
 
@@ -231,7 +242,11 @@ func (s *Server) handleAdminModelAssignmentSet(w http.ResponseWriter, r *http.Re
 			errBody("model "+req.ModelName+" is disabled and cannot be assigned"))
 		return
 	}
-	if err := s.Mgr.SetModelAssignment(key, req.ModelName); err != nil {
+	bounce, ok := s.bounceNow(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.SetModelAssignment(key, req.ModelName, bounce); err != nil {
 		status, body := registryErrStatus(err)
 		writeJSON(w, status, body)
 		return
@@ -244,7 +259,11 @@ func (s *Server) handleAdminModelAssignmentClear(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	if err := s.Mgr.ClearModelAssignment(key); err != nil {
+	bounce, ok := s.bounceNow(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.ClearModelAssignment(key, bounce); err != nil {
 		status, body := registryErrStatus(err)
 		writeJSON(w, status, body)
 		return

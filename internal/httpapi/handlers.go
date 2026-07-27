@@ -23,6 +23,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/google/uuid"
 )
@@ -47,6 +48,27 @@ type Orchestrator interface {
 	// RestartWorkspace restarts the caller's container so an injected secret
 	// takes effect immediately.
 	RestartWorkspace(key docker.WorkspaceKey) error
+
+	// --- restart-control (policy-driven bounces + member self-restart) ---
+
+	// RestartStatus reports whether one workspace still needs a bounce, why, and
+	// whether a restart is already scheduled for it.
+	RestartStatus(key docker.WorkspaceKey) (docker.RestartStatus, error)
+	// RaiseWorkspaceRestartNotice records a notice concerning only this member (their
+	// (a member’s own secret write, or a targeted model re-apply), never their peers.
+	RaiseWorkspaceRestartNotice(key docker.WorkspaceKey, reason restart.Reason) error
+	// RaiseRestartNotice / RestartNotice / WithdrawRestartNotice manage a scope's
+	// pending-restart record.
+	RaiseRestartNotice(scope docker.Scope, n restart.Notice) error
+	RestartNotice(scope docker.Scope) (restart.Notice, bool, error)
+	WithdrawRestartNotice(scope docker.Scope) error
+	// PropagateScope puts a change on disk for every workspace in scope (running
+	// or not); BounceScope stops+starts only the running ones. Split so the
+	// bounce can be deferred while propagation never is (FR-4.1).
+	PropagateScope(scope docker.Scope) error
+	BounceScope(scope docker.Scope) error
+	// ArmScheduledBounce schedules a scope bounce, replacing any pending timer.
+	ArmScheduledBounce(scope docker.Scope, at time.Time)
 	// StoreMedia writes an uploaded file into the caller's workspace uploads
 	// dir and returns its workspace-relative path.
 	StoreMedia(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
@@ -90,24 +112,28 @@ type Orchestrator interface {
 	ListUserFiles(key docker.WorkspaceKey) ([]docker.FileMeta, error)
 	// DeleteUserFile removes one of a user's private files (never reads it — FR-7).
 	DeleteUserFile(key docker.WorkspaceKey, name string) error
-	// RestartScope best-effort recreates running containers under a scope (NFR-4).
-	RestartScope(scope docker.Scope) error
 
 	// --- model re-apply (internal/registry is the resolver; no keys transit here) ---
 
+	// Each re-apply takes `bounce`: true restarts the affected workspaces now,
+	// false leaves a per-workspace restart notice instead (restart-control FR-4).
+	// The notice is per workspace, not per scope, because these passes compute an
+	// exact affected set — pinned workspaces are skipped, and a model edit spans
+	// tenants — so a scope notice would banner members whose instance is unchanged.
+
 	// ReapplyModelScope re-applies the resolved model to every established
-	// workspace under a scope, then restarts the running ones.
-	ReapplyModelScope(scope docker.Scope) error
+	// workspace under a scope.
+	ReapplyModelScope(scope docker.Scope, bounce bool) error
 	// ReapplyModelUser re-applies the resolved model to one user's established
-	// workspace, then restarts it if running.
-	ReapplyModelUser(key docker.WorkspaceKey) error
+	// workspace.
+	ReapplyModelUser(key docker.WorkspaceKey, bounce bool) error
 	// ReapplyModelForModel re-materializes every workspace whose materialized set
 	// contains the model — primaries AND chain holders.
-	ReapplyModelForModel(modelName string) error
+	ReapplyModelForModel(modelName string, bounce bool) error
 	// SetModelAssignment pins one workspace to a model; ClearModelAssignment drops
 	// the pin so the scope default applies again.
-	SetModelAssignment(key docker.WorkspaceKey, modelName string) error
-	ClearModelAssignment(key docker.WorkspaceKey) error
+	SetModelAssignment(key docker.WorkspaceKey, modelName string, bounce bool) error
+	ClearModelAssignment(key docker.WorkspaceKey, bounce bool) error
 
 	// --- admin-shared-skills (per-scope skill dirs; keys never involved) ---
 
@@ -181,11 +207,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/media", s.handleMediaPost)
 	mux.HandleFunc("GET /v1/media", s.handleMediaList)
 	mux.HandleFunc("DELETE /v1/media", s.handleMediaDelete)
+	mux.HandleFunc("GET /v1/restart", s.handleRestartStatus)
+	mux.HandleFunc("POST /v1/restart", s.handleRestartPost)
 	mux.HandleFunc("GET /v1/memory", s.handleMemoryGet)
 	mux.HandleFunc("PUT /v1/memory", s.handleMemoryPut)
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
 	// internal/authz. There is deliberately NO users/files/content route and no
 	// user-file write route (FR-7 privacy invariant).
+	mux.HandleFunc("GET /v1/admin/restart", s.handleAdminRestartGet)
+	mux.HandleFunc("POST /v1/admin/restart", s.handleAdminRestartPost)
+	mux.HandleFunc("DELETE /v1/admin/restart", s.handleAdminRestartDelete)
 	mux.HandleFunc("GET /v1/admin/scopes", s.handleAdminScopes)
 	mux.HandleFunc("GET /v1/admin/agents", s.handleAdminAgents)
 	mux.HandleFunc("GET /v1/admin/shared", s.handleAdminSharedList)
@@ -735,7 +766,8 @@ func rejectNativeForUser(w http.ResponseWriter, format string) bool {
 }
 
 // handleSecretsPost injects/updates one secret for the caller's (user, agent)
-// pair and restarts the container so picoclaw re-reads it (AC-02, CTX-AC-04).
+// pair (AC-02). The container is no longer bounced here: the member gets a
+// restart notice and decides when to apply it (restart-control DEC-3).
 func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
@@ -777,10 +809,12 @@ func (s *Server) handleSecretsPost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	if err := s.Mgr.RestartWorkspace(key); err != nil {
-		s.logf("secrets: restart failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
-		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
-		return
+	// The secret is stored and the effective view rebuilt, but the container is
+	// NOT bounced here (restart-control DEC-3): a forced restart mid-conversation
+	// is exactly the disruption this feature removes. The member gets a notice on
+	// their own marker — never their peers' — and presses the button when ready.
+	if err := s.Mgr.RaiseWorkspaceRestartNotice(key, restart.ReasonOwnSecret); err != nil {
+		s.logf("secrets: raise restart notice failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 	}
 	s.logf("secrets: injected svc=%s tenant=%s subs=%s user=%s format=%s",
 		agent.Key, tenantID, subsAccID, ident.AccID, req.Format)
@@ -853,10 +887,8 @@ func (s *Server) handleSecretsDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	if err := s.Mgr.RestartWorkspace(key); err != nil {
-		s.logf("secrets: restart after delete failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
-		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
-		return
+	if err := s.Mgr.RaiseWorkspaceRestartNotice(key, restart.ReasonOwnSecret); err != nil {
+		s.logf("secrets: raise restart notice after delete failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "format": format, "name": name})
 }
