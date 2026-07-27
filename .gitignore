@@ -2,3 +2,6 @@
 /out/
 *.test
 .DS_Store
+
+# Git worktrees created by tooling under .claude/ — never part of the tree
+.claude/worktrees/
