@@ -469,6 +469,9 @@ func writeJSONMap(path string, m map[string]string) error {
 // containedJoin. validateSecretName has already run at the entry point; this is
 // the check at the point of use, which is what a new caller cannot skip.
 func writeFileSecret(dir, name, value string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
 	path, err := containedJoin(dir, name)
 	if err != nil {
 		return err
@@ -480,6 +483,9 @@ func writeFileSecret(dir, name, value string) error {
 }
 
 func deleteFileSecret(dir, name string) error {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
 	path, err := containedJoin(dir, name)
 	if err != nil {
 		return err
