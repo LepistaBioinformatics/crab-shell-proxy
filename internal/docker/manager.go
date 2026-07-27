@@ -606,7 +606,10 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 	if err := validateSecretName(name); err != nil {
 		return err
 	}
-	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	storeDir, err := m.storeDirFor(key)
+	if err != nil {
+		return err
+	}
 	secPath := m.workspaceSecurityPath(agent, key)
 	if err := writeSecret(m.reg, storeDir, secPath, format, name, value); err != nil {
 		return err
@@ -625,14 +628,31 @@ func (m *Manager) WriteSecret(agent config.Agent, key WorkspaceKey, format, name
 	}
 	// Refresh the mounted effective view so the new secret is picked up on the
 	// caller's next stop/start (RestartWorkspace).
-	_, err := m.syncEffectiveSecrets(key)
+	_, err = m.syncEffectiveSecrets(key)
 	return err
+}
+
+// storeDirFor builds the caller's secret store and refuses one that has somehow
+// landed outside the data root. Every path under internal/docker that a request
+// can influence is built from an id that identity.SanitizeID has already reduced
+// to a single safe segment, so this cannot fire today — which is the point of
+// putting it in ONE builder rather than at each of the four call sites: the
+// check now costs nothing to keep and cannot be forgotten by the fifth.
+func (m *Manager) storeDirFor(key WorkspaceKey) (string, error) {
+	dir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	if err := underRoot(m.cfg.ContainerDataRoot, dir); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // ListSecrets returns the set secret names per format for the caller's store,
 // parsed server-side. It NEVER returns a stored value.
 func (m *Manager) ListSecrets(key WorkspaceKey) (SecretNames, error) {
-	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	storeDir, err := m.storeDirFor(key)
+	if err != nil {
+		return SecretNames{}, err
+	}
 	return listSecretNames(storeDir)
 }
 
@@ -642,7 +662,10 @@ func (m *Manager) DeleteSecret(key WorkspaceKey, format, name string) error {
 	if err := validateSecretName(name); err != nil {
 		return err
 	}
-	storeDir := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	storeDir, err := m.storeDirFor(key)
+	if err != nil {
+		return err
+	}
 	secPath := filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), ".security.yml")
 	if err := deleteSecret(storeDir, secPath, m.cfg.PicoclawUser, format, name); err != nil {
 		return err

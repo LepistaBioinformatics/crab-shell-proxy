@@ -523,7 +523,10 @@ func (m *Manager) workspacesInScope(scope Scope) []WorkspaceKey {
 // to take effect (FR-5). Called on every provision and whenever a user or shared
 // secret changes.
 func (m *Manager) syncEffectiveSecrets(key WorkspaceKey) (string, error) {
-	userStore := config.StoreDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	userStore, err := m.storeDirFor(key)
+	if err != nil {
+		return "", err
+	}
 	sharedDirs := m.sharedSecretsCascade(key)
 	eff := config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
 	if err := os.MkdirAll(eff, 0o700); err != nil {
