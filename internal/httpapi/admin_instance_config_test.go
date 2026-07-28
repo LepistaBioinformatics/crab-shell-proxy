@@ -54,7 +54,8 @@ func putReq(t *testing.T, path, body string, headers map[string]string) *http.Re
 
 func TestInstanceConfigRequiresUserManagement(t *testing.T) {
 	orch := newFakeOrch()
-	s := instanceConfigServer(orch, nil)
+	var logs []string
+	s := instanceConfigServer(orch, &logs)
 	// A member of the subscription, not a manager of it.
 	headers := headersFor(t, userProfile())
 
@@ -71,6 +72,24 @@ func TestInstanceConfigRequiresUserManagement(t *testing.T) {
 	}
 	if orch.instanceConfigWritten != "" {
 		t.Error("a refused caller reached the write")
+	}
+
+	// A REFUSED write is audited too. A 403 on an endpoint that can move the
+	// agent's sandbox boundary is the line an operator most wants to find, and it
+	// happens before the key exists — so it has to be logged from the handler.
+	var audit string
+	for _, l := range logs {
+		if strings.Contains(l, "instance config write") {
+			audit = l
+		}
+	}
+	if audit == "" {
+		t.Fatalf("a refused PUT left no audit line; logs = %v", logs)
+	}
+	for _, want := range []string{"by=", "user=" + accBob, "agent=alpha", "result=rejected"} {
+		if !strings.Contains(audit, want) {
+			t.Errorf("refusal audit missing %q: %s", want, audit)
+		}
 	}
 }
 

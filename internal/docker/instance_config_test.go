@@ -421,3 +421,87 @@ func blankManaged(doc map[string]any) map[string]any {
 	}
 	return out
 }
+
+// The mask must never become the stored credential. A legacy workspace's key is
+// redacted on read, so the admin round-trips a document containing "***" — and
+// the reapply that was supposed to replace model_list wholesale can FAIL (an
+// unresolvable registry is exactly the broken-instance case this feature
+// targets), leaving the mask on disk as the key.
+func TestWriteInstanceConfigNeverStoresTheMask(t *testing.T) {
+	legacy := `{"model_list":[{"model_name":"main","api_keys":["sk-live-secret"]}]}`
+	m, _, key, path := instanceConfigFixture(t, legacy)
+
+	read, err := m.ReadInstanceConfig(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read.Raw, "***") {
+		t.Fatalf("fixture was not redacted: %s", read.Raw)
+	}
+
+	// Submit exactly what the editor showed. No registry is configured, so the
+	// reapply fails and cannot rebuild model_list.
+	_, reapplied, err := m.WriteInstanceConfig(key, read.Raw, read.Revision)
+	if err != nil {
+		t.Fatalf("WriteInstanceConfig: %v", err)
+	}
+	if reapplied.OK {
+		t.Fatal("reapply unexpectedly succeeded; this test needs the failing path")
+	}
+
+	onDisk, _ := os.ReadFile(path)
+	if strings.Contains(string(onDisk), "***") {
+		t.Errorf("the mask was stored as the credential:\n%s", onDisk)
+	}
+	if !strings.Contains(string(onDisk), "sk-live-secret") {
+		t.Errorf("the credential was destroyed by a round-trip:\n%s", onDisk)
+	}
+}
+
+func TestWriteInstanceConfigRestoresMaskInObjectLayout(t *testing.T) {
+	legacy := `{"model_list":{"main":{"api_keys":["sk-live-secret"]}}}`
+	m, _, key, path := instanceConfigFixture(t, legacy)
+
+	read, err := m.ReadInstanceConfig(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.WriteInstanceConfig(key, read.Raw, read.Revision); err != nil {
+		t.Fatalf("WriteInstanceConfig: %v", err)
+	}
+	onDisk, _ := os.ReadFile(path)
+	if !strings.Contains(string(onDisk), "sk-live-secret") {
+		t.Errorf("the credential was destroyed by a round-trip:\n%s", onDisk)
+	}
+}
+
+// A mask with no counterpart on disk is a literal the admin typed, not a hidden
+// credential, so it is written as given. Restoring "from nowhere" would silently
+// resurrect a key the admin removed.
+func TestWriteInstanceConfigKeepsAMaskWithNoStoredKey(t *testing.T) {
+	m, _, key, path := instanceConfigFixture(t, `{"model_list":[{"model_name":"main"}]}`)
+
+	body := `{"model_list":[{"model_name":"main","api_keys":["***"]}]}`
+	if _, _, err := m.WriteInstanceConfig(key, body, ""); err != nil {
+		t.Fatalf("WriteInstanceConfig: %v", err)
+	}
+	onDisk, _ := os.ReadFile(path)
+	if string(onDisk) != body {
+		t.Errorf("on disk = %q, want the submitted bytes verbatim", onDisk)
+	}
+}
+
+// A document with no mask is written BYTE-FOR-BYTE. Only the legacy path
+// re-marshals, so the common case keeps the admin's own formatting.
+func TestWriteInstanceConfigDoesNotReformatWhenNothingIsMasked(t *testing.T) {
+	m, _, key, path := instanceConfigFixture(t, validConfigBody)
+
+	body := "{\"version\":9,   \"tools\":{}}"
+	if _, _, err := m.WriteInstanceConfig(key, body, ""); err != nil {
+		t.Fatalf("WriteInstanceConfig: %v", err)
+	}
+	onDisk, _ := os.ReadFile(path)
+	if string(onDisk) != body {
+		t.Errorf("on disk = %q, want the submitted bytes with their spacing intact", onDisk)
+	}
+}

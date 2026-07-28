@@ -122,10 +122,17 @@ func (s *Server) handleAdminInstanceConfigPut(w http.ResponseWriter, r *http.Req
 	}
 	key, ok := s.adminInstanceKey(w, r, ident)
 	if !ok {
+		// A refused write is audited too, and this is the only place that can do
+		// it: adminInstanceKey has already answered the request, and a 403 on a
+		// sandbox-boundary-capable endpoint is the line an operator most wants in
+		// the log. The key is unusable here, so the raw parameters are what gets
+		// recorded.
+		s.logInstanceConfigRefusal(ident, r, "rejected")
 		return
 	}
 	bounce, ok := s.bounceNow(w, r)
 	if !ok {
+		s.logInstanceConfigRefusal(ident, r, "bad-restart-policy")
 		return
 	}
 
@@ -134,6 +141,7 @@ func (s *Server) handleAdminInstanceConfigPut(w http.ResponseWriter, r *http.Req
 	var req instanceConfigRequest
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxInstanceConfigBody))
 	if err != nil {
+		s.logInstanceConfigWrite(ident, key, 0, false, 0, "unreadable-body", false)
 		writeJSON(w, http.StatusBadRequest, errBody("could not read request body"))
 		return
 	}
@@ -143,6 +151,7 @@ func (s *Server) handleAdminInstanceConfigPut(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
+		s.logInstanceConfigWrite(ident, key, 0, false, 0, "malformed-envelope", false)
 		writeJSON(w, http.StatusBadRequest, errBody("body must be JSON: {\"raw\": \"…\", \"revision\": \"…\"}"))
 		return
 	}
@@ -223,15 +232,31 @@ func (s *Server) writeInstanceConfigError(w http.ResponseWriter, key docker.Work
 //
 // The document itself is NEVER logged: a workspace not materialized since the
 // model-registry migration can still carry credentials in model_list.
+// logInstanceConfigRefusal audits an attempt that never reached the manager: the
+// key could not be built, the caller was refused, or the restart policy was
+// unusable. The workspace it TARGETED is still worth recording, so the raw
+// parameters are logged as given — they are query values, not paths, and nothing
+// here reaches the filesystem.
+func (s *Server) logInstanceConfigRefusal(ident identity.Identity, r *http.Request, result string) {
+	q := r.URL.Query()
+	s.logf("admin: instance config write by=%s tenant=%s subs=%s agent=%s user=%s result=%s",
+		callerLabel(ident), q.Get("tenant_id"), q.Get("subs_acc_id"), q.Get("agent"), q.Get("user_acc_id"), result)
+}
+
+// callerLabel is the audit identity: the email when the profile carries one, else
+// the account id.
+func callerLabel(ident identity.Identity) string {
+	if ident.Email != "" {
+		return ident.Email
+	}
+	return ident.AccID
+}
+
 func (s *Server) logInstanceConfigWrite(
 	ident identity.Identity, key docker.WorkspaceKey,
 	beforeSize int64, beforeValid bool, afterSize int64, result string, reapplied bool,
 ) {
-	by := ident.Email
-	if by == "" {
-		by = ident.AccID
-	}
 	s.logf("admin: instance config write by=%s tenant=%s subs=%s agent=%s user=%s before=%dB valid=%t after=%dB result=%s reapplied=%t",
-		by, key.TenantID, key.SubsAccID, key.Role, key.UserAccID,
+		callerLabel(ident), key.TenantID, key.SubsAccID, key.Role, key.UserAccID,
 		beforeSize, beforeValid, afterSize, result, reapplied)
 }

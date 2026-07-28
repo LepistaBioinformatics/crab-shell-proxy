@@ -267,11 +267,20 @@ The proxy rewrites exactly these paths in `config.json` after seeding:
   documents `.security.yml` as the sink the current code writes; the legacy
   layout kept keys in `config.json`). The `GET` response **redacts** those
   values to `"***"`. Redaction is safe against round-tripping because
-  `model_list` is a managed path: FR-3.3's materialization replaces the whole
-  array from the registry after every write, so a `"***"` can never survive to
-  disk as a credential. The redaction is reported in
-  `redactedPaths: ["model_list[0].api_keys", …]` so the UI can say why a value
-  is masked.
+  the **write** restores it: before the bytes are written, any masked `api_keys`
+  whose counterpart still exists on disk is replaced with the stored value.
+  Redaction is reported in `redactedPaths: ["model_list[0].api_keys", …]` so the
+  UI can say why a value is masked.
+  - The restore does **not** rely on FR-3.3's materialization, and an earlier
+    draft of this requirement did. Materialization replaces the whole
+    `model_list`, but it is best-effort by design — and a registry that resolves
+    nothing is exactly the broken-instance case this feature exists for. A save
+    would then have written `"***"` over the workspace's only copy of the key.
+    `TestWriteInstanceConfigNeverStoresTheMask` is the gate.
+  - A mask with no counterpart on disk is written as given: it is a literal the
+    admin typed, and restoring "from nowhere" would resurrect a key they removed.
+  - Only a document that actually carried a mask is re-marshalled. One without is
+    written byte-for-byte, so the common case keeps the admin's own formatting.
 - **FR-6.3 (comments as instructions)** The new handler, BFF route and UI each
   state why they are not an FR-7 violation, and the three existing
   "no content route here" comments are left intact and unweakened.
@@ -337,6 +346,7 @@ The proxy rewrites exactly these paths in `config.json` after seeding:
 | FR-5.1 | Unit: a successful PUT emits one log line with caller + key + sizes and **no** body |
 | FR-6.1 | Unit: `restart=notice` raises a workspace notice with reason `config` and does not bounce; `restart=schedule` behaves as `notice` |
 | FR-6.2 | Unit: legacy `model_list[0].api_keys` is `"***"` in the response and listed in `redactedPaths` |
+| FR-6.2 (restore) | Unit: a masked round-trip keeps the stored key even when the reapply fails; object layout too; a mask with no stored key is written as typed; an unmasked document is not reformatted |
 | NFR-4 | Unit: constant-vs-writers assertion over `materializeModels` + `alignWorkspace` |
 
 ---
@@ -361,6 +371,25 @@ the `docker` layer (authoritative). The handler additionally caps the request
 `raw` inflates the same document and the envelope has to be bounded before it is
 buffered. Both map to `413 too_large`.
 
+**FR-6.2's safety argument was wrong, and a test caught it.** The draft claimed a
+`"***"` could never reach disk because materialization replaces `model_list`
+after every write. But that pass is best-effort — `TestWriteInstanceConfigSurvivesReapplyFailure`
+exists precisely because it can fail — and an unresolvable registry is the
+broken-instance case this feature targets. A legacy workspace round-tripping its
+own redacted document therefore wrote the mask over its only copy of the key.
+`unmaskAgainst` now restores masked values from the file BEFORE writing, so the
+guarantee no longer depends on the reapply, and
+`TestWriteInstanceConfigNeverStoresTheMask` fails if that regresses.
+
+**FR-5.2 was only half-implemented.** `adminInstanceKey` answers a 403 or a
+bad-parameter 400 and returns, so the refusal never reached
+`logInstanceConfigWrite` — only 409/413 and success were audited. Since FR-4.4
+leans on FR-5.1/5.2 to justify DEC-3's authz tier, the unlogged case was the one
+that mattered most. The handler now audits from its own refusal branches
+(`logInstanceConfigRefusal`, recording the targeted workspace from the raw
+parameters since the key does not exist yet), and
+`TestInstanceConfigRequiresUserManagement` asserts the line.
+
 **FR-6.1's `schedule` handling was inverted from the draft (DEC-6).** The first
 draft rejected `restart=schedule` with a 400. It now degrades to `notice`, which
 is what `bounceNow` already does at every per-workspace site
@@ -376,11 +405,18 @@ inventing a rejection this one endpoint would have had.
   "no content route here" instruction at `admin.go:530` is untouched, as are the
   webapp's two.
 
+**NFR-3, verified rather than cited.** The claim that `/v1/admin/*` needs no
+gateway declaration came from restart-control's spec. Confirmed against the actual
+configs: `deploy/dokploy/config.base.toml`, `deploy/prod/config.base.toml` and
+`deploy/standalone/config.standalone.toml` each declare `path = "/v1/admin/*"`
+with `methods = ["GET", "POST", "PUT", "DELETE"]` for every agent, so the `PUT`
+this feature adds is already routed.
+
 **Test status.** `go build ./... && go vet ./...` clean. `go test ./...`: the
 `internal/docker` package still fails the same **8** `Lchown`-permission tests it
 failed before this branch (`TestEnsureRunning*`, `TestCreateAddsReadOnlySecretsBind`,
 `TestRestartWorkspaceRestartsAndRearms`, `TestScaleToZeroIdleStop`,
 `TestContinuousDoesNotArmIdle`, `TestReconcileEnsuresContinuousWorkspaces`) —
 sandbox noise per STATE.md L-001, identical to the recorded baseline. Every other
-package is green, including the 14 new `docker` tests and the 13 new `httpapi`
+package is green, including the 18 new `docker` tests and the 13 new `httpapi`
 tests.

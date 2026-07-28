@@ -157,7 +157,8 @@ func (m *Manager) WriteInstanceConfig(key WorkspaceKey, raw, revision string) (I
 	if len(raw) > maxInstanceConfigBytes {
 		return InstanceConfig{}, ReapplyResult{}, ErrConfigTooLarge
 	}
-	if _, err := parseConfigObject([]byte(raw)); err != nil {
+	submitted, err := parseConfigObject([]byte(raw))
+	if err != nil {
 		return InstanceConfig{}, ReapplyResult{}, err
 	}
 
@@ -173,7 +174,14 @@ func (m *Manager) WriteInstanceConfig(key WorkspaceKey, raw, revision string) (I
 		return InstanceConfig{}, ReapplyResult{}, ErrStaleRevision
 	}
 
-	if err := writeConfigAtomic(path, []byte(raw)); err != nil {
+	// A current file that does not parse holds no credential to restore, which is
+	// the whole point of tolerating the error here: that is the repair case.
+	currentDoc, _ := parseConfigObject(current)
+	bytesToWrite, err := unmaskAgainst([]byte(raw), submitted, currentDoc)
+	if err != nil {
+		return InstanceConfig{}, ReapplyResult{}, err
+	}
+	if err := writeConfigAtomic(path, bytesToWrite); err != nil {
 		return InstanceConfig{}, ReapplyResult{}, err
 	}
 	// The rename produced a new inode owned by the proxy, and the workspace is
@@ -336,20 +344,130 @@ func shallowCopyForRedactionMap(doc map[string]any, list map[string]any) map[str
 	return out
 }
 
-func maskAPIKeys(entry map[string]any) map[string]any {
+// unmaskAgainst returns the bytes to write, restoring any credential the read
+// path masked.
+//
+// The reason it exists: an admin round-trips the document they were SHOWN, which
+// carries "***" wherever redactModelKeys hid a legacy credential. Writing that
+// verbatim replaces the key with the mask. The original design leaned on the
+// post-write materialization to rebuild `model_list` from the registry and make
+// the mask unreachable — but that pass is best-effort by design, and a registry
+// that resolves nothing is exactly the broken-instance case this feature exists
+// for. A save would then have quietly destroyed the workspace's only copy of the
+// key.
+//
+// So the restore happens BEFORE the write and does not depend on the reapply. A
+// document with no masks is written byte-for-byte, which keeps the common case
+// (a post-migration workspace) exactly as the admin typed it.
+func unmaskAgainst(raw []byte, submitted, current map[string]any) ([]byte, error) {
+	if current == nil {
+		return raw, nil
+	}
+	restored, changed := restoreMaskedModelKeys(submitted, current)
+	if !changed {
+		return raw, nil
+	}
+	// Only the legacy path re-marshals. Those documents were already reformatted
+	// on the way out (redaction re-marshals), so the admin is not seeing a
+	// formatting change they did not cause.
+	return json.MarshalIndent(restored, "", "  ")
+}
+
+// restoreMaskedModelKeys replaces every masked api_keys value in submitted with
+// the value the file on disk still holds, returning a copy and whether anything
+// was restored. A mask with no counterpart on disk is left alone: it is then a
+// literal "***" the admin typed, not a hidden credential.
+func restoreMaskedModelKeys(submitted, current map[string]any) (map[string]any, bool) {
+	changed := false
+	out := submitted
+
+	switch sub := submitted["model_list"].(type) {
+	case []any:
+		cur, ok := current["model_list"].([]any)
+		if !ok {
+			return out, false
+		}
+		for i, item := range sub {
+			entry, ok := item.(map[string]any)
+			if !ok || !holdsMask(entry["api_keys"]) || i >= len(cur) {
+				continue
+			}
+			curEntry, ok := cur[i].(map[string]any)
+			if !ok || curEntry["api_keys"] == nil {
+				continue
+			}
+			if !changed {
+				out = shallowCopyForRedaction(submitted, sub)
+				changed = true
+			}
+			restored := copyEntry(entry)
+			restored["api_keys"] = curEntry["api_keys"]
+			out["model_list"].([]any)[i] = restored
+		}
+	case map[string]any:
+		cur, ok := current["model_list"].(map[string]any)
+		if !ok {
+			return out, false
+		}
+		for name, item := range sub {
+			entry, ok := item.(map[string]any)
+			if !ok || !holdsMask(entry["api_keys"]) {
+				continue
+			}
+			curEntry, ok := cur[name].(map[string]any)
+			if !ok || curEntry["api_keys"] == nil {
+				continue
+			}
+			if !changed {
+				out = shallowCopyForRedactionMap(submitted, sub)
+				changed = true
+			}
+			restored := copyEntry(entry)
+			restored["api_keys"] = curEntry["api_keys"]
+			out["model_list"].(map[string]any)[name] = restored
+		}
+	}
+	return out, changed
+}
+
+// holdsMask reports whether a value is the redaction placeholder, in either the
+// array form maskAPIKeys writes or the bare-string fallback.
+func holdsMask(v any) bool {
+	switch keys := v.(type) {
+	case []any:
+		for _, k := range keys {
+			if k == maskPlaceholder {
+				return true
+			}
+		}
+	case string:
+		return keys == maskPlaceholder
+	}
+	return false
+}
+
+func copyEntry(entry map[string]any) map[string]any {
 	out := make(map[string]any, len(entry))
 	for k, v := range entry {
 		out[k] = v
 	}
+	return out
+}
+
+// maskPlaceholder stands in for a credential the admin screen must not display.
+const maskPlaceholder = "***"
+
+func maskAPIKeys(entry map[string]any) map[string]any {
+	out := copyEntry(entry)
 	switch keys := entry["api_keys"].(type) {
 	case []any:
 		masked := make([]any, len(keys))
 		for i := range keys {
-			masked[i] = "***"
+			masked[i] = maskPlaceholder
 		}
 		out["api_keys"] = masked
 	default:
-		out["api_keys"] = "***"
+		out["api_keys"] = maskPlaceholder
 	}
 	return out
 }
