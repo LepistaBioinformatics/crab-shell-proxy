@@ -245,6 +245,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
 	mux.HandleFunc("GET /v1/admin/users/config", s.handleAdminInstanceConfigGet)
 	mux.HandleFunc("PUT /v1/admin/users/config", s.handleAdminInstanceConfigPut)
+	mux.HandleFunc("POST /v1/admin/users/restart", s.handleAdminInstanceRestart)
 	mux.HandleFunc("GET /v1/admin/skills", s.handleAdminSkillsList)
 	mux.HandleFunc("GET /v1/admin/skills/doc", s.handleAdminSkillsDoc)
 	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)

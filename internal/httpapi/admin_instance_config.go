@@ -232,6 +232,56 @@ func (s *Server) writeInstanceConfigError(w http.ResponseWriter, key docker.Work
 //
 // The document itself is NEVER logged: a workspace not materialized since the
 // model-registry migration can still carry credentials in model_list.
+// handleAdminInstanceRestart bounces ONE member's workspace on an admin's behalf.
+//
+// restart-control deliberately did not build this: the notice model is per scope,
+// so a targeted bounce would be "a bounce with no notice attached", and members
+// were expected to press their own button. That reasoning does not survive this
+// feature. A workspace whose config.json is broken may not boot picoclaw at all,
+// so its member cannot reach a restart button — the notice path is useless for
+// exactly the instance an admin just repaired. The bounce here is attached to that
+// repair, which is the missing piece.
+//
+// It is a separate route rather than a flag on the PUT because a repair is often
+// several saves, and an admin should be able to apply the result once when they
+// are done — and because an instance can need a bounce for a change made from
+// another screen.
+func (s *Server) handleAdminInstanceRestart(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	key, ok := s.adminInstanceKey(w, r, ident)
+	if !ok {
+		s.logf("admin: instance restart by=%s result=rejected", callerLabel(ident))
+		return
+	}
+	if err := s.Mgr.RestartWorkspace(key); err != nil {
+		s.logf("admin: instance restart by=%s key=%+v failed: %v", callerLabel(ident), key, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	st, err := s.Mgr.RestartStatus(key)
+	if err != nil {
+		s.logf("admin: instance restart status by=%s key=%+v failed: %v", callerLabel(ident), key, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	// "noop" when the container was absent or scaled to zero: nothing was bounced,
+	// but the pending notice is resolved all the same, because the next cold start
+	// begins from the repaired file. Same contract as the member's own restart.
+	status := "restarted"
+	if !st.Running {
+		status = "noop"
+	}
+	s.logf("admin: instance restart by=%s tenant=%s subs=%s agent=%s user=%s result=%s",
+		callerLabel(ident), key.TenantID, key.SubsAccID, key.Role, key.UserAccID, status)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        status,
+		"lastRestartAt": st.LastRestartAt,
+	})
+}
+
 // logInstanceConfigRefusal audits an attempt that never reached the manager: the
 // key could not be built, the caller was refused, or the restart policy was
 // unusable. The workspace it TARGETED is still worth recording, so the raw

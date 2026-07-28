@@ -424,3 +424,67 @@ func TestInstanceConfigNoDeleteOrPost(t *testing.T) {
 		}
 	}
 }
+
+// An admin must be able to bounce the instance they just repaired. A workspace
+// whose config.json was broken may not boot picoclaw at all, so its member cannot
+// reach their own restart button — leaving the repair applied on disk and never in
+// effect.
+func TestInstanceRestartBouncesTheNamedInstance(t *testing.T) {
+	orch := newFakeOrch()
+	orch.statusRunning = true
+	s := instanceConfigServer(orch, nil)
+
+	path := "/v1/admin/users/restart?tenant_id=" + tenantT + "&subs_acc_id=" + subsX +
+		"&user_acc_id=" + accBob + "&agent=beta"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, adminReq(t, http.MethodPost, path, headersFor(t, instanceProfile())))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if len(orch.restarts) != 1 {
+		t.Fatalf("restarts = %v, want exactly the addressed workspace", orch.restarts)
+	}
+	// The agent parameter, not the routing vehicle (the request went through alpha).
+	if got := orch.restarts[0]; got.Role != "beta" || got.UserAccID != accBob {
+		t.Errorf("bounced %+v, want beta/%s", got, accBob)
+	}
+	if !strings.Contains(w.Body.String(), `"restarted"`) {
+		t.Errorf("body = %s, want a restarted status", w.Body.String())
+	}
+}
+
+// A container that is absent or scaled to zero is a success, not an error: the
+// next cold start begins from the repaired file. Same contract as the member's own
+// restart.
+func TestInstanceRestartReportsNoopWhenNotRunning(t *testing.T) {
+	orch := newFakeOrch()
+	orch.statusRunning = false
+	s := instanceConfigServer(orch, nil)
+
+	path := "/v1/admin/users/restart?tenant_id=" + tenantT + "&subs_acc_id=" + subsX +
+		"&user_acc_id=" + accBob + "&agent=alpha"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, adminReq(t, http.MethodPost, path, headersFor(t, instanceProfile())))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"noop"`) {
+		t.Errorf("body = %s, want noop", w.Body.String())
+	}
+}
+
+func TestInstanceRestartRequiresUserManagement(t *testing.T) {
+	orch := newFakeOrch()
+	s := instanceConfigServer(orch, nil)
+
+	path := "/v1/admin/users/restart?tenant_id=" + tenantT + "&subs_acc_id=" + subsX +
+		"&user_acc_id=" + accBob + "&agent=alpha"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, adminReq(t, http.MethodPost, path, headersFor(t, userProfile())))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+	if len(orch.restarts) != 0 {
+		t.Error("a refused caller bounced a workspace")
+	}
+}
