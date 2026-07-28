@@ -1,6 +1,7 @@
 # admin-instance-config-editor — Specification
 
-**Status:** Draft
+**Status:** Shipped (proxy slice). See "Reconciliation" at the end for what
+changed during implementation.
 **Size:** Large (new API surface + new admin UI + a privacy-invariant exception)
 **Repos touched:**
 
@@ -337,3 +338,49 @@ The proxy rewrites exactly these paths in `config.json` after seeding:
 | FR-6.1 | Unit: `restart=notice` raises a workspace notice with reason `config` and does not bounce; `restart=schedule` behaves as `notice` |
 | FR-6.2 | Unit: legacy `model_list[0].api_keys` is `"***"` in the response and listed in `redactedPaths` |
 | NFR-4 | Unit: constant-vs-writers assertion over `materializeModels` + `alignWorkspace` |
+
+---
+
+## Reconciliation (what shipped)
+
+Every FR above is implemented. Four things differ from the draft or are worth
+recording because a later reader would otherwise have to rediscover them.
+
+**FR-2.2 grew a case the draft missed.** `json.Unmarshal` of `null` into a
+`map[string]any` **succeeds** and leaves the map nil, so a `config.json`
+containing `null` would have read as a valid document and been accepted as one.
+`parseConfigObject` now parses into `any` and asserts the map, which makes
+`null`, `[]` and `42` all `ErrConfigNotObject`. The read path reports them as
+`valid: false` rather than as an error, same as a syntax failure.
+`TestReadInstanceConfigRejectsNonObject` and the `null` case in
+`TestWriteInstanceConfigRejectsInvalidJSON` are the gates.
+
+**FR-2.4 is enforced twice, at different sizes.** The document cap is 1 MiB in
+the `docker` layer (authoritative). The handler additionally caps the request
+**envelope** at 4 MiB via `io.LimitReader`, because JSON string escaping inside
+`raw` inflates the same document and the envelope has to be bounded before it is
+buffered. Both map to `413 too_large`.
+
+**FR-6.1's `schedule` handling was inverted from the draft (DEC-6).** The first
+draft rejected `restart=schedule` with a 400. It now degrades to `notice`, which
+is what `bounceNow` already does at every per-workspace site
+(`internal/httpapi/restart_policy.go`). Matching the existing behaviour beat
+inventing a rejection this one endpoint would have had.
+
+**FR-1.4 / FR-6.3 gates, run:**
+
+- `grep -nE 'Get\("(name|path|file)"\)' internal/httpapi/admin_instance_config.go`
+  → no match. The handler reads no file-name parameter, so there is nothing that
+  could redirect which file it opens.
+- `git diff <base>..HEAD -- internal/httpapi/admin.go` → empty. The
+  "no content route here" instruction at `admin.go:530` is untouched, as are the
+  webapp's two.
+
+**Test status.** `go build ./... && go vet ./...` clean. `go test ./...`: the
+`internal/docker` package still fails the same **8** `Lchown`-permission tests it
+failed before this branch (`TestEnsureRunning*`, `TestCreateAddsReadOnlySecretsBind`,
+`TestRestartWorkspaceRestartsAndRearms`, `TestScaleToZeroIdleStop`,
+`TestContinuousDoesNotArmIdle`, `TestReconcileEnsuresContinuousWorkspaces`) —
+sandbox noise per STATE.md L-001, identical to the recorded baseline. Every other
+package is green, including the 14 new `docker` tests and the 13 new `httpapi`
+tests.
