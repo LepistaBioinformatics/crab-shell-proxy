@@ -113,6 +113,20 @@ type Orchestrator interface {
 	// DeleteUserFile removes one of a user's private files (never reads it — FR-7).
 	DeleteUserFile(key docker.WorkspaceKey, name string) error
 
+	// --- admin-instance-config-editor ---
+
+	// ReadInstanceConfig returns one workspace's config.json, INCLUDING one that
+	// does not parse — a broken config is the thing an admin needs to see.
+	// This is not the private-file content FR-7 forbids: config.json is
+	// proxy-materialized provisioning state at the workspace root, not one of the
+	// uploads ListUserFiles enumerates.
+	ReadInstanceConfig(key docker.WorkspaceKey) (docker.InstanceConfig, error)
+	// WriteInstanceConfig replaces one workspace's config.json and re-runs the
+	// ordinary materialization, which is what keeps docker.ManagedConfigPaths
+	// proxy-owned. The ReapplyResult reports that pass; its failure does not
+	// undo the write.
+	WriteInstanceConfig(key docker.WorkspaceKey, raw, revision string) (docker.InstanceConfig, docker.ReapplyResult, error)
+
 	// --- model re-apply (internal/registry is the resolver; no keys transit here) ---
 
 	// Each re-apply takes `bounce`: true restarts the affected workspaces now,
@@ -229,6 +243,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/users", s.handleAdminUsersList)
 	mux.HandleFunc("GET /v1/admin/users/files", s.handleAdminUserFilesList)
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
+	mux.HandleFunc("GET /v1/admin/users/config", s.handleAdminInstanceConfigGet)
+	mux.HandleFunc("PUT /v1/admin/users/config", s.handleAdminInstanceConfigPut)
 	mux.HandleFunc("GET /v1/admin/skills", s.handleAdminSkillsList)
 	mux.HandleFunc("GET /v1/admin/skills/doc", s.handleAdminSkillsDoc)
 	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)
