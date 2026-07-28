@@ -993,9 +993,18 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
 
+// mediaRelPath turns the client-supplied "uploads/<...>" reference into the path
+// relative to the uploads dir. It must NOT collapse to the base name: the agent
+// organizes files into folders, and doing so made "uploads/reports/q1.pdf"
+// resolve to a non-existent "uploads/q1.pdf". Traversal is rejected downstream
+// by safeStoredPath + resolveWithin, which is where the boundary belongs.
+func mediaRelPath(p string) string {
+	return strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(p)), "uploads/")
+}
+
 // serveMediaFile streams one uploaded file back as a download attachment.
 func (s *Server) serveMediaFile(w http.ResponseWriter, key docker.WorkspaceKey, agent config.Agent, ident identity.Identity, path string) {
-	rc, display, err := s.Mgr.OpenMedia(key, filepath.Base(path))
+	rc, display, err := s.Mgr.OpenMedia(key, mediaRelPath(path))
 	if err != nil {
 		switch {
 		case errors.Is(err, docker.ErrMediaName):
@@ -1041,8 +1050,7 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The stored filename is the last path segment ("uploads/<uid>-<name>").
-	if err := s.Mgr.DeleteMedia(key, filepath.Base(path)); err != nil {
+	if err := s.Mgr.DeleteMedia(key, mediaRelPath(path)); err != nil {
 		if errors.Is(err, docker.ErrMediaName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return

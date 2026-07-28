@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -46,7 +48,8 @@ func sanitizeFilename(raw string) (string, error) {
 }
 
 // safeStoredName validates a stored filename (from list/delete/download) as a
-// bare, traversal-free base name.
+// bare, traversal-free base name. Used for names this proxy itself created via
+// StoreMedia, which sanitizeFilename has already reduced to a safe base name.
 func safeStoredName(name string) (string, error) {
 	base := filepath.Base(name)
 	if base != name || base == "." || base == ".." ||
@@ -54,6 +57,62 @@ func safeStoredName(name string) (string, error) {
 		return "", ErrMediaName
 	}
 	return base, nil
+}
+
+// safeStoredPath validates a workspace-relative media path that MAY contain
+// directories -- the agent organizes its own files into folders, and those were
+// invisible while listing was flat.
+//
+// It rejects the shape of a traversal (absolute, "..", NUL); it deliberately
+// does NOT apply secretNameRe per segment, because agent-created files are not
+// run through sanitizeFilename and legitimately contain characters that regex
+// forbids. The real boundary is resolveWithin below, which re-checks the
+// resolved path against the uploads root after following symlinks.
+func safeStoredPath(name string) (string, error) {
+	n := strings.TrimSpace(name)
+	if n == "" || filepath.IsAbs(n) || strings.HasPrefix(n, "/") || strings.HasPrefix(n, `\`) {
+		return "", ErrMediaName
+	}
+	if strings.ContainsRune(n, 0) {
+		return "", ErrMediaName
+	}
+	clean := path.Clean(filepath.ToSlash(n))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", ErrMediaName
+	}
+	for _, seg := range strings.Split(clean, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", ErrMediaName
+		}
+	}
+	return clean, nil
+}
+
+// resolveWithin joins a validated relative path onto root and proves the result
+// is still inside it AFTER following symlinks. Path validation alone is not
+// enough: a symlink inside uploads/ could otherwise point anywhere on the host.
+//
+// Go 1.23 has no os.OpenRoot, so this is done by hand.
+func resolveWithin(root, rel string) (string, error) {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrMediaNotFound
+		}
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrMediaNotFound
+		}
+		return "", err
+	}
+	inside, err := filepath.Rel(resolvedRoot, resolved)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+		return "", ErrMediaName
+	}
+	return resolved, nil
 }
 
 // StoreMedia writes an uploaded file into the caller's agent-readable workspace
@@ -102,14 +161,18 @@ func (m *Manager) StoreMedia(key WorkspaceKey, rawName string, r io.Reader) (Sto
 // DeleteMedia removes one uploaded file (by its stored filename from the list)
 // from the caller's uploads dir. Missing file = success (idempotent).
 func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
-	base, err := safeStoredName(storedName)
+	rel, err := safeStoredPath(storedName)
 	if err != nil {
 		return err
 	}
-	full := filepath.Join(
-		config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
-		base,
-	)
+	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	full, err := resolveWithin(root, rel)
+	if err != nil {
+		if errors.Is(err, ErrMediaNotFound) {
+			return nil // idempotent
+		}
+		return err
+	}
 	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -119,14 +182,27 @@ func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
 // OpenMedia opens one uploaded file for download and returns the reader plus its
 // display name. The caller must Close the reader.
 func (m *Manager) OpenMedia(key WorkspaceKey, storedName string) (io.ReadCloser, string, error) {
-	base, err := safeStoredName(storedName)
+	rel, err := safeStoredPath(storedName)
 	if err != nil {
 		return nil, "", err
 	}
-	full := filepath.Join(
-		config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
-		base,
-	)
+	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	full, err := resolveWithin(root, rel)
+	if err != nil {
+		return nil, "", err
+	}
+	// Only regular files are downloadable: resolveWithin proves containment, but
+	// a directory or a device node would still be openable.
+	info, err := os.Stat(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", ErrMediaNotFound
+		}
+		return nil, "", err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, "", ErrMediaNotFound
+	}
 	f, err := os.Open(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -134,40 +210,68 @@ func (m *Manager) OpenMedia(key WorkspaceKey, storedName string) (io.ReadCloser,
 		}
 		return nil, "", err
 	}
-	return f, uidPrefixRe.ReplaceAllString(base, ""), nil
+	// Download name is the base only -- a browser can't save into a folder.
+	return f, uidPrefixRe.ReplaceAllString(path.Base(rel), ""), nil
 }
 
 // Legacy uploads (before overwrite-by-name) carried an 8-hex uid prefix; strip
 // it for display so those files show a clean name too.
 var uidPrefixRe = regexp.MustCompile(`^[0-9a-f]{8}-`)
 
+// Upper bound on a single listing, so a pathological workspace tree can't turn
+// the sidebar request into an unbounded walk.
+const maxListedMedia = 2000
+
 // ListMedia returns the files currently in the caller's workspace uploads dir
 // (never their contents). Path is the workspace-relative path the turn
 // references; Name is the display name. An absent dir is empty.
 func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
 	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
-	entries, err := os.ReadDir(dir)
+	out := make([]StoredMedia, 0, 32)
+	err := filepath.WalkDir(dir, func(full string, e fs.DirEntry, err error) error {
+		if err != nil {
+			// An unreadable subtree must not blank the whole listing.
+			if full == dir {
+				return err
+			}
+			return nil
+		}
+		if len(out) >= maxListedMedia {
+			return fs.SkipAll
+		}
+		// Never follow a symlink out of the workspace, and never descend into
+		// one: WalkDir doesn't follow them, but a symlinked FILE would still be
+		// listed and then fail to open.
+		if e.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if e.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, full)
+		if relErr != nil {
+			return nil
+		}
+		info, infoErr := e.Info()
+		if infoErr != nil {
+			return nil
+		}
+		slashRel := filepath.ToSlash(rel)
+		out = append(out, StoredMedia{
+			Path: path.Join("uploads", slashRel),
+			// The uid prefix is only ever added to the BASE name by StoreMedia,
+			// so strip it there and keep any folder prefix -- it is what tells
+			// two same-named files in different folders apart.
+			Name: path.Join(path.Dir(slashRel), uidPrefixRe.ReplaceAllString(path.Base(slashRel), "")),
+			Size: info.Size(),
+		})
+		return nil
+	})
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []StoredMedia{}, nil
 		}
 		return nil, err
-	}
-	out := make([]StoredMedia, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		stored := e.Name()
-		out = append(out, StoredMedia{
-			Path: filepath.ToSlash(filepath.Join("uploads", stored)),
-			Name: uidPrefixRe.ReplaceAllString(stored, ""),
-			Size: info.Size(),
-		})
 	}
 	return out, nil
 }
