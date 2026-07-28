@@ -166,6 +166,14 @@ func alignWorkspace(configPath, home string) error {
 
 // chownTree recursively chowns dir to the given "uid:gid". No-op when user is
 // empty (containers run as root). Requires numeric uid:gid.
+//
+// Lchown, not Chown: the trees we walk contain agent-created symlinks (a Python
+// venv's bin/python, node_modules/.bin/*, …) whose absolute targets name paths
+// in the AGENT container's rootfs, not ours. chown(2) resolves symlinks and
+// would fail ENOENT on those, aborting the whole walk — and since
+// ScaffoldSubscription chowns the subscription root on every chat, a single venv
+// in one user's workspace would 502 every user of that subscription. Owning the
+// link itself is also the correct semantics: the target is not ours to touch.
 func chownTree(dir, user string) error {
 	if user == "" {
 		return nil
@@ -185,7 +193,7 @@ func chownTree(dir, user string) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		return os.Chown(path, uid, gid)
+		return os.Lchown(path, uid, gid)
 	})
 }
 

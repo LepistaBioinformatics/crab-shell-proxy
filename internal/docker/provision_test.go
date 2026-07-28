@@ -2,6 +2,7 @@ package docker
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,44 @@ func TestSeedPicoTokenPreservesTemplateContentAndGeneratesAToken(t *testing.T) {
 	// must survive.
 	if _, ok := sec["web"]; !ok {
 		t.Error("template content was clobbered")
+	}
+}
+
+// A venv the agent creates inside its workspace is made of ABSOLUTE symlinks
+// pointing at the interpreter of the picoclaw container (Alpine:
+// /usr/bin/python3). That path does not exist in THIS process's rootfs
+// (debian-slim, no python) — a symlink carries no notion of which rootfs it
+// speaks of, and both containers bind-mount the same host dir. chown(2) resolves
+// symlinks, so it fails ENOENT on such a link; because ScaffoldSubscription
+// chowns the whole subscription root on every chat, one venv would 502 every
+// user of that subscription. chownTree must therefore chown the LINK, never its
+// target — the target is the agent's business, not ours.
+func TestChownTreeToleratesDanglingSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	venvBin := filepath.Join(dir, "workspace", ".venv", "bin")
+	if err := os.MkdirAll(venvBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(venvBin, "python")
+	if err := os.Symlink("/nonexistent-rootfs/usr/bin/python3", link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Chowning to our OWN uid:gid is permitted unprivileged, so this asserts the
+	// dangling link is tolerated without the test needing root.
+	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	if err := chownTree(dir, user); err != nil {
+		t.Fatalf("chownTree over a dangling symlink: %v", err)
+	}
+
+	// The link itself must survive untouched: chownTree may not follow, replace,
+	// or prune it.
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("symlink gone after chownTree: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("%s is no longer a symlink (mode %v)", link, fi.Mode())
 	}
 }
 
