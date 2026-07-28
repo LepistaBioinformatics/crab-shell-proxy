@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -493,5 +494,60 @@ func TestHermesEnabledWhenSecretsPresent(t *testing.T) {
 	}
 	if len(cfg.DisabledAgents) != 0 {
 		t.Fatalf("no agents should be disabled, got %v", cfg.DisabledAgents)
+	}
+}
+
+// TestPathComponentsCannotEscapeTheRoot pins the invariant every workspace path in
+// this service rests on, and that CodeQL cannot see.
+//
+// `go/path-injection` flags UserWorkspace's callers as "uncontrolled data used in a
+// path expression" because it recognizes neither of the two things that make them
+// safe: `uuid.Parse(...).String()` at the HTTP boundary, and identity.SanitizeID here.
+// The alert is a false positive, but "it is sanitized" is a claim, and this is the
+// evidence — so the claim keeps being true after someone edits SanitizeID's regex.
+//
+// The property: whatever a component contains, the result is still under root and the
+// component is still ONE path segment. A traversal needs a separator, and SanitizeID
+// replaces every byte outside [a-zA-Z0-9._-] with "-", so no separator can survive.
+// Pure-dot values are trimmed to empty and fall back to a hash.
+func TestPathComponentsCannotEscapeTheRoot(t *testing.T) {
+	const root = "/data"
+	// A well-formed path has exactly these separators:
+	// /data/tenants/<t>/subscriptions/<s>/agents/<role>/users/<u>
+	const wantSeparators = 9
+
+	hostile := []string{
+		"../../etc/passwd",
+		"..",
+		"../..",
+		"....//....//etc",
+		"/etc/passwd",
+		"a/../../b",
+		"%2e%2e%2f",
+		`..\..\windows`,
+		".",
+		"./.",
+		"\x00/etc/passwd",
+		"foo/bar",
+		strings.Repeat("../", 40) + "etc",
+	}
+
+	for _, bad := range hostile {
+		paths := map[string]string{
+			"tenant":       UserWorkspace(root, bad, "s", "alpha", "u"),
+			"subscription": UserWorkspace(root, "t", bad, "alpha", "u"),
+			"role":         UserWorkspace(root, "t", "s", bad, "u"),
+			"user":         UserWorkspace(root, "t", "s", "alpha", bad),
+		}
+		for component, got := range paths {
+			clean := filepath.Clean(got)
+			if !strings.HasPrefix(clean, root+"/") {
+				t.Errorf("%s = %q escaped the root: %q", component, bad, clean)
+			}
+			if n := strings.Count(clean, "/"); n != wantSeparators {
+				t.Errorf("%s = %q became more than one segment: %q (%d separators, want %d)",
+					component, bad, clean, n, wantSeparators)
+			}
+		}
 	}
 }
