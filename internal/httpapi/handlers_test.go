@@ -77,6 +77,17 @@ type fakeOrch struct {
 	workspaceNotices []docker.WorkspaceKey
 	statusRunning    bool
 	restartErr       error
+
+	// admin-instance-config-editor recording + canned results.
+	instanceConfig           docker.InstanceConfig
+	instanceConfigAfterWrite docker.InstanceConfig
+	instanceConfigReapply    docker.ReapplyResult
+	instanceConfigErr        error
+	instanceConfigWriteErr   error
+	instanceConfigReadKeys   []docker.WorkspaceKey
+	instanceConfigWriteKey   docker.WorkspaceKey
+	instanceConfigWritten    string
+	instanceConfigRevision   string
 }
 
 type secretWrite struct {
@@ -203,6 +214,26 @@ func (f *fakeOrch) ReadMemory(docker.WorkspaceKey) (string, error) {
 func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, content string) error {
 	f.memory = content
 	return nil
+}
+
+// --- admin-instance-config-editor fakes ---
+
+func (f *fakeOrch) ReadInstanceConfig(key docker.WorkspaceKey) (docker.InstanceConfig, error) {
+	f.instanceConfigReadKeys = append(f.instanceConfigReadKeys, key)
+	if f.instanceConfigErr != nil {
+		return docker.InstanceConfig{}, f.instanceConfigErr
+	}
+	return f.instanceConfig, nil
+}
+
+func (f *fakeOrch) WriteInstanceConfig(key docker.WorkspaceKey, raw, revision string) (docker.InstanceConfig, docker.ReapplyResult, error) {
+	f.instanceConfigWriteKey = key
+	f.instanceConfigWritten = raw
+	f.instanceConfigRevision = revision
+	if f.instanceConfigWriteErr != nil {
+		return docker.InstanceConfig{}, docker.ReapplyResult{}, f.instanceConfigWriteErr
+	}
+	return f.instanceConfigAfterWrite, f.instanceConfigReapply, nil
 }
 
 // --- admin-shared-content fakes: record calls, return canned results ---

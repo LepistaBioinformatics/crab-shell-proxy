@@ -44,6 +44,10 @@ const (
 	ReasonModel        Reason = "model"
 	ReasonOwnSecret    Reason = "own-secret"
 	ReasonAdminRequest Reason = "admin-request"
+	// ReasonConfig is an admin repairing one instance's config.json. picoclaw
+	// reads that file only at boot (gateway.hot_reload is false), so the change
+	// is inert until the workspace bounces.
+	ReasonConfig Reason = "config"
 )
 
 // AllAgents is the record key meaning "every agent in this scope", mirroring
