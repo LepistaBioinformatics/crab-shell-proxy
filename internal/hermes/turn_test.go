@@ -43,7 +43,7 @@ func TestRunTurnStreamsAndAccumulates(t *testing.T) {
 		SessionID:  "sid-1",
 		SessionKey: "user:role",
 		Content:    "hi",
-	}, func(d string) { deltas = append(deltas, d) })
+	}, turn.Sink{Content: func(d string) { deltas = append(deltas, d) }})
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRunTurnErrorsOnNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{}
-	if _, err := c.RunTurn(context.Background(), turn.Request{Endpoint: srv.URL, Content: "hi"}, nil); err == nil {
+	if _, err := c.RunTurn(context.Background(), turn.Request{Endpoint: srv.URL, Content: "hi"}, turn.Sink{}); err == nil {
 		t.Fatal("expected error on 401")
 	}
 }

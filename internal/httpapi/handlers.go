@@ -151,7 +151,7 @@ type Orchestrator interface {
 // Turner runs one conversational turn (satisfied by *pico.Client and
 // *hermes.Client).
 type Turner interface {
-	RunTurn(ctx context.Context, req turn.Request, onDelta func(string)) (string, error)
+	RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error)
 }
 
 // Server holds the handler dependencies.
@@ -468,7 +468,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		SessionKey: key.UserAccID + ":" + key.Role,
 		Model:      turnModelFor(agent, model),
 		Content:    userContent,
-	}, nil)
+	}, turn.Sink{})
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("chat: turn failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)

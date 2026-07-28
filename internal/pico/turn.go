@@ -40,6 +40,26 @@ type Payload struct {
 	Kind        string `json:"kind"`
 	Placeholder bool   `json:"placeholder"`
 	Message     string `json:"message"` // error frames carry human text here
+	// tool_calls frames always arrive with an EMPTY Content -- everything useful
+	// is in here, and this proxy used to drop it on the floor.
+	ToolCalls []ToolCall `json:"tool_calls"`
+}
+
+// ToolCall is one entry of a tool_calls frame.
+type ToolCall struct {
+	Function struct {
+		Name string `json:"name"`
+		// `arguments` is deliberately NOT decoded: it is unbounded, untrusted
+		// model output that can carry paths, URLs or secrets, and it has no
+		// display role once Explanation exists.
+	} `json:"function"`
+	ExtraContent struct {
+		// Explanation is a first-person sentence the agent wrote itself, in the
+		// user's own language ("Deixe-me buscar as informações do projeto."). It
+		// is the best progress text available anywhere in this pipeline. Being
+		// model-generated it is sometimes absent, hence the Name fallback.
+		Explanation string `json:"tool_feedback_explanation"`
+	} `json:"extra_content"`
 }
 
 // processor is the pure turn-completion state machine.
@@ -48,11 +68,49 @@ type processor struct {
 	lastPlainID     string
 	hasPlainContent bool
 	isTyping        bool
-	onDelta         func(string)
+	sink            turn.Sink
+	lastProgress    turn.Progress
 }
 
-func newProcessor(onDelta func(string)) *processor {
-	return &processor{plain: map[string]string{}, onDelta: onDelta}
+// newProcessor takes the sink by value: its zero value (both callbacks nil) is
+// a valid no-op, so `newProcessor(turn.Sink{})` is exactly the old
+// `newProcessor(nil)`.
+func newProcessor(sink turn.Sink) *processor {
+	return &processor{plain: map[string]string{}, sink: sink}
+}
+
+// emitProgress forwards a non-content signal, suppressing an exact repeat.
+// Placeholder/thought content is cumulative like plain content, so an unchanged
+// re-send would otherwise flood the stream.
+//
+// It touches NO processor state that the completion machine reads, which is
+// what keeps the turn-completion behaviour bit-identical.
+func (p *processor) emitProgress(kind, text, tool, state string) {
+	next := turn.Progress{Kind: kind, Text: text, Tool: tool, State: state}
+	if next == p.lastProgress {
+		return
+	}
+	p.lastProgress = next
+	p.sink.EmitProgress(next)
+}
+
+// progressFor maps a skipped frame to its progress event. tool_calls carry the
+// agent's own narration; everything else falls back to the frame's content.
+func progressFor(pl Payload) (kind, text, tool string) {
+	switch {
+	case pl.Kind == "tool_calls":
+		if len(pl.ToolCalls) > 0 {
+			// A frame may carry several calls; the first is the one the agent
+			// narrated.
+			tc := pl.ToolCalls[0]
+			return "tool", tc.ExtraContent.Explanation, tc.Function.Name
+		}
+		return "tool", pl.Content, ""
+	case pl.Kind == "thought":
+		return "thought", pl.Content, ""
+	default:
+		return "placeholder", pl.Content, ""
+	}
 }
 
 // signal tells the transport driver how to manage the finalize grace timer.
@@ -68,8 +126,13 @@ func (p *processor) handle(f Frame) signal {
 	case "message.create", "message.update":
 		pl := f.Payload
 		// Not the plain assistant answer: internal reasoning, tool-call
-		// indicators, and placeholders are all skipped.
+		// indicators, and placeholders are all skipped -- but they are the only
+		// sign of life during a turn, so they are forwarded as progress first.
+		// Nothing below the emit changes: the skip, and every field the
+		// completion machine reads, are exactly as they were.
 		if pl.Kind == "thought" || pl.Kind == "tool_calls" || pl.Placeholder {
+			kind, text, tool := progressFor(pl)
+			p.emitProgress(kind, text, tool, "")
 			return signal{}
 		}
 		prev := p.plain[pl.MessageID]
@@ -77,17 +140,19 @@ func (p *processor) handle(f Frame) signal {
 		p.lastPlainID = pl.MessageID
 		p.hasPlainContent = true
 		// Cumulative content: emit only the newly-appended suffix.
-		if len(pl.Content) > len(prev) && p.onDelta != nil {
-			p.onDelta(pl.Content[len(prev):])
+		if len(pl.Content) > len(prev) {
+			p.sink.EmitContent(pl.Content[len(prev):])
 		}
 		return p.maybeArmGrace()
 	case "typing.start":
 		// The agent kept going (more tool calls, or a later message) — cancel
 		// any pending finalize.
 		p.isTyping = true
+		p.emitProgress("typing", "", "", "start")
 		return signal{cancel: true}
 	case "typing.stop":
 		p.isTyping = false
+		p.emitProgress("typing", "", "", "stop")
 		return p.maybeArmGrace()
 	case "error":
 		msg := f.Payload.Message
@@ -124,10 +189,11 @@ type Client struct {
 
 // RunTurn opens a Pico Protocol WebSocket to req.Endpoint (e.g.
 // ws://picoclaw-alpha-<hash>:18790/pico/ws), sends req.Content for req.SessionID,
-// and returns the final assistant text. If onDelta is non-nil it is called with
-// each newly-appended chunk as it streams in. req.SessionKey/Model are unused
-// (picoclaw is pinned server-side).
-func (c *Client) RunTurn(ctx context.Context, req turn.Request, onDelta func(string)) (string, error) {
+// and returns the final assistant text. sink.Content receives each newly-appended
+// chunk; sink.Progress receives the non-content signals (tool narration, thoughts,
+// typing) that would otherwise be invisible during the wait. req.SessionKey/Model
+// are unused (picoclaw is pinned server-side).
+func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error) {
 	timeout := c.TurnTimeout
 	if timeout <= 0 {
 		timeout = 120 * time.Second
@@ -190,7 +256,7 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, onDelta func(str
 		}
 	}()
 
-	proc := newProcessor(onDelta)
+	proc := newProcessor(sink)
 	grace := time.NewTimer(0)
 	if !grace.Stop() {
 		<-grace.C
