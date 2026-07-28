@@ -51,6 +51,30 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
+	// Progress rides as an extra top-level field on an otherwise-normal chunk
+	// with an EMPTY delta. A client that knows nothing about it -- including a
+	// generic OpenAI SDK -- reads choices[0].delta.content, finds nothing, and
+	// skips the frame: the extension is ignored, never a parse error. A named
+	// SSE event (`event: progress`) would instead be dropped wholesale by
+	// data:-only parsers, so this shape is the compatible one.
+	writeProgress := func(p turn.Progress) {
+		payload := map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": nil}},
+			"x_crab_progress": map[string]any{
+				"kind":  p.Kind,
+				"text":  p.Text,
+				"tool":  p.Tool,
+				"state": p.State,
+			},
+		}
+		b, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
 	done := func() {
 		writeChunk(map[string]any{}, "stop")
 		fmt.Fprint(w, "data: [DONE]\n\n")
@@ -86,11 +110,19 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		SessionKey: key.UserAccID + ":" + key.Role,
 		Model:      turnModelFor(agent, model),
 		Content:    userContent,
-	}, func(delta string) {
-		if clientCtx.Err() != nil {
-			return // client gone — keep draining so the agent finishes its write
-		}
-		writeChunk(map[string]any{"content": delta}, nil)
+	}, turn.Sink{
+		Content: func(delta string) {
+			if clientCtx.Err() != nil {
+				return // client gone — keep draining so the agent finishes its write
+			}
+			writeChunk(map[string]any{"content": delta}, nil)
+		},
+		Progress: func(p turn.Progress) {
+			if clientCtx.Err() != nil {
+				return
+			}
+			writeProgress(p)
+		},
 	})
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {

@@ -326,11 +326,9 @@ type fakeTurner struct {
 	deltas  []string
 }
 
-func (f *fakeTurner) RunTurn(_ context.Context, _ turn.Request, onDelta func(string)) (string, error) {
+func (f *fakeTurner) RunTurn(_ context.Context, _ turn.Request, sink turn.Sink) (string, error) {
 	for _, d := range f.deltas {
-		if onDelta != nil {
-			onDelta(d)
-		}
+		sink.EmitContent(d)
 	}
 	return f.content, f.err
 }

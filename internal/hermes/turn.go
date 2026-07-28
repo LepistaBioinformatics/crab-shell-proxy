@@ -38,10 +38,16 @@ type chunk struct {
 // RunTurn POSTs req.Content to <req.Endpoint>/v1/chat/completions on the hermes
 // API server, authenticating with req.AuthToken and scoping the transcript
 // (X-Hermes-Session-Id) and long-term memory (X-Hermes-Session-Key). It streams
-// the SSE chat.completion.chunk deltas: onDelta (when non-nil) receives each new
-// content fragment as it arrives; the full assistant text is returned.
+// the SSE chat.completion.chunk deltas: sink.Content receives each new content
+// fragment as it arrives; the full assistant text is returned.
 // Non-content events (hermes.tool.progress, role-only deltas) are ignored.
-func (c *Client) RunTurn(ctx context.Context, req turn.Request, onDelta func(string)) (string, error) {
+//
+// sink.Progress is deliberately never called here. That is a decision, not an
+// oversight: the progress signals this feature surfaces come from picoclaw's
+// Pico Protocol frames, and hermes has no equivalent wired up yet. Its own
+// `hermes.tool.progress` event is the obvious future source -- it is parsed and
+// discarded a few lines below.
+func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error) {
 	timeout := c.TurnTimeout
 	if timeout <= 0 {
 		timeout = 120 * time.Second
@@ -112,9 +118,7 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, onDelta func(str
 				continue
 			}
 			sb.WriteString(choice.Delta.Content)
-			if onDelta != nil {
-				onDelta(choice.Delta.Content)
-			}
+			sink.EmitContent(choice.Delta.Content)
 		}
 	}
 	if err := sc.Err(); err != nil {

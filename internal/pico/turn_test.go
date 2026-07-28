@@ -3,13 +3,15 @@ package pico
 import (
 	"strings"
 	"testing"
+
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 )
 
 // drive replays a frame sequence through the processor, tracking the resulting
 // grace-timer state (armed/cancelled) exactly as the transport driver would,
 // and returns the streamed deltas plus whether grace was armed at the end.
 func drive(frames []Frame) (deltas []string, armed bool, errMsg string, final string) {
-	p := newProcessor(func(d string) { deltas = append(deltas, d) })
+	p := newProcessor(turn.Sink{Content: func(d string) { deltas = append(deltas, d) }})
 	for _, f := range frames {
 		sig := p.handle(f)
 		if sig.errMsg != "" {
