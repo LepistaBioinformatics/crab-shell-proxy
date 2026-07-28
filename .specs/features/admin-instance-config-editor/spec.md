@@ -231,6 +231,30 @@ The proxy rewrites exactly these paths in `config.json` after seeding:
   is comparable authority. It is the deliberate choice, and the reason FR-5
   requires an audit log line.
 
+### FR-4.5 — Restarting one repaired instance
+
+- **FR-4.5.1** `POST /v1/admin/users/restart?tenant_id=&subs_acc_id=&user_acc_id=&agent=`
+  bounces that one workspace. Same `agent`-is-explicit rule and same
+  `AuthorizeUserManagement` gate as FR-1/FR-2 — it reuses `adminInstanceKey`.
+- **FR-4.5.2** It responds `{"status":"restarted"|"noop","lastRestartAt":…}`, where
+  `noop` means the container was absent or scaled to zero. That is a **success**:
+  the next cold start begins from the repaired file. Same contract as the member's
+  own `POST /v1/restart`.
+- **FR-4.5.3** This route exists because **restart-control's reason for not
+  building it does not survive this feature.** That spec declined an
+  admin-initiated per-workspace restart on the grounds that the notice model is
+  per scope, so a targeted bounce would carry no notice, and members press their
+  own button. But a workspace whose `config.json` is broken may not boot picoclaw
+  at all — its member can never reach that button, and `restart=notice` is inert
+  for exactly the instance an admin just repaired. The bounce here is attached to
+  the repair, which is what was missing.
+- **FR-4.5.4** It is a separate route rather than a flag on the `PUT`, which
+  already has one (FR-6.1). A repair is usually several saves, and the result
+  should be applicable once at the end — and an instance can need a bounce for a
+  change made from another screen entirely.
+- **FR-4.5.5** Audited on the same terms as FR-5: one line per attempt, accepted
+  or refused, naming the caller and the workspace.
+
 ### FR-5 — Observability
 
 - **FR-5.1** Every successful `PUT` logs one line naming the caller (profile
@@ -342,6 +366,9 @@ The proxy rewrites exactly these paths in `config.json` after seeding:
 | FR-3.3 (failure) | Unit: registry resolution error → 200 with `reapplied.ok:false`, write still on disk |
 | FR-3.3 (repair) | Unit: pre-write file unparseable → write succeeds and the reapply then succeeds |
 | FR-4.1 | Unit: a subscriptions-manager of another subscription → 403 on both verbs |
+| FR-4.5.1 | Unit: `agent=beta` bounces beta's workspace while the request is routed through alpha |
+| FR-4.5.2 | Unit: a stopped container → 200 `noop` |
+| FR-4.5.5 | Unit: a non-manager → 403 and no bounce |
 | FR-4.3 | Unit: non-UUID ids → 400; unknown `agent` → 400 |
 | FR-5.1 | Unit: a successful PUT emits one log line with caller + key + sizes and **no** body |
 | FR-6.1 | Unit: `restart=notice` raises a workspace notice with reason `config` and does not bounce; `restart=schedule` behaves as `notice` |
