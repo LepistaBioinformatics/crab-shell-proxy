@@ -135,6 +135,67 @@ func TestSkillZipGoodAndArchive(t *testing.T) {
 	}
 }
 
+// `zip -r auto-harness.zip auto-harness/` — and the Finder/Explorer equivalents —
+// wrap everything in a directory named after the folder, so the entries are
+// `auto-harness/SKILL.md`, not `SKILL.md`. That is the normal output of zipping a
+// directory, and it used to be rejected with "archive has no top-level SKILL.md".
+func TestSkillZipStripsSingleWrappingDir(t *testing.T) {
+	m, scope := skillsManager(t)
+	z := makeZip(t, map[string]string{
+		"auto-harness/SKILL.md":        goodSkillMD,
+		"auto-harness/references/x.md": "hi",
+	})
+	if err := m.WriteSharedSkillZip(scope, "zskill", z); err != nil {
+		t.Fatalf("wrapped zip: %v", err)
+	}
+	// The wrapper is NOT part of the installed skill: the destination directory is
+	// named by the upload's `name`, and SKILL.md has to sit directly inside it or
+	// picoclaw will not find the skill at all.
+	dir := m.sharedSkillsDir(scope)
+	if _, err := os.Stat(filepath.Join(dir, "zskill", "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md should be at the skill root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "zskill", "references", "x.md")); err != nil {
+		t.Errorf("supporting file should keep its relative path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "zskill", "auto-harness")); err == nil {
+		t.Error("the wrapping directory must not be extracted")
+	}
+}
+
+// Stripping applies ONLY when there is exactly one top-level directory and nothing
+// beside it. Anything else keeps its paths, so a zip that genuinely has no root
+// SKILL.md is still rejected rather than being silently reinterpreted.
+func TestSkillZipStripsOnlyAnUnambiguousWrapper(t *testing.T) {
+	m, scope := skillsManager(t)
+	// Two top-level directories: there is no single wrapper to strip.
+	err := m.WriteSharedSkillZip(scope, "two", makeZip(t, map[string]string{
+		"a/SKILL.md": goodSkillMD,
+		"b/other.md": "x",
+	}))
+	if !errors.Is(err, ErrSkillArchive) {
+		t.Errorf("two top-level dirs: want ErrSkillArchive, got %v", err)
+	}
+	// A root-level file beside the directory: the root is already meaningful.
+	err = m.WriteSharedSkillZip(scope, "mixed", makeZip(t, map[string]string{
+		"pack/SKILL.md": goodSkillMD,
+		"readme.txt":    "x",
+	}))
+	if !errors.Is(err, ErrSkillArchive) {
+		t.Errorf("root file beside dir: want ErrSkillArchive, got %v", err)
+	}
+	// A wrapper that holds no SKILL.md is still an archive without one.
+	err = m.WriteSharedSkillZip(scope, "empty", makeZip(t, map[string]string{
+		"pack/readme.txt": "x",
+	}))
+	if !errors.Is(err, ErrSkillArchive) {
+		t.Errorf("wrapper without SKILL.md: want ErrSkillArchive, got %v", err)
+	}
+	if list, _ := m.ListSharedSkills(scope); len(list) != 0 {
+		t.Errorf("rejected uploads must write nothing: %+v", list)
+	}
+}
+
 func TestSkillZipRejects(t *testing.T) {
 	m, scope := skillsManager(t)
 	// Path traversal.

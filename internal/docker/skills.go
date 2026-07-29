@@ -203,10 +203,49 @@ func (m *Manager) WriteSharedSkillDoc(scope Scope, rawName, body string) error {
 	return chownTree(dir, m.cfg.PicoclawUser)
 }
 
+// skillArchiveRoot returns the single top-level directory that every entry in the
+// archive lives under, or "" when the archive's own root is already the skill root.
+//
+// `zip -r auto-harness.zip auto-harness/` — and the Finder and Explorer equivalents —
+// wrap everything in a directory named after the folder, so the entries read
+// `auto-harness/SKILL.md`. That is the ordinary output of zipping a directory, and
+// treating it as "no SKILL.md" rejected the most obvious way to produce a skill
+// archive. The wrapper is not part of the skill: the installed directory is named by
+// the upload's own `name`, and SKILL.md has to sit directly inside it.
+//
+// It only strips an UNAMBIGUOUS wrapper. A root-level file, or a second top-level
+// directory, means the archive root already carries meaning — so nothing is stripped
+// and an archive genuinely missing its SKILL.md is still rejected rather than
+// silently reinterpreted as something else.
+//
+// Unsafe names are not interpreted here; the extraction loop rejects them on the
+// original path, before any of this is applied.
+func skillArchiveRoot(zr *zip.Reader) string {
+	root := ""
+	for _, f := range zr.File {
+		clean := path.Clean(f.Name)
+		if clean == "." || clean == "/" {
+			continue
+		}
+		first, _, nested := strings.Cut(clean, "/")
+		// A directory entry carries a trailing slash, which Clean removes — so a bare
+		// top-level directory is indistinguishable from a root file by shape alone.
+		if !nested && !f.FileInfo().IsDir() {
+			return ""
+		}
+		if root != "" && root != first {
+			return ""
+		}
+		root = first
+	}
+	return root
+}
+
 // WriteSharedSkillZip replaces a skill dir from an uploaded zip: hardened
-// against traversal/symlink/oversize/too-many-entries, requires a top-level
-// SKILL.md with valid frontmatter, and is applied atomically (extract to a temp
-// sibling, then swap).
+// against traversal/symlink/oversize/too-many-entries, requires a SKILL.md with
+// valid frontmatter at the skill root (see skillArchiveRoot for archives that wrap
+// it in a directory), and is applied atomically (extract to a temp sibling, then
+// swap).
 func (m *Manager) WriteSharedSkillZip(scope Scope, rawName string, r io.Reader) error {
 	name, err := sanitizeSkillName(rawName)
 	if err != nil {
@@ -237,22 +276,39 @@ func (m *Manager) WriteSharedSkillZip(scope Scope, rawName string, r io.Reader) 
 	}
 	defer os.RemoveAll(tmp)
 
+	// Resolved over the whole entry list before anything is written, so the decision
+	// cannot depend on the order entries happen to appear in.
+	root := skillArchiveRoot(zr)
+
 	var total int64
 	sawSkillMD := false
 	for _, f := range zr.File {
 		clean := path.Clean(f.Name)
+		// The safety checks stay on the ORIGINAL path. Stripping a wrapper must not
+		// become a way to smuggle one past them.
 		if clean == "." || strings.HasPrefix(clean, "..") || strings.HasPrefix(clean, "/") ||
 			strings.Contains(clean, "../") {
 			return fmt.Errorf("%w: unsafe path %q", ErrSkillArchive, f.Name)
 		}
-		if strings.Count(clean, "/") > skillMaxDepth {
+		// The path WITHIN the skill. TrimPrefix with the separator attached rather
+		// than the bare name: "pack" must not turn "packages/x" into "ages/x".
+		rel := clean
+		if root != "" {
+			if clean == root {
+				continue // the wrapper directory entry itself
+			}
+			rel = strings.TrimPrefix(clean, root+"/")
+		}
+		// Measured inside the skill: a wrapper the caller did not ask for should not
+		// spend one of the allowed levels.
+		if strings.Count(rel, "/") > skillMaxDepth {
 			return fmt.Errorf("%w: nesting too deep", ErrSkillArchive)
 		}
 		mode := f.Mode()
 		if mode&os.ModeSymlink != 0 || (!mode.IsRegular() && !f.FileInfo().IsDir()) {
 			return fmt.Errorf("%w: irregular entry %q", ErrSkillArchive, f.Name)
 		}
-		dest := filepath.Join(tmp, filepath.FromSlash(clean))
+		dest := filepath.Join(tmp, filepath.FromSlash(rel))
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(dest, 0o700); err != nil {
 				return err
@@ -262,7 +318,7 @@ func (m *Manager) WriteSharedSkillZip(scope Scope, rawName string, r io.Reader) 
 		if f.UncompressedSize64 > uint64(skillMaxPerFile) {
 			return fmt.Errorf("%w: file %q too large", ErrSkillArchive, f.Name)
 		}
-		if clean == "SKILL.md" {
+		if rel == "SKILL.md" {
 			sawSkillMD = true
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
