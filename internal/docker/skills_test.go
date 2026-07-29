@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
@@ -193,6 +194,56 @@ func TestSkillZipStripsOnlyAnUnambiguousWrapper(t *testing.T) {
 	}
 	if list, _ := m.ListSharedSkills(scope); len(list) != 0 {
 		t.Errorf("rejected uploads must write nothing: %+v", list)
+	}
+}
+
+// `zip auto-harness.zip auto-harness` WITHOUT -r stores the directory entry and
+// none of its contents, so the archive holds no files at all. "no top-level
+// SKILL.md" is true of it but reads as "your SKILL.md is in the wrong place",
+// which sent a real operator looking for a layout problem that did not exist.
+func TestSkillZipEmptyArchiveSaysSo(t *testing.T) {
+	m, scope := skillsManager(t)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	// A trailing slash is what makes Go's zip reader report an entry as a
+	// directory — this is byte-for-byte what `zip` without -r produces.
+	if _, err := zw.Create("auto-harness/"); err != nil {
+		t.Fatal(err)
+	}
+	zw.Close()
+
+	err := m.WriteSharedSkillZip(scope, "empty", bytes.NewReader(buf.Bytes()))
+	if !errors.Is(err, ErrSkillArchive) {
+		t.Fatalf("want ErrSkillArchive, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no files") {
+		t.Errorf("error should say the archive holds no files, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "top-level") {
+		t.Errorf("an archive with no files must not be blamed on SKILL.md placement: %v", err)
+	}
+
+	// A truly empty archive is the same story.
+	var empty bytes.Buffer
+	ez := zip.NewWriter(&empty)
+	ez.Close()
+	err = m.WriteSharedSkillZip(scope, "none", bytes.NewReader(empty.Bytes()))
+	if !errors.Is(err, ErrSkillArchive) || !strings.Contains(err.Error(), "no files") {
+		t.Errorf("empty archive: %v", err)
+	}
+}
+
+// An archive that DOES carry files but none of them is SKILL.md keeps the
+// placement message — that one really is about where the file sits.
+func TestSkillZipWithFilesButNoSkillMDKeepsPlacementMessage(t *testing.T) {
+	m, scope := skillsManager(t)
+	err := m.WriteSharedSkillZip(scope, "nomd", makeZip(t, map[string]string{"readme.txt": "x"}))
+	if !errors.Is(err, ErrSkillArchive) {
+		t.Fatalf("want ErrSkillArchive, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "top-level SKILL.md") {
+		t.Errorf("want the placement message, got: %v", err)
 	}
 }
 

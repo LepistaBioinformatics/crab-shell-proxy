@@ -282,6 +282,7 @@ func (m *Manager) WriteSharedSkillZip(scope Scope, rawName string, r io.Reader) 
 
 	var total int64
 	sawSkillMD := false
+	sawFile := false
 	for _, f := range zr.File {
 		clean := path.Clean(f.Name)
 		// The safety checks stay on the ORIGINAL path. Stripping a wrapper must not
@@ -318,6 +319,7 @@ func (m *Manager) WriteSharedSkillZip(scope Scope, rawName string, r io.Reader) 
 		if f.UncompressedSize64 > uint64(skillMaxPerFile) {
 			return fmt.Errorf("%w: file %q too large", ErrSkillArchive, f.Name)
 		}
+		sawFile = true
 		if rel == "SKILL.md" {
 			sawSkillMD = true
 		}
@@ -343,6 +345,16 @@ func (m *Manager) WriteSharedSkillZip(scope Scope, rawName string, r io.Reader) 
 		if total > skillMaxTotalBytes {
 			return fmt.Errorf("%w: total size exceeded", ErrSkillArchive)
 		}
+	}
+	// An archive holding no files at all gets its OWN message. "no top-level
+	// SKILL.md" is true of it, but it reads as "your SKILL.md is in the wrong
+	// place" and sends the reader looking for a layout problem that does not
+	// exist. `zip <name>.zip <dir>` without -r produces exactly this: the
+	// directory entry, and none of its contents.
+	if !sawFile {
+		return fmt.Errorf(
+			"%w: the archive contains no files (if you ran `zip` on a directory, it needs -r)",
+			ErrSkillArchive)
 	}
 	if !sawSkillMD {
 		return fmt.Errorf("%w: archive has no top-level SKILL.md", ErrSkillArchive)
