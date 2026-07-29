@@ -228,7 +228,24 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		if _, syncErr := m.syncEffectiveSecrets(key); syncErr != nil {
 			return Target{}, syncErr
 		}
-		authToken, err = provision(userDir, templateDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
+		// The template is the persona cascade's LAST layer, and the cascade is
+		// resolved before provisioning — so a missing template has to self-heal
+		// first. Left inside provision (where it used to live), a first-ever
+		// provision resolved the cascade against a template that did not exist yet
+		// and produced a workspace with no identity files at all.
+		if tErr := ensurePicoclawTemplate(templateDir, m.cfg.PicoclawUser); tErr != nil {
+			return Target{}, tErr
+		}
+		// Same discipline as the secrets above, and for two reasons: this is the
+		// bind-mount source for the read-only identity files, and seedWorkspace
+		// reads USER.md out of it (an operator's injection is what a first provision
+		// starts from). Both need it materialized before provision runs.
+		if syncErr := m.syncEffectivePersona(key, templateDir); syncErr != nil {
+			return Target{}, syncErr
+		}
+		personaDir := config.EffectivePersonaDir(
+			m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role)
+		authToken, err = provision(userDir, templateDir, personaDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
 		if err == nil {
 			// Materialize AFTER seeding, so the template's (now empty) model_list
 			// is replaced by the inventory's answer, and the native overlay lands
@@ -373,8 +390,15 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds: append([]string{hostDir + ":" + mountDest, secretsMount},
-			append(sharedMounts, managedSkillMount, managedMemoryMount, skillsMount)...),
+		// The persona binds come LAST, and per file: each shadows one path inside
+		// the workspace bind above it, which is exactly how AGENT.md, SOUL.md and
+		// HEARTBEAT.md become unwritable. Only files the effective dir actually
+		// holds are bound — a bind with a missing source makes Docker invent an
+		// empty directory at the destination (personaBinds).
+		Binds: append(
+			append([]string{hostDir + ":" + mountDest, secretsMount},
+				append(sharedMounts, managedSkillMount, managedMemoryMount, skillsMount)...),
+			personaBindStrings(m.cfg, key, mountDest)...),
 		Network: m.cfg.Network,
 		Init:    true,
 	}

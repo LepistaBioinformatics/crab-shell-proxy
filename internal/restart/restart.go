@@ -41,6 +41,7 @@ const (
 	ReasonSharedSecret Reason = "shared-secret"
 	ReasonSharedSkills Reason = "shared-skills"
 	ReasonSharedFiles  Reason = "shared-files"
+	ReasonPersona      Reason = "persona"
 	ReasonModel        Reason = "model"
 	ReasonOwnSecret    Reason = "own-secret"
 	ReasonAdminRequest Reason = "admin-request"

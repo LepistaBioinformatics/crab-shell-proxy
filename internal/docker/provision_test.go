@@ -117,22 +117,25 @@ func mustWrite(t *testing.T, path, content string) {
 func TestSeedWorkspaceAllowlist(t *testing.T) {
 	tmpl := t.TempDir()
 	ws := filepath.Join(tmpl, "workspace")
-	mustWrite(t, filepath.Join(ws, "AGENT.md"), "persona")
-	mustWrite(t, filepath.Join(ws, "SOUL.md"), "soul")
+	mustWrite(t, filepath.Join(ws, "USER.md"), "user")
 	mustWrite(t, filepath.Join(ws, "skills", "brave", "SKILL.md"), "skill")
 	mustWrite(t, filepath.Join(ws, "memory", "MEMORY.md"), "mem")
+	// The identity files are delivered by READ-ONLY MOUNT, not copied — a writable
+	// duplicate is exactly what the mount exists to prevent.
+	mustWrite(t, filepath.Join(ws, "AGENT.md"), "persona")
+	mustWrite(t, filepath.Join(ws, "SOUL.md"), "soul")
+	mustWrite(t, filepath.Join(ws, "HEARTBEAT.md"), "beat")
 	// These MUST NEVER be copied (isolation + runtime state).
 	mustWrite(t, filepath.Join(ws, "sessions", "leak.jsonl"), "SECRET SESSION")
 	mustWrite(t, filepath.Join(ws, "logs", "run.log"), "log")
 	mustWrite(t, filepath.Join(ws, ".picoclaw.pid"), "123")
-	// USER.md is intentionally absent — a partial template must be seeded fine.
 
 	userDir := filepath.Join(t.TempDir(), "u")
-	if err := seedWorkspace(userDir, tmpl); err != nil {
+	if err := seedWorkspace(userDir, tmpl, ""); err != nil {
 		t.Fatalf("seedWorkspace: %v", err)
 	}
 	dws := filepath.Join(userDir, "workspace")
-	for _, p := range []string{"AGENT.md", "SOUL.md", "skills/brave/SKILL.md", "memory/MEMORY.md"} {
+	for _, p := range []string{"USER.md", "skills/brave/SKILL.md", "memory/MEMORY.md"} {
 		if _, err := os.Stat(filepath.Join(dws, filepath.FromSlash(p))); err != nil {
 			t.Errorf("expected %s seeded: %v", p, err)
 		}
@@ -142,8 +145,43 @@ func TestSeedWorkspaceAllowlist(t *testing.T) {
 			t.Errorf("%s must NEVER be seeded (isolation invariant)", p)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dws, "USER.md")); err == nil {
-		t.Error("USER.md absent in template must not appear (partial template)")
+	for _, p := range []string{"AGENT.md", "SOUL.md", "HEARTBEAT.md"} {
+		if _, err := os.Stat(filepath.Join(dws, p)); err == nil {
+			t.Errorf("%s must not be COPIED — it is bind-mounted read-only", p)
+		}
+	}
+}
+
+// A partial template stays valid: an absent allowlist entry is skipped, not an
+// error.
+func TestSeedWorkspacePartialTemplate(t *testing.T) {
+	tmpl := t.TempDir()
+	mustWrite(t, filepath.Join(tmpl, "workspace", "memory", "MEMORY.md"), "mem")
+
+	userDir := filepath.Join(t.TempDir(), "u")
+	if err := seedWorkspace(userDir, tmpl, ""); err != nil {
+		t.Fatalf("seedWorkspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(userDir, "workspace", "USER.md")); err == nil {
+		t.Error("USER.md absent in template must not appear")
+	}
+}
+
+// An operator's injected USER.md is what a first provision starts from: the
+// resolved persona set wins over the template for any entry it holds.
+func TestSeedWorkspacePrefersPersonaDir(t *testing.T) {
+	tmpl := t.TempDir()
+	mustWrite(t, filepath.Join(tmpl, "workspace", "USER.md"), "TEMPLATE")
+	persona := t.TempDir()
+	mustWrite(t, filepath.Join(persona, "USER.md"), "INJECTED")
+
+	userDir := filepath.Join(t.TempDir(), "u")
+	if err := seedWorkspace(userDir, tmpl, persona); err != nil {
+		t.Fatalf("seedWorkspace: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "USER.md"))
+	if string(raw) != "INJECTED" {
+		t.Errorf("USER.md = %q, want the injected content", raw)
 	}
 }
 
@@ -152,12 +190,12 @@ func TestProvisionFirstSeedsWorkspace(t *testing.T) {
 	mustWrite(t, filepath.Join(tmpl, "config.json"), `{"agents":{"defaults":{}}}`)
 	mustWrite(t, filepath.Join(tmpl, ".security.yml"),
 		"channel_list:\n  pico:\n    settings:\n      token: tok\n")
-	mustWrite(t, filepath.Join(tmpl, "workspace", "AGENT.md"), "persona")
+	mustWrite(t, filepath.Join(tmpl, "workspace", "USER.md"), "user")
 	mustWrite(t, filepath.Join(tmpl, "workspace", "sessions", "leak.jsonl"), "LEAK")
 
 	userDir := filepath.Join(t.TempDir(), "u")
 	// user "" so chownTree is a no-op (this test does not run as root).
-	tok, err := provision(userDir, tmpl, "/data", "", WorkspaceKey{}, "e@x")
+	tok, err := provision(userDir, tmpl, "", "/data", "", WorkspaceKey{}, "e@x")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -166,33 +204,43 @@ func TestProvisionFirstSeedsWorkspace(t *testing.T) {
 	if !strings.HasPrefix(tok, "pico-") {
 		t.Errorf("token = %q, want a pico- prefixed random token", tok)
 	}
-	if _, err := os.Stat(filepath.Join(userDir, "workspace", "AGENT.md")); err != nil {
-		t.Errorf("AGENT.md not seeded on first provision: %v", err)
+	if _, err := os.Stat(filepath.Join(userDir, "workspace", "USER.md")); err != nil {
+		t.Errorf("USER.md not seeded on first provision: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(userDir, "workspace", "sessions")); err == nil {
 		t.Error("sessions/ leaked into the user workspace")
 	}
 }
 
-func TestProvisionReturningUserNotReseeded(t *testing.T) {
+// The no-clobber property now belongs to USER.md, and only to it.
+//
+// It used to be asserted on AGENT.md, on the reasoning that a returning user's
+// evolved identity must survive. That reasoning is gone: AGENT.md is bind-mounted
+// read-only, so a user cannot have an evolved one at all. USER.md is where the
+// agent accumulates what it learns about the user, which is exactly the content
+// that must never be reset — an operator's injection sets the STARTING point
+// (TestSeedWorkspacePrefersPersonaDir), not the running value.
+func TestProvisionReturningUserKeepsUserMD(t *testing.T) {
 	userDir := t.TempDir()
-	// A returning user: config.json present + an evolved AGENT.md.
 	mustWrite(t, filepath.Join(userDir, "config.json"), "{}")
 	mustWrite(t, filepath.Join(userDir, ".security.yml"),
 		"channel_list:\n  pico:\n    settings:\n      token: tok\n")
-	mustWrite(t, filepath.Join(userDir, "workspace", "AGENT.md"), "EVOLVED")
+	mustWrite(t, filepath.Join(userDir, "workspace", "USER.md"), "LEARNED")
 
 	tmpl := t.TempDir()
 	mustWrite(t, filepath.Join(tmpl, "config.json"), "{}")
 	mustWrite(t, filepath.Join(tmpl, ".security.yml"),
 		"channel_list:\n  pico:\n    settings:\n      token: tmpltok\n")
-	mustWrite(t, filepath.Join(tmpl, "workspace", "AGENT.md"), "TEMPLATE-DEFAULT")
+	mustWrite(t, filepath.Join(tmpl, "workspace", "USER.md"), "TEMPLATE-DEFAULT")
 
-	if _, err := provision(userDir, tmpl, "/data", "", WorkspaceKey{}, ""); err != nil {
+	persona := t.TempDir()
+	mustWrite(t, filepath.Join(persona, "USER.md"), "INJECTED")
+
+	if _, err := provision(userDir, tmpl, persona, "/data", "", WorkspaceKey{}, ""); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "AGENT.md"))
-	if string(raw) != "EVOLVED" {
-		t.Errorf("returning user's AGENT.md was clobbered: %q", raw)
+	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "USER.md"))
+	if string(raw) != "LEARNED" {
+		t.Errorf("returning user's USER.md was clobbered: %q", raw)
 	}
 }
