@@ -246,7 +246,7 @@ func TestStoreDir(t *testing.T) {
 }
 
 func TestWorkspaceSeedAllowlist(t *testing.T) {
-	want := []string{"AGENT.md", "SOUL.md", "USER.md", "memory/", "skills/"}
+	want := []string{"USER.md", "memory/", "skills/"}
 	if len(WorkspaceSeed) != len(want) {
 		t.Fatalf("WorkspaceSeed = %v, want %v", WorkspaceSeed, want)
 	}
@@ -259,6 +259,14 @@ func TestWorkspaceSeedAllowlist(t *testing.T) {
 	for _, e := range WorkspaceSeed {
 		if e == "sessions/" || e == "logs/" || e == ".picoclaw.pid" {
 			t.Errorf("WorkspaceSeed must never contain %q", e)
+		}
+	}
+	// The identity files are DELIVERED BY MOUNT, not copied — copying them would
+	// leave a writable duplicate the read-only bind merely hides, which resurfaces
+	// the moment the mount goes away.
+	for _, e := range WorkspaceSeed {
+		if e == "AGENT.md" || e == "SOUL.md" || e == "HEARTBEAT.md" {
+			t.Errorf("WorkspaceSeed must not copy the read-only identity file %q", e)
 		}
 	}
 }

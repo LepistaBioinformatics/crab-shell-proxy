@@ -35,19 +35,32 @@ var templateFiles = []string{"config.json", ".security.yml"}
 // inventory after seeding and applies the overlay after THAT, because
 // materialization rewrites .security.yml's whole model_list and would otherwise
 // overwrite the overlay it is supposed to sit under (see resolveAndMaterialize).
-func provision(userDir, templateDir, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
+// ensurePicoclawTemplate self-heals a missing agent template (e.g. data/ was
+// wiped or never seeded) by materializing the bundled fallback, so provisioning
+// succeeds instead of failing on a missing seed. Idempotent — a template that has
+// a config.json is left alone.
+//
+// Separate from provision because the persona cascade's LAST layer is this
+// template, and it is resolved before provisioning runs. Inlined in provision, a
+// first-ever provision resolved the cascade against a template that did not exist
+// yet and left the workspace with no identity files at all.
+func ensurePicoclawTemplate(templateDir, user string) error {
+	if _, err := os.Stat(filepath.Join(templateDir, "config.json")); err == nil {
+		return nil
+	}
+	// "picoclaw" is the only harness reaching here; hermes has its own path.
+	if err := materializeDefaultTemplate(templateDir, "picoclaw", user); err != nil {
+		return fmt.Errorf("materialize default template: %w", err)
+	}
+	return nil
+}
+
+func provision(userDir, templateDir, personaDir, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
-		// Self-heal: if the agent's template is missing (e.g. data/ was wiped or
-		// never seeded), materialize the bundled fallback template first so
-		// provisioning succeeds instead of failing on a missing seed.
-		if _, tErr := os.Stat(filepath.Join(templateDir, "config.json")); tErr != nil {
-			// "picoclaw" is the only harness today; thread the agent's harness
-			// here once multi-harness support lands.
-			if err := materializeDefaultTemplate(templateDir, "picoclaw", user); err != nil {
-				return "", fmt.Errorf("materialize default template: %w", err)
-			}
+		if err := ensurePicoclawTemplate(templateDir, user); err != nil {
+			return "", err
 		}
 		if err := seedFromTemplate(userDir, templateDir); err != nil {
 			return "", err
@@ -64,7 +77,7 @@ func provision(userDir, templateDir, home, user string, key WorkspaceKey, ownerE
 		// Seed the allowlisted agent template workspace files (persona/skills/
 		// memory) so the agent starts customized. Only on first provision, so a
 		// returning user's evolved files are never clobbered (AC-01).
-		if err := seedWorkspace(userDir, templateDir); err != nil {
+		if err := seedWorkspace(userDir, templateDir, personaDir); err != nil {
 			return "", fmt.Errorf("seed workspace files: %w", err)
 		}
 		// Traceability: the dir is named by accId (not email), so drop a small
@@ -216,11 +229,30 @@ func seedFromTemplate(userDir, templateDir string) error {
 // recursively). Absent entries are skipped without error (partial templates are
 // valid, AC-01.3). sessions/, logs/ and .picoclaw.pid are never in the allowlist
 // so they can never leak.
-func seedWorkspace(userDir, templateDir string) error {
+//
+// personaDir is the RESOLVED persona set (admin injection falling back to the
+// template). An entry present there is seeded from there instead of from the
+// template, which is how an operator controls the starting content of USER.md —
+// the one identity file that stays writable, because the agent accumulates what
+// it learns about the user in it.
+//
+// Deliberately expressed as "prefer personaDir for any entry it holds" rather
+// than a check for the literal name: the allowlist and the persona set each say
+// what they cover, and a name spelled here too would be a third place to keep in
+// agreement.
+func seedWorkspace(userDir, templateDir, personaDir string) error {
 	srcRoot := filepath.Join(templateDir, "workspace")
 	dstRoot := filepath.Join(userDir, "workspace")
 	for _, entry := range config.WorkspaceSeed {
 		src := filepath.Join(srcRoot, entry)
+		// The resolved persona set wins where it has the entry: it already IS the
+		// template's copy when no admin injected one, so this only ever changes the
+		// source when an injection exists.
+		if personaDir != "" {
+			if candidate := filepath.Join(personaDir, entry); fileExists(candidate) {
+				src = candidate
+			}
+		}
 		info, err := os.Stat(src)
 		if err != nil {
 			continue // absent entry: skip (partial templates OK)
@@ -240,6 +272,11 @@ func seedWorkspace(userDir, templateDir string) error {
 		}
 	}
 	return nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // copyTree recursively copies the directory src to dst, creating directories as

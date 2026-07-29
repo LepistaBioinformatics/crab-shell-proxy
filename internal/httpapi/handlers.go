@@ -160,6 +160,18 @@ type Orchestrator interface {
 	// SyncEffectiveSkillsForScope rebuilds the merged effective-skills dir(s) a
 	// scope change affects, so the RO mount reflects it on the next stop/start.
 	SyncEffectiveSkillsForScope(scope docker.Scope) error
+
+	// --- persona (the read-only identity files at the workspace root) ---
+
+	ListPersona(scope docker.Scope) ([]docker.PersonaEntry, error)
+	ReadPersona(scope docker.Scope, name string) (string, error)
+	WritePersona(scope docker.Scope, name, body string) error
+	DeletePersona(scope docker.Scope, name string) error
+	// SyncEffectivePersonaForScope re-resolves the cascade for every workspace a
+	// scope write reaches. EnsureRunning does it too, on every request — but the
+	// admin handler bounces the scope right after the write, so without this the
+	// container boots on the previous effective file.
+	SyncEffectivePersonaForScope(scope docker.Scope) error
 }
 
 // Turner runs one conversational turn (satisfied by *pico.Client and
@@ -251,6 +263,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/skills/archive", s.handleAdminSkillsArchive)
 	mux.HandleFunc("POST /v1/admin/skills", s.handleAdminSkillsPost)
 	mux.HandleFunc("DELETE /v1/admin/skills", s.handleAdminSkillsDelete)
+	mux.HandleFunc("GET /v1/admin/persona", s.handleAdminPersonaList)
+	mux.HandleFunc("GET /v1/admin/persona/doc", s.handleAdminPersonaDoc)
+	mux.HandleFunc("POST /v1/admin/persona", s.handleAdminPersonaPost)
+	mux.HandleFunc("DELETE /v1/admin/persona", s.handleAdminPersonaDelete)
 	// model inventory: proxy-admin gated (internal/registry is the source of
 	// truth). /order is registered before /{name} — Go's mux prefers the more
 	// specific literal pattern regardless, but keeping them adjacent and ordered

@@ -18,6 +18,10 @@ func TestMaterializeDefaultTemplate(t *testing.T) {
 		".security.yml",
 		"workspace/AGENT.md",
 		"workspace/SOUL.md",
+		// The template is the LAST layer of the persona cascade, so it has to carry
+		// every mounted identity file — a file absent here and uninjected gets no
+		// bind at all, and picoclaw would find nothing where it expects one.
+		"workspace/HEARTBEAT.md",
 		"workspace/USER.md",
 		"workspace/memory/MEMORY.md",
 	} {
@@ -36,7 +40,7 @@ func TestProvisionSelfHealsMissingTemplate(t *testing.T) {
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provision(userDir, templateDir, "/data", "", WorkspaceKey{}, "x@y"); err != nil {
+	if _, err := provision(userDir, templateDir, "", "/data", "", WorkspaceKey{}, "x@y"); err != nil {
 		t.Fatalf("provision should self-heal, got: %v", err)
 	}
 	// The fallback template was materialized...

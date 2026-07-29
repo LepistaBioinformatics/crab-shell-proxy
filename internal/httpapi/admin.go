@@ -773,3 +773,180 @@ func (s *Server) handleAdminSkillsDelete(w http.ResponseWriter, r *http.Request)
 	s.applyParsedRestartPolicy(scope, restart.ReasonSharedSkills, policy, ident.Email)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "name": name})
 }
+
+// --- persona (the read-only identity files) ---
+
+// personaScope is adminScope plus the constraint that persona is ALWAYS
+// agent-scoped. The cascade has no agent-less layer: these files are the agent's
+// identity, so "the same persona for every agent" is not a thing an operator
+// wants to express, and resolveAgentTarget maps both an absent `agent` and the
+// all-agents sentinel to "".
+func (s *Server) personaScope(w http.ResponseWriter, get func(string) string) (docker.Scope, bool) {
+	scope, ok := s.adminScope(w, get)
+	if !ok {
+		return docker.Scope{}, false
+	}
+	if scope.AgentKey == "" {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`persona is per-agent: "agent" must name a configured agent`))
+		return docker.Scope{}, false
+	}
+	return scope, true
+}
+
+// personaName reads and VALIDATES the file name against the known set.
+//
+// This is the load-bearing guard of these endpoints. They write into a
+// workspace ROOT, so an unconstrained name would be an arbitrary-file-write
+// primitive reaching every container under the scope.
+func personaName(w http.ResponseWriter, raw string) (string, bool) {
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"name" is required`))
+		return "", false
+	}
+	if !docker.IsPersonaFile(raw) {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`"name" must be one of AGENT.md, SOUL.md, HEARTBEAT.md, USER.md`))
+		return "", false
+	}
+	return raw, true
+}
+
+func (s *Server) handleAdminPersonaList(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.personaScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	files, err := s.Mgr.ListPersona(scope)
+	if err != nil {
+		s.logf("admin: list persona failed scope=%+v: %v", scope, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": files})
+}
+
+func (s *Server) handleAdminPersonaDoc(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.personaScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name, ok := personaName(w, r.URL.Query().Get("name"))
+	if !ok {
+		return
+	}
+	content, err := s.Mgr.ReadPersona(scope, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Covers BOTH the file and the scope's persona dir being absent — they
+			// mean the same thing to a caller (nothing injected here), so they are
+			// deliberately not distinguished.
+			writeJSON(w, http.StatusNotFound, errBody("not injected at this scope"))
+			return
+		}
+		s.logf("admin: read persona failed scope=%+v name=%s: %v", scope, name, err)
+		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "content": content})
+}
+
+func (s *Server) handleAdminPersonaPost(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("could not read the form body"))
+		return
+	}
+	scope, ok := s.personaScope(w, r.FormValue)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name, ok := personaName(w, r.FormValue("name"))
+	if !ok {
+		return
+	}
+	body := r.FormValue("body")
+	if body == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("a `body` field is required"))
+		return
+	}
+	// Validate the restart policy BEFORE mutating: a 400 after a successful write
+	// would tell the caller their request failed when only the restart
+	// instruction was unusable.
+	policy, ok := s.parseRestartPolicy(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.WritePersona(scope, name, body); err != nil {
+		s.logf("admin: write persona failed scope=%+v name=%s: %v", scope, name, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	// Re-materialize BEFORE bouncing. EnsureRunning re-resolves the cascade on
+	// every request, but the restart below happens first — picoclaw would boot
+	// reading the previous effective file and hold the stale identity until
+	// something restarted it again.
+	if err := s.Mgr.SyncEffectivePersonaForScope(scope); err != nil {
+		s.logf("admin: sync effective persona failed scope=%+v: %v", scope, err)
+	}
+	s.applyParsedRestartPolicy(scope, restart.ReasonPersona, policy, ident.Email)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "name": name})
+}
+
+func (s *Server) handleAdminPersonaDelete(w http.ResponseWriter, r *http.Request) {
+	_, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return
+	}
+	scope, ok := s.personaScope(w, r.URL.Query().Get)
+	if !ok {
+		return
+	}
+	if !authz.AuthorizeSharedScope(ident.Profile, string(scope.Kind), scope.TenantID, scope.SubsAccID) {
+		writeJSON(w, http.StatusForbidden, errBody("not authorized to administer this scope"))
+		return
+	}
+	name, ok := personaName(w, r.URL.Query().Get("name"))
+	if !ok {
+		return
+	}
+	policy, ok := s.parseRestartPolicy(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.DeletePersona(scope, name); err != nil {
+		s.logf("admin: delete persona failed scope=%+v name=%s: %v", scope, name, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	// Same ordering as the write: the next layer down (or the template) has to be
+	// in the effective dir before the bounce, or the removed injection outlives it.
+	if err := s.Mgr.SyncEffectivePersonaForScope(scope); err != nil {
+		s.logf("admin: sync effective persona failed scope=%+v: %v", scope, err)
+	}
+	s.applyParsedRestartPolicy(scope, restart.ReasonPersona, policy, ident.Email)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "name": name})
+}

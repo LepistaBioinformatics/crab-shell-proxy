@@ -548,6 +548,16 @@ func TenantAgentSharedSkillsDir(root, tenantID, agentKey string) string {
 	return filepath.Join(tenantAgentSharedRoot(root, tenantID, agentKey), "skills")
 }
 
+// TenantAgentPersonaDir is the tenant-scope, single-agent persona store:
+// <root>/tenants/<t>/shared/agents/<agent>/persona.
+//
+// Persona has no agent-less sibling, unlike files/secrets/skills. These files
+// ARE the agent's identity, so "the same persona for every agent" is not a thing
+// an operator wants to express.
+func TenantAgentPersonaDir(root, tenantID, agentKey string) string {
+	return filepath.Join(tenantAgentSharedRoot(root, tenantID, agentKey), "persona")
+}
+
 // SubscriptionAgentSharedFilesDir is the subscription-scope, single-agent
 // shared-files store:
 // <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/files.
@@ -567,6 +577,23 @@ func SubscriptionAgentSharedSecretsDir(root, tenantID, subsAccID, agentKey strin
 // <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/skills.
 func SubscriptionAgentSharedSkillsDir(root, tenantID, subsAccID, agentKey string) string {
 	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey), "skills")
+}
+
+// SubscriptionAgentPersonaDir is the subscription-scope, single-agent persona
+// store: <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/persona.
+// The most specific layer of the persona cascade.
+func SubscriptionAgentPersonaDir(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey), "persona")
+}
+
+// EffectivePersonaDir is the resolved persona set for one workspace's
+// (tenant, subscription, agent) — the bind-mount SOURCE for the read-only
+// identity files. Same shape as EffectiveSkillsDir, and deliberately without a
+// user dimension: an agent's identity does not vary per user.
+func EffectivePersonaDir(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(root, "effective-persona",
+		identity.SanitizeID(tenantID), identity.SanitizeID(subsAccID),
+		identity.SanitizeID(agentKey))
 }
 
 func tenantAgentSharedRoot(root, tenantID, agentKey string) string {
@@ -671,7 +698,16 @@ func RestartWorkspaceFile(root, tenantID, subsAccID, role, userAccID string) str
 // sessions/ (conversation history), logs/, and .picoclaw.pid (runtime state) are
 // NEVER copied — the isolation invariant that keeps the shared template's
 // sessions out of every new user's container.
-var WorkspaceSeed = []string{"AGENT.md", "SOUL.md", "USER.md", "memory/", "skills/"}
+//
+// AGENT.md, SOUL.md and HEARTBEAT.md are NOT here: they are delivered as
+// root-owned read-only bind mounts instead (internal/docker/persona.go), so the
+// user cannot rewrite the agent's identity or its recurring task list. Copying a
+// file the mount always shadows would be dead work, and a stale copy would
+// resurface the moment a mount went away.
+//
+// USER.md stays: the agent accumulates what it learns about the user there, so it
+// has to be writable. What an operator controls is the content it is SEEDED from.
+var WorkspaceSeed = []string{"USER.md", "memory/", "skills/"}
 
 // AgentByServiceName returns the agent whose serviceName matches the value
 // mycelium injected as x-mycelium-service-name, and whether it was found.

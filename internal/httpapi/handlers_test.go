@@ -174,6 +174,14 @@ func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error  { 
 func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error              { return nil }
 func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error            { return nil }
 
+func (f *fakeOrch) ListPersona(docker.Scope) ([]docker.PersonaEntry, error) {
+	return nil, nil
+}
+func (f *fakeOrch) ReadPersona(docker.Scope, string) (string, error) { return "", nil }
+func (f *fakeOrch) WritePersona(docker.Scope, string, string) error  { return nil }
+func (f *fakeOrch) DeletePersona(docker.Scope, string) error         { return nil }
+func (f *fakeOrch) SyncEffectivePersonaForScope(docker.Scope) error  { return nil }
+
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
