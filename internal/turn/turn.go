@@ -43,16 +43,32 @@ type Progress struct {
 	State string
 }
 
-// Sink receives everything a running turn emits. Both fields may be nil, so the
+// Attachment is a file the harness produced and delivered out-of-band: the reply
+// text says it was sent, and this is what says WHERE from.
+//
+// URL is absolute by the time it reaches the sink -- the runner resolves the
+// harness-relative path it received, because only the runner knows its own
+// endpoint format. AuthToken is the bearer the harness expects on that URL.
+type Attachment struct {
+	Type        string
+	URL         string
+	Filename    string
+	ContentType string
+	AuthToken   string
+}
+
+// Sink receives everything a running turn emits. Every field may be nil, so the
 // zero value is a valid no-op sink.
 //
 // This replaced a bare `onDelta func(string)`: adding progress as a second
 // field rather than an optional setter makes the change a COMPILE error in
 // every implementation, which is the point -- the hermes runner must not
-// silently keep the old behaviour.
+// silently keep the old behaviour. Attachment was added the same way, for the
+// same reason.
 type Sink struct {
-	Content  func(string)
-	Progress func(Progress)
+	Content    func(string)
+	Progress   func(Progress)
+	Attachment func(Attachment)
 }
 
 // EmitContent calls the content callback when one is set.
@@ -66,5 +82,12 @@ func (s Sink) EmitContent(delta string) {
 func (s Sink) EmitProgress(p Progress) {
 	if s.Progress != nil {
 		s.Progress(p)
+	}
+}
+
+// EmitAttachment calls the attachment callback when one is set.
+func (s Sink) EmitAttachment(a Attachment) {
+	if s.Attachment != nil {
+		s.Attachment(a)
 	}
 }

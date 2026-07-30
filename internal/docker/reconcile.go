@@ -27,6 +27,17 @@ import (
 func (m *Manager) Reconcile(ctx context.Context) error {
 	m.checkModelDrift()
 
+	// Refresh the operator-managed content at STARTUP, not only when a container
+	// happens to be created. The managed skill dir is a directory bind, so every
+	// already-running container reads whatever is on the host right now — which
+	// means a deploy that updates that guidance reaches existing workspaces the
+	// moment it is written, with no recreate. Left only in `create` (behind a
+	// per-process sync.Once), a fully warm deployment would never write it and the
+	// new text would reach nobody.
+	if err := m.ensureManagedContent(); err != nil {
+		m.logf("reconcile: %v", err)
+	}
+
 	summaries, err := m.docker.List(ctx, LabelManaged+"=true")
 	if err != nil {
 		return err

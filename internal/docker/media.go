@@ -275,3 +275,57 @@ func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
 	}
 	return out, nil
 }
+
+// AttachmentsSubdir is where a file the AGENT produced lands inside the user's
+// uploads dir. A fixed segment, so no caller-supplied path ever reaches it.
+const AttachmentsSubdir = "attachments"
+
+// StoreAgentAttachment saves a file the harness delivered out-of-band into
+// uploads/attachments/<name>, which is how it reaches the user at all: the media
+// list already walks nested folders and the download route already reads nested
+// paths, so the file shows up in the uploads sidebar with click-to-download and no
+// frontend work — the same way a file the user uploaded does.
+//
+// The name is sanitized exactly like a browser upload's, but the extension
+// ALLOWLIST is deliberately not applied. That allowlist constrains what an outside
+// caller may push INTO a container; this file was written by the agent inside its
+// own workspace, so refusing it here would drop legitimate deliverables while
+// adding no boundary that the workspace itself does not already have.
+func (m *Manager) StoreAgentAttachment(key WorkspaceKey, rawName string, r io.Reader) (StoredMedia, error) {
+	name, err := sanitizeFilename(rawName)
+	if err != nil {
+		return StoredMedia{}, err
+	}
+	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	dir := filepath.Join(root, AttachmentsSubdir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return StoredMedia{}, fmt.Errorf("mkdir attachments: %w", err)
+	}
+
+	full := filepath.Join(dir, name)
+	// O_TRUNC, like StoreMedia: one file per name rather than an accumulating pile
+	// of report(1).pdf.
+	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return StoredMedia{}, fmt.Errorf("create attachment: %w", err)
+	}
+	n, copyErr := io.Copy(f, r)
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(full)
+		return StoredMedia{}, fmt.Errorf("write attachment: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(full)
+		return StoredMedia{}, closeErr
+	}
+	if err := chownTree(root, m.cfg.PicoclawUser); err != nil {
+		return StoredMedia{}, fmt.Errorf("chown uploads: %w", err)
+	}
+
+	return StoredMedia{
+		Path: path.Join("uploads", AttachmentsSubdir, name),
+		Name: path.Join(AttachmentsSubdir, name),
+		Size: n,
+	}, nil
+}

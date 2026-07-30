@@ -189,3 +189,87 @@ func TestSymlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A file the AGENT delivered has to land somewhere the existing plumbing already
+// reaches: under uploads/, nested one level. That is the whole trick behind
+// "no frontend work" — ListMedia walks folders and OpenMedia reads nested paths,
+// so the uploads sidebar shows it with click-to-download like any user upload.
+func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
+	m, key, _ := mediaFixture(t)
+
+	stored, err := m.StoreAgentAttachment(key, "report.pdf", strings.NewReader("%PDF-1.4 fake"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if stored.Path != "uploads/attachments/report.pdf" {
+		t.Errorf("path = %q, want uploads/attachments/report.pdf", stored.Path)
+	}
+	if stored.Size != int64(len("%PDF-1.4 fake")) {
+		t.Errorf("size = %d, want the written length", stored.Size)
+	}
+
+	// The two operations the sidebar performs, on the value the store returned.
+	listed, err := m.ListMedia(key)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var found bool
+	for _, f := range listed {
+		if f.Path == "uploads/attachments/report.pdf" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("attachment not listed: %+v", listed)
+	}
+	rc, _, err := m.OpenMedia(key, stored.Name)
+	if err != nil {
+		t.Fatalf("open %q: %v", stored.Name, err)
+	}
+	defer rc.Close()
+	raw, _ := io.ReadAll(rc)
+	if string(raw) != "%PDF-1.4 fake" {
+		t.Errorf("downloaded %q, want the stored bytes", raw)
+	}
+}
+
+// A delivered name is still a caller-supplied string: it must not be able to
+// escape the attachments dir, and re-delivering the same name must overwrite
+// rather than pile up.
+func TestStoreAgentAttachmentSanitizesAndOverwrites(t *testing.T) {
+	m, key, _ := mediaFixture(t)
+
+	stored, err := m.StoreAgentAttachment(key, "../../etc/passwd", strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if stored.Path != "uploads/attachments/passwd" {
+		t.Errorf("path = %q, want the traversal stripped to a leaf name", stored.Path)
+	}
+
+	if _, err := m.StoreAgentAttachment(key, "report.pdf", strings.NewReader("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.StoreAgentAttachment(key, "report.pdf", strings.NewReader("v2-longer")); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := m.ListMedia(key)
+	var n int
+	for _, f := range listed {
+		if f.Path == "uploads/attachments/report.pdf" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("report.pdf listed %d times, want 1 (a re-delivery overwrites)", n)
+	}
+	rc, _, err := m.OpenMedia(key, "attachments/report.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	raw, _ := io.ReadAll(rc)
+	if string(raw) != "v2-longer" {
+		t.Errorf("content = %q, want the newest delivery", raw)
+	}
+}

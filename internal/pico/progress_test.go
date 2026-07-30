@@ -11,7 +11,7 @@ import (
 // emitted, plus the processor so completion state can be asserted.
 func collect(frames []Frame) ([]turn.Progress, *processor) {
 	var got []turn.Progress
-	p := newProcessor(turn.Sink{Progress: func(ev turn.Progress) { got = append(got, ev) }})
+	p := newProcessor(turn.Sink{Progress: func(ev turn.Progress) { got = append(got, ev) }}, "", "")
 	for _, f := range frames {
 		p.handle(f)
 	}
@@ -156,7 +156,7 @@ func TestProgressDoesNotTouchCompletionState(t *testing.T) {
 
 func TestProgressNeverContributesToTheAnswer(t *testing.T) {
 	var content string
-	p := newProcessor(turn.Sink{Content: func(d string) { content += d }})
+	p := newProcessor(turn.Sink{Content: func(d string) { content += d }}, "", "")
 	p.handle(Frame{Type: "message.create", Payload: Payload{Kind: "tool_calls", Content: "", MessageID: "t"}})
 	p.handle(Frame{Type: "message.create", Payload: Payload{Kind: "thought", Content: "internal", MessageID: "h"}})
 	p.handle(Frame{Type: "message.create", Payload: Payload{Content: "the answer", MessageID: "m"}})
@@ -170,7 +170,7 @@ func TestProgressNeverContributesToTheAnswer(t *testing.T) {
 
 func TestNilSinkIsSafe(t *testing.T) {
 	// The zero Sink is the old `nil` callback: no panics, same completion.
-	p := newProcessor(turn.Sink{})
+	p := newProcessor(turn.Sink{}, "", "")
 	p.handle(Frame{Type: "typing.start"})
 	p.handle(Frame{Type: "message.create", Payload: Payload{Kind: "tool_calls", MessageID: "t"}})
 	p.handle(Frame{Type: "message.create", Payload: Payload{Content: "hi", MessageID: "m"}})
