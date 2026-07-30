@@ -21,6 +21,10 @@ type ContainerState struct {
 	Exists  bool
 	Running bool
 	ID      string
+	// The binds the container was CREATED with. A bind set is fixed at create
+	// time — a stop/start never changes it — so this is the only way to tell that
+	// a running container predates a mount it should have (see personaBindDrift).
+	Binds []string
 }
 
 // ContainerSummary is one entry from the list endpoint.
@@ -112,13 +116,18 @@ func (c *HTTPClient) Inspect(ctx context.Context, name string) (ContainerState, 
 		State struct {
 			Running bool `json:"Running"`
 		} `json:"State"`
+		HostConfig struct {
+			Binds []string `json:"Binds"`
+		} `json:"HostConfig"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		resp.Body.Close()
 		return ContainerState{}, err
 	}
 	resp.Body.Close()
-	return ContainerState{Exists: true, Running: out.State.Running, ID: out.ID}, nil
+	return ContainerState{
+		Exists: true, Running: out.State.Running, ID: out.ID, Binds: out.HostConfig.Binds,
+	}, nil
 }
 
 // Create creates (but does not start) a container.

@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -413,5 +416,196 @@ func TestAdminScopesTenantEnumeratesSubscriptions(t *testing.T) {
 	}
 	if !strings.Contains(body, `"kind":"subscription"`) || !strings.Contains(body, subsX) {
 		t.Errorf("tenant admin must get subscription scopes under the tenant: %s", body)
+	}
+}
+
+// TestAdminPersonaPostMultipart is a regression test for the Identity tab's save
+// failing with `"tenant_id" is required and must be a UUID`.
+//
+// The admin UI sends persona writes as multipart/form-data, exactly like the
+// shared-file and shared-skills uploads. The handler used to call ParseForm(),
+// which for a multipart body populates r.Form from the QUERY STRING alone and
+// leaves it non-nil — so the FormValue calls after it never triggered a multipart
+// parse, every field read back empty, and the scope parse rejected an empty
+// tenant_id. Every field the client sent has to survive the parse, which is why
+// this asserts the recorded write and not just the status.
+func TestAdminPersonaPostMultipart(t *testing.T) {
+	orch := newFakeOrch()
+	s := testServer(orch, &fakeTurner{})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("scope", "tenant")
+	_ = mw.WriteField("tenant_id", tenantT)
+	_ = mw.WriteField("agent", "alpha")
+	_ = mw.WriteField("name", "AGENT.md")
+	_ = mw.WriteField("body", "# who you are\n")
+	_ = mw.Close()
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/admin/persona", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	for k, v := range headersFor(t, instanceProfile()) {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if len(orch.personaWrites) != 1 {
+		t.Fatalf("persona writes = %d, want 1", len(orch.personaWrites))
+	}
+	got := orch.personaWrites[0]
+	if got.scope.TenantID != tenantT || got.scope.AgentKey != "alpha" {
+		t.Errorf("scope = %+v, want tenant %s agent alpha", got.scope, tenantT)
+	}
+	if got.name != "AGENT.md" || got.body != "# who you are\n" {
+		t.Errorf("write = (%q, %q), want (AGENT.md, the posted body)", got.name, got.body)
+	}
+}
+
+// The restart policy rides on the QUERY STRING while the fields ride in the
+// multipart body (the admin UI's withPolicy() appends `?restart=`). Both have to
+// be readable from the same request: ParseMultipartForm merges the query into
+// r.Form, but only because it calls ParseForm itself — a detail worth pinning,
+// since the fix swapped one for the other.
+func TestAdminPersonaPostMultipartHonoursQueryRestartPolicy(t *testing.T) {
+	orch := newFakeOrch()
+	s := testServer(orch, &fakeTurner{})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("scope", "tenant")
+	_ = mw.WriteField("tenant_id", tenantT)
+	_ = mw.WriteField("agent", "alpha")
+	_ = mw.WriteField("name", "SOUL.md")
+	_ = mw.WriteField("body", "x")
+	_ = mw.Close()
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/admin/persona?restart=notice", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	for k, v := range headersFor(t, instanceProfile()) {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	// `notice` raises a restart notice instead of bouncing now (restart-control FR-4).
+	if len(orch.bouncedScopes) != 0 {
+		t.Errorf("bounced %d scope(s) despite ?restart=notice", len(orch.bouncedScopes))
+	}
+}
+
+// The webapp posts persona writes as application/x-www-form-urlencoded — it had
+// to, to work against the proxy already deployed when the multipart bug was found.
+// Both encodings therefore have live clients, and this endpoint has to keep taking
+// either one whichever repo deploys first.
+func TestAdminPersonaPostUrlencoded(t *testing.T) {
+	orch := newFakeOrch()
+	s := testServer(orch, &fakeTurner{})
+
+	form := url.Values{}
+	form.Set("scope", "tenant")
+	form.Set("tenant_id", tenantT)
+	form.Set("agent", "alpha")
+	form.Set("name", "HEARTBEAT.md")
+	form.Set("body", "every 30m: check in\n")
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/admin/persona", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for k, v := range headersFor(t, instanceProfile()) {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if len(orch.personaWrites) != 1 {
+		t.Fatalf("persona writes = %d, want 1", len(orch.personaWrites))
+	}
+	got := orch.personaWrites[0]
+	if got.scope.TenantID != tenantT || got.name != "HEARTBEAT.md" || got.body != "every 30m: check in\n" {
+		t.Errorf("write = %+v, want the posted tenant/name/body", got)
+	}
+}
+
+// A body that is neither encoding must still be refused: tolerating
+// ErrNotMultipart to accept urlencoded must not turn into accepting anything.
+//
+// The message it gets back is the scope complaint, not "could not read the form
+// body" -- a JSON body parses as urlencoded garbage rather than failing outright,
+// so the fields simply come back empty. Asserted rather than left implied: it is
+// the same misleading error this endpoint was fixed for, still reachable from a
+// different cause, and no client sends JSON here today.
+func TestAdminPersonaPostRejectsNonFormBody(t *testing.T) {
+	orch := newFakeOrch()
+	s := testServer(orch, &fakeTurner{})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/admin/persona",
+		strings.NewReader(`{"scope":"tenant","tenant_id":"`+tenantT+`","agent":"alpha","name":"AGENT.md","body":"x"}`))
+	r.Header.Set("Content-Type", "application/json")
+	for k, v := range headersFor(t, instanceProfile()) {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a JSON body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "tenant_id") {
+		t.Errorf("body = %s, want the scope complaint (see the note above)", w.Body.String())
+	}
+	if len(orch.personaWrites) != 0 {
+		t.Errorf("wrote persona from an unparseable body: %+v", orch.personaWrites)
+	}
+}
+
+// The Identity tab preloads what an agent actually runs, which only works if the
+// doc endpoint reports WHERE the content came from — the webapp reads `source`
+// directly to label borrowed text and to decide whether Save may create an
+// injection. This pins that contract across the repo boundary.
+func TestAdminPersonaDocReportsSource(t *testing.T) {
+	orch := newFakeOrch()
+	orch.personaDoc = "# who you are\n"
+	orch.personaDocSource = docker.PersonaSourceTemplate
+	s := testServer(orch, &fakeTurner{})
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, adminReq(t, http.MethodGet,
+		"/v1/admin/persona/doc?scope=tenant&tenant_id="+tenantT+"&agent=alpha&name=AGENT.md",
+		headersFor(t, instanceProfile())))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+		Source  string `json:"source"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if got.Name != "AGENT.md" || got.Content != "# who you are\n" || got.Source != "template" {
+		t.Errorf("body = %+v, want the template's content labelled as such", got)
+	}
+}
+
+// A file NO layer provides is still a 404 — a stricter statement than the old
+// "not injected at this scope", and the one thing that must not become a 500 or an
+// empty 200 the editor would show as if it were content.
+func TestAdminPersonaDocMissingEverywhereIs404(t *testing.T) {
+	orch := newFakeOrch()
+	orch.personaDocErr = os.ErrNotExist
+	s := testServer(orch, &fakeTurner{})
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, adminReq(t, http.MethodGet,
+		"/v1/admin/persona/doc?scope=tenant&tenant_id="+tenantT+"&agent=alpha&name=AGENT.md",
+		headersFor(t, instanceProfile())))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: %s", w.Code, w.Body.String())
 	}
 }

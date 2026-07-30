@@ -279,6 +279,35 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		if err := m.docker.Start(ctx, name); err != nil {
 			return Target{}, err
 		}
+	// An existing container whose persona mounts no longer match the effective set
+	// has to be REBUILT, not restarted. Bind sets are fixed at create time, so a
+	// container created before a persona file existed — every container created by
+	// an image predating the feature included — has no mount for it, and an admin's
+	// save can never arrive however many times it is bounced. This is the one place
+	// the check belongs: syncEffectivePersona ran a few lines above and returned an
+	// error if it failed, so the effective dir it compares against is current.
+	//
+	// Hermes is excluded because createHermes emits no persona binds at all: for a
+	// hermes workspace with an injection, expected could never be satisfied and the
+	// container would be recreated on every single request.
+	case agent.Harness != config.HarnessHermes &&
+		personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds):
+		m.logf("container %s: persona mounts stale, recreating (identity changes cannot reach it otherwise)", name)
+		if st.Running {
+			if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
+				return Target{}, err
+			}
+		}
+		if err := m.docker.Remove(ctx, name); err != nil {
+			return Target{}, err
+		}
+		if cerr := m.create(ctx, agent, key, name); cerr != nil {
+			return Target{}, cerr
+		}
+		createdNow = true
+		if err := m.docker.Start(ctx, name); err != nil {
+			return Target{}, err
+		}
 	case !st.Running:
 		if err := m.docker.Start(ctx, name); err != nil {
 			return Target{}, err
@@ -306,12 +335,34 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	return Target{Name: name, Endpoint: m.endpoint(agent, name), AuthToken: authToken, Harness: agent.Harness}, nil
 }
 
+// ensureManagedContent materializes the proxy's embedded operator-managed tree
+// once per process. Called from `create` (the bind source must exist before a
+// container references it) and from Reconcile at startup (so a deploy that changes
+// the guidance reaches containers that already exist — the skill dir is a directory
+// bind, so they read the host copy live).
+func (m *Manager) ensureManagedContent() error {
+	m.managedOnce.Do(func() {
+		m.managedErr = materializeManagedContent(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), m.cfg.PicoclawUser)
+	})
+	if m.managedErr != nil {
+		return fmt.Errorf("materialize managed content: %w", m.managedErr)
+	}
+	return nil
+}
+
+// picoclawMountDest is where the per-user dir is mounted inside a picoclaw
+// container. Named because two places need the same answer: `create`, which builds
+// the binds, and the drift check, which reads them back.
+func (m *Manager) picoclawMountDest() string {
+	return m.cfg.PicoclawHome + "/.picoclaw"
+}
+
 func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceKey, name string) error {
 	hostDir := config.UserWorkspace(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	// picoclaw keeps its config/workspace under $HOME/.picoclaw; mount the
 	// per-user dir there and set HOME so it works for a non-root user too (the
 	// image's own /root is 0700 and unusable by a non-root uid).
-	mountDest := m.cfg.PicoclawHome + "/.picoclaw"
+	mountDest := m.picoclawMountDest()
 	// The per-(user, agent) secret store is bind-mounted READ-ONLY into every
 	// container of that pair (AC-10): the non-root agent can read the generic
 	// sinks (.env / secrets.json / secrets/) but the kernel blocks any write.
@@ -352,11 +403,8 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// Materialized once from the proxy's embedded copy; being a root-owned
 	// read-only bind, the agent can neither alter them nor keep an edit past a
 	// restart (the canonical copy is remounted every start).
-	m.managedOnce.Do(func() {
-		m.managedErr = materializeManagedContent(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), m.cfg.PicoclawUser)
-	})
-	if m.managedErr != nil {
-		return fmt.Errorf("materialize managed content: %w", m.managedErr)
+	if err := m.ensureManagedContent(); err != nil {
+		return err
 	}
 	managedBase := config.ManagedSkillsDir(m.cfg.HostDataRoot)
 	managedSkillMount := filepath.Join(managedBase, managedSkillRel) +

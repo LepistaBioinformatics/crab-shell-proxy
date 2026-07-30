@@ -25,16 +25,23 @@ type fakeDocker struct {
 	lastSpec   CreateSpec
 	createHook func() // called inside Create to widen the single-flight race window
 	listResult []ContainerSummary
+	// The binds each container was created with, so Inspect can report them back
+	// the way the real daemon does (HostConfig.Binds). Pre-seed an entry to stand
+	// in for a container created by an older image.
+	binds   map[string][]string
+	removeN int32
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{running: map[string]bool{}, exists: map[string]bool{}}
+	return &fakeDocker{running: map[string]bool{}, exists: map[string]bool{}, binds: map[string][]string{}}
 }
 
 func (f *fakeDocker) Inspect(_ context.Context, name string) (ContainerState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return ContainerState{Exists: f.exists[name], Running: f.running[name], ID: name}, nil
+	return ContainerState{
+		Exists: f.exists[name], Running: f.running[name], ID: name, Binds: f.binds[name],
+	}, nil
 }
 
 func (f *fakeDocker) EnsureImage(context.Context, string) error { return nil }
@@ -47,6 +54,7 @@ func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.exists[spec.Name] = true
+	f.binds[spec.Name] = spec.Binds
 	f.lastSpec = spec
 	return spec.Name, nil
 }
@@ -68,10 +76,12 @@ func (f *fakeDocker) Stop(_ context.Context, name string, _ time.Duration) error
 }
 
 func (f *fakeDocker) Remove(_ context.Context, name string) error {
+	atomic.AddInt32(&f.removeN, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.exists, name)
 	delete(f.running, name)
+	delete(f.binds, name)
 	return nil
 }
 
@@ -399,5 +409,60 @@ func TestReconcileEnsuresContinuousWorkspaces(t *testing.T) {
 	}
 	if !f.running[m.ContainerName(wk("u1"))] {
 		t.Error("continuous workspace container not running after reconcile")
+	}
+}
+
+// TestEnsureRunningRecreatesOnPersonaDrift is the end of the reported bug: an
+// admin's identity file that never reaches a running instance, restart after
+// restart. The container here stands in for one created before the persona mounts
+// existed — it is running and healthy, and the only way its workspace can ever see
+// AGENT.md is a rebuild.
+//
+// Also pins the other half: once rebuilt, a further request must NOT recreate
+// again. A drift check that never converges would recreate on every single turn,
+// truncating the conversation each time — worse than the bug.
+func TestEnsureRunningRecreatesOnPersonaDrift(t *testing.T) {
+	f := newFakeDocker()
+	m, agent := testManager(t, config.ModeContinuous, f)
+	key := wk("h")
+	name := m.ContainerName(key)
+
+	// A container that exists and runs, with the workspace bind but no persona
+	// mount — exactly what an image predating the feature produced.
+	f.exists[name] = true
+	f.running[name] = true
+	f.binds[name] = []string{"/host/ws:" + m.picoclawMountDest()}
+
+	// The admin injected an identity at tenant scope. EnsureRunning materializes the
+	// cascade itself, so the effective file (the bind source) appears during the call.
+	if err := m.WritePersona(Scope{Kind: ScopeTenant, TenantID: key.TenantID, AgentKey: key.Role},
+		"AGENT.md", "# who you are\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.EnsureRunning(context.Background(), agent, key, "test@x"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if f.removeN != 1 || f.createN != 1 {
+		t.Fatalf("removes=%d creates=%d, want 1/1: a drifted container must be rebuilt, not restarted",
+			f.removeN, f.createN)
+	}
+	var mounted bool
+	for _, b := range f.lastSpec.Binds {
+		if strings.HasSuffix(b, m.picoclawMountDest()+"/workspace/AGENT.md:ro") {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Errorf("rebuilt container still has no AGENT.md mount: %v", f.lastSpec.Binds)
+	}
+
+	// Converged: the rebuilt container matches, so nothing further happens.
+	if _, err := m.EnsureRunning(context.Background(), agent, key, "test@x"); err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if f.removeN != 1 || f.createN != 1 {
+		t.Errorf("removes=%d creates=%d after a second call: the check must converge, "+
+			"or every turn recreates the container", f.removeN, f.createN)
 	}
 }

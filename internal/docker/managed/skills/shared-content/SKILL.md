@@ -1,6 +1,6 @@
 ---
 name: shared-content
-description: Where operator-provided shared files and secrets and the user's own custom memory notes live in this workspace, how to read them, and the rule to never copy secrets elsewhere. Consult before using any shared file or secret, and re-read the user's custom memory when it is relevant.
+description: Where operator-provided shared files and secrets and the user's own custom memory notes live in this workspace, how to read them, the rule to never copy secrets elsewhere, and where to WRITE a file so the user can download it. Consult before using any shared file or secret, when the user asks you for a file, and re-read the user's custom memory when it is relevant.
 ---
 
 # Shared content: files and secrets
@@ -44,6 +44,25 @@ between turns. So:
   accordingly.
 - It's a plain markdown file you read like any other; distinct from the agent's
   own `memory/` files.
+
+## Giving a file to the user (`workspace/uploads/`)
+
+`uploads/` is the one folder this workspace SHARES with the person you are talking
+to: it is what their Files panel lists, and clicking an entry there downloads it.
+Anywhere else you write is invisible to them.
+
+So when the user asks for a file — a report, an export, a spreadsheet, an archive:
+
+1. `mkdir -p uploads/attachments` and write it there, under a name a human
+   recognizes (`uploads/attachments/vendas-q1.xlsx`, not `out.bin`).
+2. Say in your reply, in the user's language, that the file is ready **and give the
+   path**. That sentence is part of the conversation, so it is still there when they
+   reload the page — which is exactly when someone goes looking for a file again.
+3. Never claim you sent a file you did not write. If writing failed, say what
+   failed.
+
+Do not paste a file's bytes into the chat, and keep large intermediates out of
+`uploads/` — copy in only the finished deliverable.
 
 ## Secrets
 

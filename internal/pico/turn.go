@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
@@ -43,6 +44,22 @@ type Payload struct {
 	// tool_calls frames always arrive with an EMPTY Content -- everything useful
 	// is in here, and this proxy used to drop it on the floor.
 	ToolCalls []ToolCall `json:"tool_calls"`
+	// A file the agent produced. picoclaw's Pico channel sends these on a
+	// message.create of its own (upstream pkg/channels/pico/pico.go SendMedia),
+	// with the caption in Content -- usually empty. Dropping this array is why
+	// "Requested output delivered via tool attachment." arrived with no file.
+	Attachments []Attachment `json:"attachments"`
+}
+
+// Attachment is one file picoclaw delivered through the channel. Field names are
+// upstream's (pico.go's SendMedia builds this map literal); `URL` is RELATIVE to
+// the harness endpoint, e.g. "/pico/media/<refID>", and needs the same bearer
+// token the WebSocket uses.
+type Attachment struct {
+	Type        string `json:"type"` // file | image | audio | video
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
 }
 
 // ToolCall is one entry of a tool_calls frame.
@@ -70,13 +87,35 @@ type processor struct {
 	isTyping        bool
 	sink            turn.Sink
 	lastProgress    turn.Progress
+	// mediaBase is the harness origin ("http://name:18790") that an attachment's
+	// relative URL hangs off, and mediaToken the bearer it needs. They live here
+	// rather than in httpapi because resolving them means knowing that the
+	// endpoint is a ws:// URL of this channel's own shape -- which is this
+	// package's business, not its caller's.
+	mediaBase  string
+	mediaToken string
 }
 
-// newProcessor takes the sink by value: its zero value (both callbacks nil) is
-// a valid no-op, so `newProcessor(turn.Sink{})` is exactly the old
+// newProcessor takes the sink by value: its zero value (all callbacks nil) is
+// a valid no-op, so `newProcessor(turn.Sink{}, "", "")` is exactly the old
 // `newProcessor(nil)`.
-func newProcessor(sink turn.Sink) *processor {
-	return &processor{plain: map[string]string{}, sink: sink}
+func newProcessor(sink turn.Sink, mediaBase, mediaToken string) *processor {
+	return &processor{plain: map[string]string{}, sink: sink, mediaBase: mediaBase, mediaToken: mediaToken}
+}
+
+// resolveAttachment turns the frame's harness-relative URL into something a
+// caller can fetch. An already-absolute URL is passed through: upstream builds a
+// relative one today, and inventing a base for a value that already has one would
+// corrupt it.
+func (p *processor) resolveAttachment(a Attachment) turn.Attachment {
+	out := turn.Attachment{
+		Type: a.Type, URL: a.URL, Filename: a.Filename,
+		ContentType: a.ContentType, AuthToken: p.mediaToken,
+	}
+	if strings.HasPrefix(a.URL, "/") && p.mediaBase != "" {
+		out.URL = p.mediaBase + a.URL
+	}
+	return out
 }
 
 // emitProgress forwards a non-content signal, suppressing an exact repeat.
@@ -135,6 +174,24 @@ func (p *processor) handle(f Frame) signal {
 			p.emitProgress(kind, text, tool, "")
 			return signal{}
 		}
+		// A frame carrying files is a DELIVERY, not the assistant's answer, and it
+		// is handled before the plain-content branch on purpose. That branch would
+		// set lastPlainID to this frame's id, and picoclaw sends these with an
+		// empty caption -- so finalContent() would return "" and ERASE the answer
+		// on a non-streaming request. It must not arm the finalize grace either: the
+		// frame arrives inside picoclaw's own typing pair, and letting a delivery
+		// end a turn would cut the reply that follows it.
+		//
+		// A non-empty caption is still the agent talking, so it goes out as content.
+		if len(pl.Attachments) > 0 {
+			for _, a := range pl.Attachments {
+				p.sink.EmitAttachment(p.resolveAttachment(a))
+			}
+			if pl.Content != "" {
+				p.sink.EmitContent(pl.Content)
+			}
+			return signal{}
+		}
 		prev := p.plain[pl.MessageID]
 		p.plain[pl.MessageID] = pl.Content
 		p.lastPlainID = pl.MessageID
@@ -179,6 +236,23 @@ func (p *processor) finalContent() string {
 		return ""
 	}
 	return p.plain[p.lastPlainID]
+}
+
+// mediaBaseFrom turns the ws endpoint into the http origin that serves
+// /pico/media/<id> -- the same host and port, since the Pico channel's WebSocket
+// and its media route are one HTTP server (upstream serves both from the channel's
+// ServeHTTP). An unparseable endpoint yields "", which leaves an attachment URL
+// relative and unfetchable rather than guessing an origin.
+func mediaBaseFrom(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := "http"
+	if u.Scheme == "wss" || u.Scheme == "https" {
+		scheme = "https"
+	}
+	return scheme + "://" + u.Host
 }
 
 // Client runs turns against picoclaw Pico Protocol endpoints.
@@ -256,7 +330,7 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 		}
 	}()
 
-	proc := newProcessor(sink)
+	proc := newProcessor(sink, mediaBaseFrom(req.Endpoint), req.AuthToken)
 	grace := time.NewTimer(0)
 	if !grace.Stop() {
 		<-grace.C

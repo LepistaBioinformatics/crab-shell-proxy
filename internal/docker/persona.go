@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
@@ -121,6 +122,68 @@ func personaBindStrings(cfg *config.Config, key WorkspaceKey, mountDest string) 
 		out = append(out, b.bind)
 	}
 	return out
+}
+
+// personaMountDests is the set of persona destinations inside a container that a
+// bind list currently covers — the DESTINATION side only, and only the paths this
+// feature owns.
+//
+// Destinations, never whole bind strings: a bind embeds HostDataRoot and
+// PicoclawHome, so comparing strings would read an operator changing either as
+// fleet-wide drift and recreate every container — mass session truncation from a
+// settings edit. The destination answers the question that actually matters: is
+// this file mounted at all.
+func personaMountDests(binds []string, mountDest string) map[string]bool {
+	prefix := mountDest + "/workspace/"
+	out := map[string]bool{}
+	for _, b := range binds {
+		parts := strings.Split(b, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		dest := parts[1]
+		name, ok := strings.CutPrefix(dest, prefix)
+		if ok && isPersonaMounted(name) {
+			out[dest] = true
+		}
+	}
+	return out
+}
+
+// personaBindDrift reports whether a container's persona mounts still match the
+// effective set, and is the answer to "an admin saved an identity file and it
+// never reached the instances, even after a restart".
+//
+// A bind set is fixed when the container is CREATED. BounceScope is stop+start by
+// design (a recreate truncates the live transcript), so a container created before
+// a persona file existed — including every container created by an image predating
+// this feature — has no mount for it, and no rewrite of the effective file can ever
+// arrive. Nothing short of a recreate fixes that.
+//
+// Equality, not subset, and safe because the comparison is scoped to the persona
+// destinations: a file no layer provides is in neither set. That makes the reverse
+// case work too — a cleared injection whose template also lacks the file leaves a
+// bind whose source is gone, and Docker then recreates that source as an empty
+// DIRECTORY named AGENT.md in the workspace root.
+//
+// Only meaningful where a successful syncEffectivePersona just ran: expected is
+// read off the effective dir, so a transiently empty one would otherwise read as
+// "strip the mounts".
+func personaBindDrift(cfg *config.Config, key WorkspaceKey, mountDest string, actual []string) bool {
+	expected := map[string]bool{}
+	for _, b := range personaBinds(cfg, key, mountDest) {
+		expected[mountDest+"/workspace/"+b.name] = true
+	}
+	have := personaMountDests(actual, mountDest)
+	if len(expected) != len(have) {
+		return true
+	}
+	for dest := range expected {
+		if !have[dest] {
+			return true
+		}
+	}
+	return false
 }
 
 // syncEffectivePersona materializes the resolved persona set into the effective
@@ -255,15 +318,71 @@ func (m *Manager) ListPersona(scope Scope) ([]PersonaEntry, error) {
 	return out, nil
 }
 
-func (m *Manager) ReadPersona(scope Scope, name string) (string, error) {
+// personaLayer is one step of the read cascade: where to look, and what to call
+// the answer if it is found there.
+type personaLayer struct {
+	source string
+	dir    string
+}
+
+// personaScopeLayers is the read cascade for a SCOPE — the same precedence
+// resolvePersonaSources applies to a workspace, minus the workspace dimension a
+// scope does not have:
+//
+//	subscription scope:  this scope  →  the tenant's injection  →  the template
+//	tenant scope:        this scope  →  the template
+//
+// The template layer is the point: an editor opened where nothing is injected has
+// to start from the content the agent actually runs today, not from a blank page,
+// or the admin's first save silently replaces an identity they never saw.
+func (m *Manager) personaScopeLayers(scope Scope) []personaLayer {
+	root := m.cfg.ContainerDataRoot
+	layers := make([]personaLayer, 0, 3)
+	if scope.Kind == ScopeSubscription {
+		layers = append(layers,
+			personaLayer{PersonaSourceScope, config.SubscriptionAgentPersonaDir(root, scope.TenantID, scope.SubsAccID, scope.AgentKey)},
+			personaLayer{PersonaSourceTenant, config.TenantAgentPersonaDir(root, scope.TenantID, scope.AgentKey)})
+	} else {
+		layers = append(layers,
+			personaLayer{PersonaSourceScope, config.TenantAgentPersonaDir(root, scope.TenantID, scope.AgentKey)})
+	}
+	// A template layer only exists for a configured agent, and only once that
+	// template has been materialized on disk (first provision does it). Absent, the
+	// cascade simply ends earlier and the caller gets "nothing anywhere".
+	if agent, ok := m.cfg.Agents[scope.AgentKey]; ok {
+		layers = append(layers,
+			personaLayer{PersonaSourceTemplate, filepath.Join(config.TemplatesDir(root, agent.Template), "workspace")})
+	}
+	return layers
+}
+
+// Where a resolved persona read came from. Reported to the caller because the
+// content alone is ambiguous: the admin screen has to be able to say "this is the
+// agent template's text, saving it creates an injection here" rather than letting
+// one layer's identity pass for another's.
+const (
+	PersonaSourceScope    = "scope"
+	PersonaSourceTenant   = "tenant"
+	PersonaSourceTemplate = "template"
+)
+
+// ReadPersona returns the content an editor at this scope should start from and
+// which layer produced it. os.ErrNotExist when no layer has the file, which the
+// handler maps to a 404 exactly as the scope-only read used to.
+func (m *Manager) ReadPersona(scope Scope, name string) (string, string, error) {
 	if !IsPersonaFile(name) {
-		return "", ErrNotPersonaFile
+		return "", "", ErrNotPersonaFile
 	}
-	raw, err := os.ReadFile(filepath.Join(m.personaDir(scope), name))
-	if err != nil {
-		return "", err
+	for _, layer := range m.personaScopeLayers(scope) {
+		raw, err := os.ReadFile(filepath.Join(layer.dir, name))
+		if err == nil {
+			return string(raw), layer.source, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", "", err
+		}
 	}
-	return string(raw), nil
+	return "", "", os.ErrNotExist
 }
 
 func (m *Manager) WritePersona(scope Scope, name, body string) error {

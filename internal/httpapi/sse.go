@@ -123,6 +123,26 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 			}
 			writeProgress(p)
 		},
+		// A file the agent delivered out-of-band. picoclaw hands over a URL on its
+		// own media route plus the bearer for it; the bytes are copied into the
+		// user's uploads dir so they outlive the harness's media store and show up
+		// in the uploads sidebar, downloadable, with no frontend work.
+		//
+		// The reply text is already streaming when this runs, so a failure here is
+		// logged and never surfaced as an error: losing the file is bad, replacing
+		// the answer the user is reading with a 502 is worse.
+		Attachment: func(a turn.Attachment) {
+			stored, err := s.storeTurnAttachment(turnCtx, key, a)
+			if err != nil {
+				s.logf("stream: attachment %q not stored: %v", a.Filename, err)
+				return
+			}
+			s.logf("stream: attachment stored at %s (%d bytes)", stored.Path, stored.Size)
+			if clientCtx.Err() != nil {
+				return
+			}
+			writeChunk(map[string]any{"content": attachmentNotice(stored.Path, a.Filename)}, nil)
+		},
 	})
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
