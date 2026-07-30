@@ -72,6 +72,12 @@ type Orchestrator interface {
 	// StoreMedia writes an uploaded file into the caller's workspace uploads
 	// dir and returns its workspace-relative path.
 	StoreMedia(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
+	// StoreAgentAttachment saves a file the HARNESS delivered out-of-band (the
+	// "Requested output delivered via tool attachment." path) into
+	// uploads/attachments/, which is what makes it reachable: the media list and
+	// download route already handle nested paths, so it appears in the uploads
+	// sidebar like any file the user uploaded.
+	StoreAgentAttachment(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
 	// ListMedia returns the files in the caller's workspace uploads dir.
 	ListMedia(key docker.WorkspaceKey) ([]docker.StoredMedia, error)
 	// DeleteMedia removes one uploaded file (by its stored filename).
@@ -164,7 +170,11 @@ type Orchestrator interface {
 	// --- persona (the read-only identity files at the workspace root) ---
 
 	ListPersona(scope docker.Scope) ([]docker.PersonaEntry, error)
-	ReadPersona(scope docker.Scope, name string) (string, error)
+	// ReadPersona resolves the scope's read cascade (this scope → the layer below
+	// → the agent template) and reports which layer answered, so the admin screen
+	// can preload the identity an agent actually runs without passing one layer's
+	// content off as another's.
+	ReadPersona(scope docker.Scope, name string) (content string, source string, err error)
 	WritePersona(scope docker.Scope, name, body string) error
 	DeletePersona(scope docker.Scope, name string) error
 	// SyncEffectivePersonaForScope re-resolves the cascade for every workspace a
@@ -494,6 +504,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
+	// The non-streaming path needs the same attachment handling as the streaming
+	// one: a delivery dropped here is exactly the reported bug, only without a
+	// stream to notice it in. Notices are collected and appended to the answer
+	// below, since there is no incremental channel to write them to.
+	var notices []string
 	content, err := s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
 		Endpoint:   tgt.Endpoint,
 		AuthToken:  tgt.AuthToken,
@@ -501,7 +516,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		SessionKey: key.UserAccID + ":" + key.Role,
 		Model:      turnModelFor(agent, model),
 		Content:    userContent,
-	}, turn.Sink{})
+	}, turn.Sink{
+		Attachment: func(a turn.Attachment) {
+			stored, storeErr := s.storeTurnAttachment(turnCtx, key, a)
+			if storeErr != nil {
+				s.logf("chat: attachment %q not stored: %v", a.Filename, storeErr)
+				return
+			}
+			s.logf("chat: attachment stored at %s (%d bytes)", stored.Path, stored.Size)
+			notices = append(notices, attachmentNotice(stored.Path, a.Filename))
+		},
+	})
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("chat: turn failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
@@ -512,7 +537,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
 		s.logf("chat: sync durable history failed: %v", syncErr)
 	}
-	writeJSON(w, http.StatusOK, completionResponse(id, model, content))
+	// Appended AFTER the answer: unlike the stream, the order here is ours to pick,
+	// and a file notice reads as a footnote to the reply rather than an interruption.
+	writeJSON(w, http.StatusOK, completionResponse(id, model, content+strings.Join(notices, "")))
 }
 
 // accountWebhook is the two-field subset of the mycelium Account object the

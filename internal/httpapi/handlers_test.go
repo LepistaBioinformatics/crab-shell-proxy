@@ -45,15 +45,27 @@ type fakeOrch struct {
 	memory     string
 
 	// admin-shared-content recording + canned results.
-	sharedFiles     []docker.FileMeta
-	userFiles       []docker.FileMeta
-	users           []docker.UserRef
-	tenants         []string
-	tenantSubs      []string
-	sharedWrites    []docker.Scope
-	sharedDeletes   []docker.Scope
-	nativeUnsets    []string
-	userFileDeletes []docker.WorkspaceKey
+	sharedFiles   []docker.FileMeta
+	userFiles     []docker.FileMeta
+	users         []docker.UserRef
+	tenants       []string
+	tenantSubs    []string
+	sharedWrites  []docker.Scope
+	sharedDeletes []docker.Scope
+	// Persona writes record the CONTENT, not just the scope: the fields arriving
+	// empty is precisely how the multipart-parse bug presented, so a test has to
+	// be able to assert what actually landed.
+	personaWrites []personaWrite
+	// Names the harness delivered as attachments, so a test can assert the file
+	// actually reached the workspace.
+	attachmentWrites []string
+	// Canned answer for the resolved persona read (content + which layer produced
+	// it), so a handler test can exercise the inherited-preload path.
+	personaDoc       string
+	personaDocSource string
+	personaDocErr    error
+	nativeUnsets     []string
+	userFileDeletes  []docker.WorkspaceKey
 
 	// model re-apply fakes: record calls, return canned results.
 	reapplyScopes    []docker.Scope
@@ -88,6 +100,11 @@ type fakeOrch struct {
 	instanceConfigWriteKey   docker.WorkspaceKey
 	instanceConfigWritten    string
 	instanceConfigRevision   string
+}
+
+type personaWrite struct {
+	scope      docker.Scope
+	name, body string
 }
 
 type secretWrite struct {
@@ -177,10 +194,15 @@ func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error            { 
 func (f *fakeOrch) ListPersona(docker.Scope) ([]docker.PersonaEntry, error) {
 	return nil, nil
 }
-func (f *fakeOrch) ReadPersona(docker.Scope, string) (string, error) { return "", nil }
-func (f *fakeOrch) WritePersona(docker.Scope, string, string) error  { return nil }
-func (f *fakeOrch) DeletePersona(docker.Scope, string) error         { return nil }
-func (f *fakeOrch) SyncEffectivePersonaForScope(docker.Scope) error  { return nil }
+func (f *fakeOrch) ReadPersona(docker.Scope, string) (string, string, error) {
+	return f.personaDoc, f.personaDocSource, f.personaDocErr
+}
+func (f *fakeOrch) WritePersona(scope docker.Scope, name, body string) error {
+	f.personaWrites = append(f.personaWrites, personaWrite{scope: scope, name: name, body: body})
+	return nil
+}
+func (f *fakeOrch) DeletePersona(docker.Scope, string) error        { return nil }
+func (f *fakeOrch) SyncEffectivePersonaForScope(docker.Scope) error { return nil }
 
 func (f *fakeOrch) DeleteSecret(key docker.WorkspaceKey, format, name string) error {
 	if f.deleteErr != nil {
@@ -201,6 +223,14 @@ func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
 func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error) {
 	n, _ := io.Copy(io.Discard, r)
 	return docker.StoredMedia{Path: "uploads/test-" + rawName, Name: rawName, Size: n}, nil
+}
+
+func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error) {
+	n, _ := io.Copy(io.Discard, r)
+	f.attachmentWrites = append(f.attachmentWrites, rawName)
+	return docker.StoredMedia{
+		Path: "uploads/attachments/" + rawName, Name: "attachments/" + rawName, Size: n,
+	}, nil
 }
 
 func (f *fakeOrch) ListMedia(docker.WorkspaceKey) ([]docker.StoredMedia, error) {

@@ -851,20 +851,23 @@ func (s *Server) handleAdminPersonaDoc(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	content, err := s.Mgr.ReadPersona(scope, name)
+	content, source, err := s.Mgr.ReadPersona(scope, name)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Covers BOTH the file and the scope's persona dir being absent — they
-			// mean the same thing to a caller (nothing injected here), so they are
-			// deliberately not distinguished.
-			writeJSON(w, http.StatusNotFound, errBody("not injected at this scope"))
+			// Nothing at this scope, nothing below it, and no template file either —
+			// so there is no identity to show. Distinct from "not injected here",
+			// which now resolves to the inherited content with a `source` of what
+			// produced it.
+			writeJSON(w, http.StatusNotFound, errBody("no persona content resolves for this scope"))
 			return
 		}
 		s.logf("admin: read persona failed scope=%+v name=%s: %v", scope, name, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"name": name, "content": content})
+	// `source` is what keeps an inherited preload honest: the editor can start from
+	// the agent's real identity while still saying it is not this scope's yet.
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "content": content, "source": source})
 }
 
 func (s *Server) handleAdminPersonaPost(w http.ResponseWriter, r *http.Request) {
@@ -872,7 +875,29 @@ func (s *Server) handleAdminPersonaPost(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	// Accepts BOTH encodings, and the shape of that is deliberate.
+	//
+	// The bug: this used to call ParseForm alone, while the admin UI posted
+	// multipart/form-data. On a multipart body ParseForm fills r.Form from the
+	// QUERY STRING only and leaves it non-nil, so the FormValue calls below never
+	// triggered a body parse -- every field read back empty and the scope parse
+	// rejected an empty tenant_id (`"tenant_id" is required and must be a UUID`)
+	// on every Identity save.
+	//
+	// ParseMultipartForm calls ParseForm itself FIRST, which parses a urlencoded
+	// body, and only then fails with ErrNotMultipart. So tolerating that one error
+	// accepts either encoding in a single call -- no Content-Type sniffing -- and
+	// `?restart=` keeps resolving from the query in both cases. Two encodings is
+	// not indecision: the webapp had to move to urlencoded to work against the
+	// proxy already deployed, so both are live clients and neither repo's deploy
+	// order can break Identity again.
+	//
+	// The 4MiB budget is larger than the siblings' 1MiB on purpose: maxMemory
+	// bounds non-file parts in TOTAL and only file parts spill to temp storage.
+	// /v1/admin/shared and /v1/admin/shared-skills send their payload as a FILE
+	// part, so their limit never bounds the content -- here the document arrives as
+	// the `body` FIELD, which makes this number the maximum identity file.
+	if err := r.ParseMultipartForm(4 << 20); err != nil && !errors.Is(err, http.ErrNotMultipart) {
 		writeJSON(w, http.StatusBadRequest, errBody("could not read the form body"))
 		return
 	}
