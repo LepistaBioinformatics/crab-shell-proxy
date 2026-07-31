@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
+	"gopkg.in/yaml.v3"
 )
 
 // fakeModelChecker is a minimal modelNameChecker for tests that need a native
@@ -35,6 +36,28 @@ func writeTestSecurity(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// braveKeys reads web.brave.api_keys out of a parsed .security.yml. The nesting
+// is the point of the read: picoclaw types every web slot as a block, so a
+// flatter value fails its parse and the container never boots.
+func braveKeys(t *testing.T, sec map[string]any) []string {
+	t.Helper()
+	web, ok := sec["web"].(map[string]any)
+	if !ok {
+		t.Fatalf("web section = %#v, want a map", sec["web"])
+	}
+	block, ok := web["brave"].(map[string]any)
+	if !ok {
+		t.Fatalf("web.brave = %#v, want a block carrying api_keys", web["brave"])
+	}
+	raw, _ := block["api_keys"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return out
 }
 
 func TestSecretsRoundTripNamesOnly(t *testing.T) {
@@ -137,6 +160,76 @@ func TestValidateNativeSlotChecksModelsAgainstTheInventory(t *testing.T) {
 	}
 }
 
+// TestNativeWebSlotShapePerProvider pins the two shapes picoclaw accepts for a
+// web credential: api_keys (a LIST) for brave/tavily/kagi/perplexity, api_key (a
+// string) for the rest. It asserts on YAML that has been marshalled and read
+// back, because that is the value picoclaw's decoder sees.
+//
+// It is a unit test rather than a boot check on purpose: picoclaw silently
+// ignores an unrecognized field under a provider, so a container that starts is
+// no evidence the credential landed — only that it did not crash. The crash is
+// the other half, and the shape below is what avoids it.
+//
+// wantList restates the production map instead of reading it so a typo there
+// fails here.
+func TestNativeWebSlotShapePerProvider(t *testing.T) {
+	wantList := map[string]bool{"brave": true, "tavily": true, "kagi": true, "perplexity": true}
+
+	for provider := range webProviders {
+		sec := map[string]any{}
+		if err := setNativeSlot(sec, "web."+provider, "key-1"); err != nil {
+			t.Fatalf("set web.%s: %v", provider, err)
+		}
+		raw, err := yaml.Marshal(sec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back map[string]any
+		if err := yaml.Unmarshal(raw, &back); err != nil {
+			t.Fatal(err)
+		}
+		web, _ := back["web"].(map[string]any)
+		block, ok := web[provider].(map[string]any)
+		if !ok {
+			t.Fatalf("web.%s must be a block, got:\n%s", provider, raw)
+		}
+		if wantList[provider] {
+			keys, ok := block["api_keys"].([]any)
+			if !ok || len(keys) != 1 || keys[0] != "key-1" {
+				t.Errorf("web.%s.api_keys = %#v, want [key-1]; got:\n%s", provider, block["api_keys"], raw)
+			}
+			if _, exists := block["api_key"]; exists {
+				t.Errorf("web.%s must not carry a singular api_key; got:\n%s", provider, raw)
+			}
+			continue
+		}
+		if got, _ := block["api_key"].(string); got != "key-1" {
+			t.Errorf("web.%s.api_key = %#v, want key-1; got:\n%s", provider, block["api_key"], raw)
+		}
+		if _, exists := block["api_keys"]; exists {
+			t.Errorf("web.%s must not carry a plural api_keys; got:\n%s", provider, raw)
+		}
+	}
+}
+
+// A workspace already poisoned by the old flat-string write must be repaired by
+// the next ensure — the overlay is re-applied every time, so the merge is the
+// only thing standing between that workspace and a container that never starts.
+func TestSetNativeWebSlotRepairsFlatLegacyValue(t *testing.T) {
+	sec := map[string]any{"web": map[string]any{"brave": "legacy-flat-key"}}
+	if err := setNativeSlot(sec, "web.brave", "new-key"); err != nil {
+		t.Fatal(err)
+	}
+	block, ok := sec["web"].(map[string]any)["brave"].(map[string]any)
+	if !ok {
+		t.Fatalf("web.brave = %#v, want the flat string replaced by a block", sec["web"])
+	}
+	keys, _ := block["api_keys"].([]string)
+	if len(keys) != 1 || keys[0] != "new-key" {
+		t.Errorf("web.brave.api_keys = %#v, want [new-key]", block["api_keys"])
+	}
+}
+
 func TestDotenvRejectsNewlineValue(t *testing.T) {
 	if err := writeSecret(nil, t.TempDir(), "", FormatDotenv, "A", "line1\nINJECTED=x"); !errors.Is(err, ErrInvalidSecretName) {
 		t.Errorf("newline dotenv value should be rejected, got %v", err)
@@ -166,9 +259,8 @@ func TestApplyNativeSecretsPreservesSiblings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	web, _ := m["web"].(map[string]any)
-	if web["brave"] != "brave-key-xyz" {
-		t.Errorf("web.brave = %v", web["brave"])
+	if got := braveKeys(t, m); len(got) != 1 || got[0] != "brave-key-xyz" {
+		t.Errorf("web.brave.api_keys = %v, want [brave-key-xyz]", got)
 	}
 	model := m["model_list"].(map[string]any)["deepseek-chat"].(map[string]any)
 	keys, _ := model["api_keys"].([]any)
@@ -214,9 +306,8 @@ func TestApplyNativeSecretsSkipsModelNotInThisWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	web, _ := m["web"].(map[string]any)
-	if web["brave"] != "brave-key-xyz" {
-		t.Errorf("web.brave must still be applied even though a sibling model_list slot was skipped; got %v", web["brave"])
+	if got := braveKeys(t, m); len(got) != 1 || got[0] != "brave-key-xyz" {
+		t.Errorf("web.brave must still be applied even though a sibling model_list slot was skipped; got %v", got)
 	}
 	found := false
 	for _, l := range logged {

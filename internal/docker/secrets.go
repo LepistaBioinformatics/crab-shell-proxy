@@ -55,6 +55,20 @@ var webProviders = map[string]bool{
 	"perplexity": true, "glm_search": true, "baidu_search": true,
 }
 
+// webKeyListProviders holds the providers whose credential field picoclaw types
+// as api_keys — a LIST of strings; the rest take a single api_key string. Both
+// shapes come from picoclaw's own config structs, where the credential is also
+// the ONLY field under a provider that .security.yml carries at all (enabled,
+// max_results and base_url are all yaml:"-", so they live in config.json).
+//
+// The shape is load-bearing: a native web slot written as a bare string at
+// web.<provider> makes picoclaw fail its security-config parse ("cannot
+// unmarshal !!str into config.BraveConfig") and the gateway never starts, so
+// registering one search credential took the whole container down with it.
+var webKeyListProviders = map[string]bool{
+	"brave": true, "tavily": true, "kagi": true, "perplexity": true,
+}
+
 var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // validateSecretName enforces the safe charset and rejects the traversal-prone
@@ -267,7 +281,7 @@ func setNativeSlot(sec map[string]any, slot, value string) error {
 	parts := strings.Split(slot, ".")
 	switch {
 	case len(parts) == 2 && parts[0] == "web":
-		childMap(sec, "web")[parts[1]] = value
+		setWebCredential(sec, parts[1], value)
 		return nil
 	case len(parts) == 3 && parts[0] == "model_list" && parts[2] == "api_keys":
 		ml, ok := sec["model_list"].(map[string]any)
@@ -301,6 +315,19 @@ func unsetNativeSlot(sec map[string]any, slot string) {
 			}
 		}
 	}
+}
+
+// setWebCredential writes value into the field picoclaw reads that provider's
+// key from, creating the provider block on demand. A block left over from the
+// old flat-string write is a string, not a map, so childMap replaces it and the
+// next ensure repairs a workspace that could not boot.
+func setWebCredential(sec map[string]any, provider, value string) {
+	block := childMap(childMap(sec, "web"), provider)
+	if webKeyListProviders[provider] {
+		block["api_keys"] = []string{value}
+		return
+	}
+	block["api_key"] = value
 }
 
 func childMap(m map[string]any, key string) map[string]any {
