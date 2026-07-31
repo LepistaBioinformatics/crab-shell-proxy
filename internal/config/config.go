@@ -575,6 +575,18 @@ func SubscriptionAgentSharedSecretsDir(root, tenantID, subsAccID, agentKey strin
 // SubscriptionAgentSharedSkillsDir is the subscription-scope, single-agent
 // shared-skills store:
 // <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/skills.
+// SubscriptionAgentConfigOverlay is the subscription-scope, single-agent seed
+// overlay for config.json:
+// <root>/tenants/<t>/subscriptions/<s>/shared/agents/<agent>/config-overlay.json
+//
+// It is a FILE, not a dir, because it holds one flat map rather than a store of
+// named entries — and it sits beside the other subscription+agent scope stores so
+// the scope's contents stay in one place.
+func SubscriptionAgentConfigOverlay(root, tenantID, subsAccID, agentKey string) string {
+	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey),
+		"config-overlay.json")
+}
+
 func SubscriptionAgentSharedSkillsDir(root, tenantID, subsAccID, agentKey string) string {
 	return filepath.Join(subscriptionAgentSharedRoot(root, tenantID, subsAccID, agentKey), "skills")
 }

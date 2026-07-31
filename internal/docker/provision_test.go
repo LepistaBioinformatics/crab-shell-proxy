@@ -195,7 +195,7 @@ func TestProvisionFirstSeedsWorkspace(t *testing.T) {
 
 	userDir := filepath.Join(t.TempDir(), "u")
 	// user "" so chownTree is a no-op (this test does not run as root).
-	tok, err := provision(userDir, tmpl, "", "/data", "", WorkspaceKey{}, "e@x")
+	tok, err := provision(userDir, tmpl, "", "", "/data", "", WorkspaceKey{}, "e@x")
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestProvisionReturningUserKeepsUserMD(t *testing.T) {
 	persona := t.TempDir()
 	mustWrite(t, filepath.Join(persona, "USER.md"), "INJECTED")
 
-	if _, err := provision(userDir, tmpl, persona, "/data", "", WorkspaceKey{}, ""); err != nil {
+	if _, err := provision(userDir, tmpl, persona, "", "/data", "", WorkspaceKey{}, ""); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(userDir, "workspace", "USER.md"))

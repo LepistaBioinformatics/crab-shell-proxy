@@ -245,7 +245,9 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		}
 		personaDir := config.EffectivePersonaDir(
 			m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role)
-		authToken, err = provision(userDir, templateDir, personaDir, m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
+		authToken, err = provision(userDir, templateDir, personaDir,
+			config.SubscriptionAgentConfigOverlay(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role),
+			m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
 		if err == nil {
 			// Materialize AFTER seeding, so the template's (now empty) model_list
 			// is replaced by the inventory's answer, and the native overlay lands

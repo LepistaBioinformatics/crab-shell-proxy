@@ -274,9 +274,8 @@ func TestMaterializeAppliesAnOverlayForAModelThisWorkspaceDoesNotHave(t *testing
 	}
 
 	sec, _ := readSecurityConfig(secPath)
-	web, ok := sec["web"].(map[string]any)
-	if !ok || web["brave"] != "brave-key" {
-		t.Errorf("web = %#v, want brave applied despite the inapplicable model slot", sec["web"])
+	if got := braveKeys(t, sec); len(got) != 1 || got[0] != "brave-key" {
+		t.Errorf("web.brave.api_keys = %v, want brave applied despite the inapplicable model slot", got)
 	}
 	if got := workspaceModelKey(t, secPath, "m"); got != "sk-inventory" {
 		t.Errorf("resolved model key = %q, want the inventory's sk-inventory", got)

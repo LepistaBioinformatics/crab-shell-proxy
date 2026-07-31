@@ -45,9 +45,13 @@ const (
 	ReasonModel        Reason = "model"
 	ReasonOwnSecret    Reason = "own-secret"
 	ReasonAdminRequest Reason = "admin-request"
-	// ReasonConfig is an admin repairing one instance's config.json. picoclaw
-	// reads that file only at boot (gateway.hot_reload is false), so the change
-	// is inert until the workspace bounces.
+	// ReasonConfig is an admin changing config.json: repairing ONE instance
+	// (admin-instance-config-editor) or setting one key across a subscription's
+	// instances (admin-bulk-instance-config). picoclaw reads that file only at boot
+	// (gateway.hot_reload is false), so the change is inert until the workspace
+	// bounces. In the bulk case the notice reaches only the workspaces that
+	// actually changed — a member whose value already matched is not asked to
+	// restart for someone else's edit.
 	ReasonConfig Reason = "config"
 )
 

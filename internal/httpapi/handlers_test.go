@@ -44,6 +44,24 @@ type fakeOrch struct {
 	listResult docker.SecretNames
 	memory     string
 
+	// admin-bulk-instance-config recording + canned results.
+	bulkInspect      docker.ScopeConfigInspection
+	bulkInspectErr   error
+	bulkInspectKeys  []string
+	bulkInspectScope []docker.Scope
+	bulkApplied      []docker.ScopeConfigChange
+	bulkResult       docker.ScopeConfigResult
+	bulkApplyErr     error
+	bulkCatalog      docker.TemplateCatalog
+	bulkCatalogErr   error
+	bulkCatalogNames []string
+	bulkTemplate     docker.TemplateResult
+	bulkTemplateErr  error
+	bulkTemplateArgs []bulkTemplateCall
+	bulkOverlay      docker.OverlayResult
+	bulkOverlayErr   error
+	bulkOverlayArgs  []bulkOverlayCall
+
 	// admin-shared-content recording + canned results.
 	sharedFiles   []docker.FileMeta
 	userFiles     []docker.FileMeta
@@ -272,6 +290,64 @@ func (f *fakeOrch) WriteInstanceConfig(key docker.WorkspaceKey, raw, revision st
 		return docker.InstanceConfig{}, docker.ReapplyResult{}, f.instanceConfigWriteErr
 	}
 	return f.instanceConfigAfterWrite, f.instanceConfigReapply, nil
+}
+
+// --- admin-bulk-instance-config fakes ---
+
+type bulkOverlayCall struct {
+	Scope docker.Scope
+	Key   string
+	Value string
+	By    string
+}
+
+type bulkTemplateCall struct {
+	Template string
+	Key      string
+	Value    any
+	Revision string
+	By       string
+}
+
+func (f *fakeOrch) InspectScopeConfigKey(scope docker.Scope, key string) (docker.ScopeConfigInspection, error) {
+	f.bulkInspectKeys = append(f.bulkInspectKeys, key)
+	f.bulkInspectScope = append(f.bulkInspectScope, scope)
+	if f.bulkInspectErr != nil {
+		return docker.ScopeConfigInspection{}, f.bulkInspectErr
+	}
+	return f.bulkInspect, nil
+}
+
+func (f *fakeOrch) ApplyScopeConfigKey(scope docker.Scope, ch docker.ScopeConfigChange) (docker.ScopeConfigResult, error) {
+	f.bulkApplied = append(f.bulkApplied, ch)
+	if f.bulkApplyErr != nil {
+		return docker.ScopeConfigResult{}, f.bulkApplyErr
+	}
+	return f.bulkResult, nil
+}
+
+func (f *fakeOrch) TemplateConfigKeys(template string) (docker.TemplateCatalog, error) {
+	f.bulkCatalogNames = append(f.bulkCatalogNames, template)
+	if f.bulkCatalogErr != nil {
+		return docker.TemplateCatalog{}, f.bulkCatalogErr
+	}
+	return f.bulkCatalog, nil
+}
+
+func (f *fakeOrch) ApplyOverlayConfigKey(scope docker.Scope, key string, value json.RawMessage, by string, at time.Time) (docker.OverlayResult, error) {
+	f.bulkOverlayArgs = append(f.bulkOverlayArgs, bulkOverlayCall{scope, key, string(value), by})
+	if f.bulkOverlayErr != nil {
+		return docker.OverlayResult{}, f.bulkOverlayErr
+	}
+	return f.bulkOverlay, nil
+}
+
+func (f *fakeOrch) ApplyTemplateConfigKey(template, key string, value any, revision, by string, at time.Time) (docker.TemplateResult, error) {
+	f.bulkTemplateArgs = append(f.bulkTemplateArgs, bulkTemplateCall{template, key, value, revision, by})
+	if f.bulkTemplateErr != nil {
+		return docker.TemplateResult{}, f.bulkTemplateErr
+	}
+	return f.bulkTemplate, nil
 }
 
 // --- admin-shared-content fakes: record calls, return canned results ---

@@ -133,6 +133,31 @@ type Orchestrator interface {
 	// undo the write.
 	WriteInstanceConfig(key docker.WorkspaceKey, raw, revision string) (docker.InstanceConfig, docker.ReapplyResult, error)
 
+	// --- admin-bulk-instance-config (one key across a subscription) ---
+
+	// InspectScopeConfigKey groups every instance of one agent in one subscription
+	// by what it holds at one dotted config.json key, so an admin can see the drift
+	// before changing it. It also supplies the per-instance revisions the apply
+	// needs.
+	InspectScopeConfigKey(scope docker.Scope, key string) (docker.ScopeConfigInspection, error)
+	// ApplyScopeConfigKey sets that key on every instance whose value DIFFERS and
+	// reports a per-instance outcome. The batch never fails wholesale: one member
+	// with a corrupt config.json must not block a policy change for the rest.
+	ApplyScopeConfigKey(scope docker.Scope, ch docker.ScopeConfigChange) (docker.ScopeConfigResult, error)
+	// TemplateConfigKeys flattens an agent TEMPLATE's config.json into dotted leaf
+	// paths, which is what the key picker offers. Takes a template NAME, not an
+	// agent key — config.yaml declares them separately and two agents may share one.
+	TemplateConfigKeys(template string) (docker.TemplateCatalog, error)
+	// ApplyTemplateConfigKey optionally writes the same key into the template, so
+	// members provisioned LATER inherit it: a workspace's config.json is seeded from
+	// the template once and never re-seeded.
+	ApplyTemplateConfigKey(template, key string, value any, revision, by string, at time.Time) (docker.TemplateResult, error)
+	// ApplyOverlayConfigKey scopes one key to ONE subscription's future members, via
+	// a seed overlay applied when a new workspace is provisioned. It is the
+	// alternative to writing the agent template, whose reach is every subscription
+	// running that agent.
+	ApplyOverlayConfigKey(scope docker.Scope, key string, value json.RawMessage, by string, at time.Time) (docker.OverlayResult, error)
+
 	// --- model re-apply (internal/registry is the resolver; no keys transit here) ---
 
 	// Each re-apply takes `bounce`: true restarts the affected workspaces now,
@@ -267,6 +292,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
 	mux.HandleFunc("GET /v1/admin/users/config", s.handleAdminInstanceConfigGet)
 	mux.HandleFunc("PUT /v1/admin/users/config", s.handleAdminInstanceConfigPut)
+	mux.HandleFunc("GET /v1/admin/scope/config/keys", s.handleAdminScopeConfigKeys)
+	mux.HandleFunc("GET /v1/admin/scope/config/inspect", s.handleAdminScopeConfigInspect)
+	mux.HandleFunc("PUT /v1/admin/scope/config", s.handleAdminScopeConfigPut)
 	mux.HandleFunc("POST /v1/admin/users/restart", s.handleAdminInstanceRestart)
 	mux.HandleFunc("GET /v1/admin/skills", s.handleAdminSkillsList)
 	mux.HandleFunc("GET /v1/admin/skills/doc", s.handleAdminSkillsDoc)
