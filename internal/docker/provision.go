@@ -55,7 +55,7 @@ func ensurePicoclawTemplate(templateDir, user string) error {
 	return nil
 }
 
-func provision(userDir, templateDir, personaDir, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
+func provision(userDir, templateDir, personaDir, overlayPath, home, user string, key WorkspaceKey, ownerEmail string) (picoToken string, err error) {
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -67,6 +67,15 @@ func provision(userDir, templateDir, personaDir, home, user string, key Workspac
 		}
 		if err := alignWorkspace(configPath, home); err != nil {
 			return "", fmt.Errorf("align workspace path: %w", err)
+		}
+		// The subscription's scoped seed defaults, applied ONLY here — on a fresh
+		// seed, never to a returning user. This is what lets an admin say "this is
+		// the default for MY subscription's future members" instead of having to
+		// write the agent template, which every subscription on that agent shares.
+		// After alignWorkspace so the aligned path cannot be disturbed, and
+		// best-effort per key: see applyConfigOverlay.
+		if _, err := applyConfigOverlay(configPath, overlayPath); err != nil {
+			return "", fmt.Errorf("apply scoped config overlay: %w", err)
 		}
 		// The pico channel token is generated here; the model is materialized
 		// by the caller from the inventory. Splitting these is what lets the
