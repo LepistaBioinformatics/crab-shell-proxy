@@ -220,6 +220,22 @@ type Config struct {
 	WebhookSecret secret           `yaml:"webhookSecret"`
 	Agents        map[string]Agent `yaml:"agents"`
 
+	// MCPTokenSecret signs the bearer token a spawned picoclaw container presents
+	// to the proxy's native memory-graph MCP endpoint (POST /v1/mcp). The token
+	// carries the workspace scope and a MAC over it, so nothing is stored and
+	// rotating this value revokes every issued token at once.
+	//
+	// Env-resolvable like webhookSecret, but UNSET IS NOT FATAL: an empty secret
+	// disables the memory graph (the route is not registered and no MCP block is
+	// written into any workspace) and the rest of the proxy behaves exactly as it
+	// did before the feature existed. A deployment that forgot the secret must get
+	// no memory rather than an unauthenticated endpoint on the container network.
+	MCPTokenSecret secret `yaml:"mcpTokenSecret"`
+	// MCPBaseURL is the origin a SPAWNED CONTAINER uses to reach this proxy; it
+	// becomes the `url` of the injected MCP server. The proxy cannot infer the name
+	// it is reachable by on the container network, so this is configuration.
+	MCPBaseURL string `yaml:"mcpBaseURL"`
+
 	// Media upload caps (media-upload feature). MediaMaxBytes bounds an
 	// uploaded file; MediaAllowedExts is the lowercase extension allowlist.
 	MediaMaxBytes    int64    `yaml:"mediaMaxBytes"`
@@ -227,6 +243,10 @@ type Config struct {
 
 	// ResolvedWebhookSecret is filled by Load from WebhookSecret.
 	ResolvedWebhookSecret string `yaml:"-"`
+
+	// ResolvedMCPTokenSecret is filled by Load from MCPTokenSecret. Empty means the
+	// memory graph is disabled; see MCPTokenSecret.
+	ResolvedMCPTokenSecret string `yaml:"-"`
 
 	// DisabledAgents lists agents dropped at Load because their deployment did
 	// not provide their required secrets (currently: a hermes agent missing its
@@ -300,6 +320,14 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("webhookSecret: %w", err)
 	}
 	cfg.ResolvedWebhookSecret = sec
+	// Deliberately NOT propagated like webhookSecret's error: an unset
+	// CRAB_MCP_TOKEN_SECRET disables the memory graph, it does not stop the proxy
+	// from booting. resolve() reports an unset env var as an error, which here means
+	// "not configured" — the zero value is the correct outcome, and the callers that
+	// care (the /v1/mcp registration and the config writer) both key off empty.
+	if mcpSec, mcpErr := cfg.MCPTokenSecret.resolve(); mcpErr == nil {
+		cfg.ResolvedMCPTokenSecret = mcpSec
+	}
 	return &cfg, nil
 }
 
@@ -326,6 +354,9 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("CRAB_PICOCLAW_HOME"); v != "" {
 		c.PicoclawHome = v
 	}
+	if v := os.Getenv("CRAB_MCP_BASE_URL"); v != "" {
+		c.MCPBaseURL = v
+	}
 }
 
 func (c *Config) applyDefaults() {
@@ -337,6 +368,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.PicoclawImage == "" {
 		c.PicoclawImage = "docker.io/sipeed/picoclaw:latest"
+	}
+	if c.MCPBaseURL == "" {
+		// The compose service name, which is how a spawned container on zombie_net
+		// reaches this proxy in every environment this repo ships.
+		c.MCPBaseURL = "http://crab-shell-proxy:8080"
 	}
 	if c.HermesImage == "" {
 		c.HermesImage = "docker.io/nousresearch/hermes-agent:latest"

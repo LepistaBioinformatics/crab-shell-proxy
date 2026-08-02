@@ -118,6 +118,13 @@ type fakeOrch struct {
 	instanceConfigWriteKey   docker.WorkspaceKey
 	instanceConfigWritten    string
 	instanceConfigRevision   string
+
+	// Uploads-tree organisation recording + canned results.
+	folderCreated []string
+	folderDeleted []string
+	moved         []string
+	removedFiles  int
+	folderErr     error
 }
 
 type personaWrite struct {
@@ -257,6 +264,24 @@ func (f *fakeOrch) ListMedia(docker.WorkspaceKey) ([]docker.StoredMedia, error) 
 
 func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string) error {
 	return nil
+}
+
+// Folder operations record what they were asked to do, so a handler test can assert
+// the path actually forwarded rather than only the status code — the mediaRelPath
+// stripping is exactly the kind of thing a status assertion would miss.
+func (f *fakeOrch) CreateFolder(_ docker.WorkspaceKey, rel string) error {
+	f.folderCreated = append(f.folderCreated, rel)
+	return f.folderErr
+}
+
+func (f *fakeOrch) MoveMedia(_ docker.WorkspaceKey, fromRel, toRel string) error {
+	f.moved = append(f.moved, fromRel+" -> "+toRel)
+	return f.folderErr
+}
+
+func (f *fakeOrch) DeleteFolder(_ docker.WorkspaceKey, rel string) (int, error) {
+	f.folderDeleted = append(f.folderDeleted, rel)
+	return f.removedFiles, f.folderErr
 }
 
 func (f *fakeOrch) OpenMedia(docker.WorkspaceKey, string) (io.ReadCloser, string, error) {

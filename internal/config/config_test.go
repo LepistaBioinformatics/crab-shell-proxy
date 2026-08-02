@@ -559,3 +559,95 @@ func TestPathComponentsCannotEscapeTheRoot(t *testing.T) {
 		}
 	}
 }
+
+// --- memory-graph-mcp: mcpTokenSecret / mcpBaseURL ---
+
+const mcpSample = `
+hostDataRoot: "/host/data"
+network: "net"
+mcpTokenSecret: { env: "TEST_MCP_SECRET" }
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: "inline"
+    template: "alpha"
+    mode: "continuous"
+`
+
+func TestLoadResolvesMCPTokenSecretFromTheEnvironment(t *testing.T) {
+	t.Setenv("TEST_MCP_SECRET", "signing-value")
+	cfg, err := Load(writeConfig(t, mcpSample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResolvedMCPTokenSecret != "signing-value" {
+		t.Errorf("ResolvedMCPTokenSecret = %q, want %q", cfg.ResolvedMCPTokenSecret, "signing-value")
+	}
+	// The secret must never be readable from the parsed file structure itself —
+	// only the env name is declared there.
+	if cfg.MCPTokenSecret.Value != "" {
+		t.Errorf("MCPTokenSecret.Value = %q; the secret must live only in the environment", cfg.MCPTokenSecret.Value)
+	}
+	if cfg.MCPTokenSecret.Env != "TEST_MCP_SECRET" {
+		t.Errorf("MCPTokenSecret.Env = %q, want TEST_MCP_SECRET", cfg.MCPTokenSecret.Env)
+	}
+}
+
+// FR-4.5: unlike webhookSecret, an unset MCP secret must NOT fail the load. A
+// deployment that has not configured memory still has to boot and chat.
+func TestLoadToleratesAnUnsetMCPTokenSecret(t *testing.T) {
+	t.Setenv("TEST_MCP_SECRET", "")
+	cfg, err := Load(writeConfig(t, mcpSample))
+	if err != nil {
+		t.Fatalf("Load with an unset MCP secret failed: %v — it must disable the feature, not the proxy", err)
+	}
+	if cfg.ResolvedMCPTokenSecret != "" {
+		t.Errorf("ResolvedMCPTokenSecret = %q, want empty", cfg.ResolvedMCPTokenSecret)
+	}
+}
+
+func TestLoadToleratesNoMCPTokenSecretFieldAtAll(t *testing.T) {
+	// `sample` predates this feature and declares no mcpTokenSecret at all, which
+	// is exactly the case an existing deployment's config.yaml is in.
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	cfg, err := Load(writeConfig(t, sample))
+	if err != nil {
+		t.Fatalf("Load of a config with no mcpTokenSecret field failed: %v", err)
+	}
+	if cfg.ResolvedMCPTokenSecret != "" {
+		t.Errorf("ResolvedMCPTokenSecret = %q, want empty when the field is absent", cfg.ResolvedMCPTokenSecret)
+	}
+}
+
+func TestMCPBaseURLDefaultAndOverrides(t *testing.T) {
+	t.Run("defaults to the compose service name", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, mcpSample))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.MCPBaseURL != "http://crab-shell-proxy:8080" {
+			t.Errorf("MCPBaseURL = %q, want the default", cfg.MCPBaseURL)
+		}
+	})
+
+	t.Run("file value is used", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, mcpSample+"\nmcpBaseURL: \"http://from-file:1234\"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.MCPBaseURL != "http://from-file:1234" {
+			t.Errorf("MCPBaseURL = %q, want the file value", cfg.MCPBaseURL)
+		}
+	})
+
+	t.Run("env wins over the file", func(t *testing.T) {
+		t.Setenv("CRAB_MCP_BASE_URL", "http://from-env:9999")
+		cfg, err := Load(writeConfig(t, mcpSample+"\nmcpBaseURL: \"http://from-file:1234\"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.MCPBaseURL != "http://from-env:9999" {
+			t.Errorf("MCPBaseURL = %q, want the env value to win", cfg.MCPBaseURL)
+		}
+	})
+}

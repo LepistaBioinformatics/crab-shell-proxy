@@ -1,0 +1,143 @@
+{
+  "_comment": [
+    "The advertised tool contract of better-memory-mcp v0.8.0, hand-transcribed from",
+    "its ListToolsRequestSchema handler. The source block it was transcribed from is",
+    "checked in next to this file as upstream-index-tools.ts.txt, so the transcription",
+    "can be checked by reading rather than trusted.",
+    "",
+    "STRUCTURE ONLY — descriptions are deliberately not compared. semantic_search's",
+    "description must differ from upstream's (it claims ModernColBERT embeddings we do",
+    "not have; see context.md D-1), and tools_test.go asserts that difference",
+    "separately.",
+    "",
+    "'itemRequired' and 'itemProperties' describe the object inside an array property."
+  ],
+  "create_entities": {
+    "required": ["entities"],
+    "properties": {
+      "entities": {
+        "type": "array",
+        "itemRequired": ["name", "entityType", "observations"],
+        "itemProperties": {
+          "name": { "type": "string" },
+          "entityType": { "type": "string" },
+          "observations": { "type": "array" }
+        }
+      }
+    }
+  },
+  "create_relations": {
+    "required": ["relations"],
+    "properties": {
+      "relations": {
+        "type": "array",
+        "itemRequired": ["from", "to", "relationType"],
+        "itemProperties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "relationType": { "type": "string" }
+        }
+      }
+    }
+  },
+  "add_observations": {
+    "required": ["observations"],
+    "properties": {
+      "observations": {
+        "type": "array",
+        "itemRequired": ["entityName", "contents"],
+        "itemProperties": {
+          "entityName": { "type": "string" },
+          "contents": { "type": "array" },
+          "confidence": { "type": "array" }
+        }
+      }
+    }
+  },
+  "delete_entities": {
+    "required": ["entityNames"],
+    "properties": { "entityNames": { "type": "array" } }
+  },
+  "delete_observations": {
+    "required": ["deletions"],
+    "properties": {
+      "deletions": {
+        "type": "array",
+        "itemRequired": ["entityName", "observations"],
+        "itemProperties": {
+          "entityName": { "type": "string" },
+          "observations": { "type": "array" }
+        }
+      }
+    }
+  },
+  "delete_relations": {
+    "required": ["relations"],
+    "properties": {
+      "relations": {
+        "type": "array",
+        "itemRequired": ["from", "to", "relationType"],
+        "itemProperties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "relationType": { "type": "string" }
+        }
+      }
+    }
+  },
+  "read_graph": {
+    "required": [],
+    "properties": {
+      "detailLevel": {
+        "type": "string",
+        "enum": ["minimal", "summary", "full"],
+        "default": "summary"
+      },
+      "entityNames": { "type": "array" },
+      "includeArchived": { "type": "boolean", "default": false },
+      "includeMerged": { "type": "boolean", "default": false }
+    }
+  },
+  "get_entity_details": {
+    "required": ["entityNames"],
+    "properties": { "entityNames": { "type": "array" } }
+  },
+  "search_nodes": {
+    "required": ["query"],
+    "properties": {
+      "query": { "type": "string" },
+      "maxObservations": { "type": "number", "default": 5 }
+    }
+  },
+  "semantic_search": {
+    "required": ["query"],
+    "properties": {
+      "query": { "type": "string" },
+      "k": { "type": "number", "default": 10 },
+      "threshold": { "type": "number", "default": 0 }
+    }
+  },
+  "open_nodes": {
+    "required": ["names"],
+    "properties": { "names": { "type": "array" } }
+  },
+  "merge_entities": {
+    "required": ["sourceName", "targetName"],
+    "properties": {
+      "sourceName": { "type": "string" },
+      "targetName": { "type": "string" }
+    }
+  },
+  "archive_entity": {
+    "required": ["entityName"],
+    "properties": { "entityName": { "type": "string" } }
+  },
+  "unarchive_entity": {
+    "required": ["entityName"],
+    "properties": { "entityName": { "type": "string" } }
+  },
+  "get_recent_changes": {
+    "required": [],
+    "properties": { "hours": { "type": "number", "default": 24 } }
+  }
+}

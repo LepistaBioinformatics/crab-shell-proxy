@@ -361,8 +361,19 @@ func TestManagedConfigPathsMatchWriters(t *testing.T) {
 		"model_list":   []any{map[string]any{"model_name": "sentinel"}},
 		"agents":       map[string]any{"defaults": map[string]any{"provider": "sentinel", "model_name": "sentinel", "model_fallbacks": []any{"sentinel"}, "workspace": "/sentinel", "max_tokens": 1234}},
 		"channel_list": map[string]any{"pico": map[string]any{"enabled": false}},
-		"tools":        map[string]any{"exec": map[string]any{"enabled": true}},
-		"gateway":      map[string]any{"host": "localhost", "port": 18790},
+		// tools.mcp with an (empty) servers container, which is the shape a real
+		// picoclaw config.json always has — the bundled template ships
+		// tools.mcp.{enabled,discovery,max_inline_text_chars}. Without it the seed
+		// would be a document applyMCPServer has to CREATE containers in, and the
+		// blank-and-compare below would read those new containers as a writer
+		// touching an unmanaged path. The managed values are tools.mcp.enabled and
+		// tools.mcp.servers.memory; tools.mcp.servers itself is deliberately not
+		// managed, because a sibling server there belongs to the operator.
+		"tools": map[string]any{
+			"exec": map[string]any{"enabled": true},
+			"mcp":  map[string]any{"enabled": false, "servers": map[string]any{}},
+		},
+		"gateway": map[string]any{"host": "localhost", "port": 18790},
 	}
 	raw, _ := json.MarshalIndent(seed, "", "  ")
 	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
@@ -378,6 +389,13 @@ func TestManagedConfigPathsMatchWriters(t *testing.T) {
 	}
 	if err := alignWorkspace(configPath, "/home/picoclaw"); err != nil {
 		t.Fatalf("alignWorkspace: %v", err)
+	}
+	// The third writer: the native memory-graph MCP block. It owns
+	// tools.mcp.enabled and tools.mcp.servers.memory, so both have to be in
+	// ManagedConfigPaths or this gate fails — which is exactly what it did when they
+	// were added to the list before the writer was wired in here.
+	if _, err := applyMCPServer(configPath, "http://crab-shell-proxy:8080", "gate-token"); err != nil {
+		t.Fatalf("applyMCPServer: %v", err)
 	}
 	after := readConfig(t, configPath)
 

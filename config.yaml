@@ -46,6 +46,25 @@ containerPrefix: "crabshell"
 # file; register the same value with mycelium's webhook (Authorization: Bearer).
 webhookSecret: { env: "CRAB_WEBHOOK_SECRET" }
 
+# Signs the bearer token a spawned picoclaw container presents to the proxy's own
+# MCP endpoint (POST /v1/mcp) to reach its knowledge-graph memory. The token
+# carries the workspace scope plus an HMAC over it, so the proxy stores nothing and
+# rotating this value revokes every issued token at once.
+#
+# Unlike webhookSecret, LEAVING THIS UNSET IS SUPPORTED: the memory graph is simply
+# disabled — /v1/mcp is not registered and no MCP block is written into any
+# workspace's config.json — and everything else behaves as before. That is
+# deliberate: a deployment that forgot the secret must get no memory rather than an
+# unauthenticated endpoint reachable by every container on the network.
+mcpTokenSecret: { env: "CRAB_MCP_TOKEN_SECRET" }
+
+# The origin a SPAWNED CONTAINER uses to reach this proxy; it becomes the `url` of
+# the MCP server injected into each workspace. The proxy cannot infer the name it
+# answers to on the container network, so it is configured here. Override with
+# CRAB_MCP_BASE_URL. Default: http://crab-shell-proxy:8080 (the compose service
+# name, which is how containers on zombie_net reach it).
+mcpBaseURL: "http://crab-shell-proxy:8080"
+
 agents:
   alpha:
     serviceName: "alpha" # matches x-mycelium-service-name mycelium injects

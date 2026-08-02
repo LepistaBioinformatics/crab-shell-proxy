@@ -58,6 +58,12 @@ var ManagedConfigPaths = []string{
 	"agents.defaults.model_fallbacks",
 	"agents.defaults.workspace",
 	"channel_list.pico.enabled",
+	// The native memory-graph MCP server (applyMCPServer, mcp_config.go). Only the
+	// proxy's own "memory" entry is listed: a sibling server an operator added by
+	// hand is theirs to edit. tools.mcp.enabled is managed because the proxy sets it
+	// and an admin turning it off would silently disable memory for that member.
+	"tools.mcp.enabled",
+	"tools.mcp.servers." + MCPServerName,
 }
 
 // InstanceConfig is one workspace's config.json as an admin sees it.
@@ -127,6 +133,11 @@ func (m *Manager) ReadInstanceConfig(key WorkspaceKey) (InstanceConfig, error) {
 	out.Valid = true
 
 	redacted, paths := redactModelKeys(doc)
+	// Chained, not replaced: a workspace can carry both a legacy model_list key and
+	// the memory-graph bearer token, and each pass must see the other's output so a
+	// document with both ends up with both masked.
+	redacted, mcpPaths := redactMCPHeaders(redacted)
+	paths = append(paths, mcpPaths...)
 	if len(paths) == 0 {
 		out.Raw = string(raw)
 		return out, nil
@@ -364,6 +375,10 @@ func unmaskAgainst(raw []byte, submitted, current map[string]any) ([]byte, error
 		return raw, nil
 	}
 	restored, changed := restoreMaskedModelKeys(submitted, current)
+	// Chained against the OUTPUT of the first pass, mirroring the read path, so a
+	// document carrying both kinds of mask gets both restored.
+	restored, mcpChanged := restoreMaskedMCPHeaders(restored, current)
+	changed = changed || mcpChanged
 	if !changed {
 		return raw, nil
 	}

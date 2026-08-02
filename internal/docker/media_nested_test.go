@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -54,11 +55,20 @@ func listPaths(t *testing.T, m *Manager, key WorkspaceKey) []string {
 	return paths
 }
 
-func TestListMediaFindsFilesInsideFolders(t *testing.T) {
+// The listing carries folders as well as files, each folder marked IsDir.
+//
+// It used to be files only, and the interface derived the tree from the folder
+// PREFIXES of file paths. That works until a folder is EMPTY: a member who created one
+// saw no row at all — and therefore no drop target to put a file into, which made
+// creating a folder pointless. The folders are now listed in their own right.
+func TestListMediaListsFoldersAndFiles(t *testing.T) {
 	m, key, _ := mediaFixture(t)
 	got := listPaths(t, m, key)
 	want := []string{
+		"uploads/images",
 		"uploads/images/logo.png",
+		"uploads/reports",
+		"uploads/reports/2026",
 		"uploads/reports/2026/q2.pdf",
 		"uploads/reports/q1.pdf",
 		"uploads/top.txt",
@@ -66,6 +76,67 @@ func TestListMediaFindsFilesInsideFolders(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("listing:\n got %v\nwant %v", got, want)
 	}
+}
+
+// The case the change exists for: a folder with nothing in it.
+func TestListMediaListsAnEmptyFolder(t *testing.T) {
+	m, key, _ := mediaFixture(t)
+	if err := m.CreateFolder(key, "brand-new"); err != nil {
+		t.Fatalf("CreateFolder: %v", err)
+	}
+	entries, err := m.ListMedia(key)
+	if err != nil {
+		t.Fatalf("ListMedia: %v", err)
+	}
+	for _, e := range entries {
+		if e.Path == "uploads/brand-new" {
+			if !e.IsDir {
+				t.Error("the empty folder is listed but not marked IsDir")
+			}
+			if e.Name != "brand-new" {
+				t.Errorf("Name = %q, want the workspace-relative path", e.Name)
+			}
+			return
+		}
+	}
+	t.Errorf("an empty folder is missing from the listing: %v", listPaths(t, m, key))
+}
+
+// Only folders carry the flag, or the interface would render files as branches.
+func TestListMediaMarksOnlyFoldersAsDirs(t *testing.T) {
+	m, key, _ := mediaFixture(t)
+	entries, err := m.ListMedia(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		wantDir := !strings.Contains(path.Base(e.Path), ".")
+		if e.IsDir != wantDir {
+			t.Errorf("%s: IsDir = %v, want %v", e.Path, e.IsDir, wantDir)
+		}
+	}
+}
+
+// The uid prefix is something StoreMedia adds to FILE base names. Running the strip
+// over a folder would rename it on screen.
+func TestListMediaDoesNotStripAUidLikeFolderName(t *testing.T) {
+	m, key, _ := mediaFixture(t)
+	if err := m.CreateFolder(key, "ab12cd34-notes"); err != nil {
+		t.Fatalf("CreateFolder: %v", err)
+	}
+	entries, err := m.ListMedia(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Path == "uploads/ab12cd34-notes" {
+			if e.Name != "ab12cd34-notes" {
+				t.Errorf("folder Name = %q, want it unstripped", e.Name)
+			}
+			return
+		}
+	}
+	t.Error("the folder is missing from the listing")
 }
 
 func TestListMediaKeepsTheFolderInTheDisplayName(t *testing.T) {

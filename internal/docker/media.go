@@ -27,6 +27,11 @@ type StoredMedia struct {
 	Path string `json:"path"`
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+	// IsDir marks a folder rather than a file. Additive and `omitempty`, so every
+	// existing consumer that only ever reads files is unaffected — but the listing can
+	// now carry an EMPTY folder, which has no file paths to be inferred from and was
+	// therefore invisible.
+	IsDir bool `json:"isDir,omitempty"`
 }
 
 var unsafeFilenameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -222,9 +227,14 @@ var uidPrefixRe = regexp.MustCompile(`^[0-9a-f]{8}-`)
 // the sidebar request into an unbounded walk.
 const maxListedMedia = 2000
 
-// ListMedia returns the files currently in the caller's workspace uploads dir
-// (never their contents). Path is the workspace-relative path the turn
-// references; Name is the display name. An absent dir is empty.
+// ListMedia returns the files AND folders currently in the caller's workspace uploads
+// dir (never their contents). Path is the workspace-relative path the turn references;
+// Name is the display name. An absent dir is empty.
+//
+// Folders are listed explicitly, with IsDir set. They used to be skipped, and the
+// interface derived the tree purely from the folder PREFIXES of file paths — which
+// works until a folder is empty. A member who created one saw nothing: no row, and
+// therefore no drop target to put a file into, which made creating a folder pointless.
 func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
 	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	out := make([]StoredMedia, 0, 32)
@@ -245,11 +255,24 @@ func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
 		if e.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if e.IsDir() {
-			return nil
-		}
 		rel, relErr := filepath.Rel(dir, full)
 		if relErr != nil {
+			return nil
+		}
+		if e.IsDir() {
+			// The root itself is the container, not an entry in it.
+			if rel == "." {
+				return nil
+			}
+			slashRel := filepath.ToSlash(rel)
+			out = append(out, StoredMedia{
+				Path: path.Join("uploads", slashRel),
+				// No uid-prefix stripping: that prefix is something StoreMedia adds to
+				// FILE base names, and a folder legitimately named like one would be
+				// renamed on screen.
+				Name:  slashRel,
+				IsDir: true,
+			})
 			return nil
 		}
 		info, infoErr := e.Info()

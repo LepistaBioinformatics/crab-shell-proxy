@@ -1,0 +1,5 @@
+{"type":"entity","name":"carol","entityType":"person","observations":["joined in 2019","prefers async"]}
+{"type":"entity","name":"ledger","entityType":"system","observations":[{"content":"written in Rust","timestamp":1600000000000}]}
+{"type":"bookmark","name":"ignored","note":"an unknown record type must not break the load"}
+
+{"type":"relation","from":"carol","to":"ledger","relationType":"maintains"}

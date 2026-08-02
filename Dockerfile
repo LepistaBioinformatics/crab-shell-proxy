@@ -5,7 +5,10 @@
 # resolve (this stack builds with `--network=host`, matching mycelium-gateway).
 # ---------------------------------------------------------------------------
 
-FROM golang:1.23-bookworm AS build
+# 1.25, not 1.23: github.com/modelcontextprotocol/go-sdk (the native memory-graph
+# MCP server) declares `go >= 1.25.0`, which raised this module's own directive.
+# A 1.23 builder cannot compile it at all.
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 
 # No committed go.sum (no host Go toolchain in this project); resolve + record
