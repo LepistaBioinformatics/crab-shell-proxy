@@ -211,9 +211,22 @@ func chownTree(dir, user string) error {
 			return fmt.Errorf("picoclawUser gid must be numeric, got %q", user)
 		}
 	}
-	return filepath.Walk(dir, func(path string, _ os.FileInfo, walkErr error) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		// The knowledge-graph directory is the one thing under a user tree the AGENT
+		// must not own. The proxy is its only reader and writer, and leaving it
+		// root-owned 0700 is what stops the non-root container process reaching
+		// memory.jsonl through `tools.exec` — the file tools already cannot, because
+		// it sits above the agent's workspace.
+		//
+		// This skip is load-bearing rather than tidy: resolveAndMaterialize calls
+		// chownTree(userDir) on EVERY ensure, so without it the graph would be handed
+		// to picoclawUser on the second chat and the isolation would quietly be gone.
+		// See .specs/features/memory-graph-mcp/context.md D-2.
+		if info != nil && info.IsDir() && filepath.Base(path) == GraphDirName && path != dir {
+			return filepath.SkipDir
 		}
 		return os.Lchown(path, uid, gid)
 	})

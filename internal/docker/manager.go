@@ -255,6 +255,13 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 			// before any container exists.
 			err = m.resolveAndMaterialize(key, userDir)
 		}
+		if err == nil {
+			// The native memory-graph MCP server. Beside resolveAndMaterialize rather
+			// than inside it (model resolution and MCP injection are unrelated), and
+			// beside it rather than in alignWorkspace, which only ever runs on a
+			// first-ever seed — see applyMCPServer's own comment.
+			err = m.applyMemoryGraphMCP(key, userDir)
+		}
 	}
 	if err != nil {
 		return Target{}, err
@@ -409,10 +416,10 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		return err
 	}
 	managedBase := config.ManagedSkillsDir(m.cfg.HostDataRoot)
-	managedSkillMount := filepath.Join(managedBase, managedSkillRel) +
-		":" + mountDest + "/workspace/" + managedSkillRel + ":ro"
-	managedMemoryMount := filepath.Join(managedBase, managedMemoryRel) +
-		":" + mountDest + "/workspace/" + managedMemoryRel + ":ro"
+	// Built by a pure helper so the list is assertable without a container: the memory
+	// routing note joins it only when the memory graph is switched on.
+	managedMounts := managedContentBinds(
+		managedBase, mountDest, m.cfg.ResolvedMCPTokenSecret != "")
 	// Cascade admin shared skills: materialize the (tenant, subscription)
 	// effective-skills dir and mount it whole READ-ONLY at picoclaw's global
 	// skills root. New/edited/removed skills reach picoclaw on the next
@@ -447,7 +454,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		// empty directory at the destination (personaBinds).
 		Binds: append(
 			append([]string{hostDir + ":" + mountDest, secretsMount},
-				append(sharedMounts, managedSkillMount, managedMemoryMount, skillsMount)...),
+				append(append(sharedMounts, managedMounts...), skillsMount)...),
 			personaBindStrings(m.cfg, key, mountDest)...),
 		Network: m.cfg.Network,
 		Init:    true,

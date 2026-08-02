@@ -1,0 +1,4 @@
+{"type":"entity","name":"alice","entityType":"person","observations":[{"content":"likes tea","timestamp":1700000000000,"confidence":0.9}],"createdAt":1700000000000}
+{"type":"entity","name":"bob","entityType":"person","observations":[{"content":"reviews specs","timestamp":1700000001000,"confidence":1}],"createdAt":1700000001000}
+{"type":"entity","name":"retired-note","entityType":"note","observations":[],"createdAt":1699999999000,"archived":true}
+{"type":"relation","from":"alice","to":"bob","relationType":"works with","createdAt":1700000002000}

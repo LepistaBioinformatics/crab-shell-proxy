@@ -129,7 +129,20 @@ func (m *Manager) reapplyWorkspace(key WorkspaceKey) error {
 	if _, err := os.Stat(filepath.Join(userDir, "config.json")); err != nil {
 		return nil
 	}
-	return m.resolveAndMaterialize(key, userDir)
+	// The memory-graph MCP block is a managed path too, and ManagedConfigPaths
+	// promises an admin edit to one "cannot survive". Without this the block would
+	// stay deleted until the next EnsureRunning — which would then see changed=true
+	// and raise a restart notice nobody's action explains.
+	//
+	// BOTH are attempted, and the errors are joined rather than short-circuited. They
+	// are independent writers, and a workspace whose registry resolves no model is
+	// precisely the broken case the admin config editor exists to repair: letting
+	// that failure skip the MCP restore would leave the managed path un-restored in
+	// the one situation where somebody is actively fixing the file.
+	return errors.Join(
+		m.resolveAndMaterialize(key, userDir),
+		m.applyMemoryGraphMCP(key, userDir),
+	)
 }
 
 // scopeWorkspaceKeys enumerates every discovered WorkspaceKey under scope:

@@ -22,6 +22,8 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mcpserver"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
@@ -82,6 +84,11 @@ type Orchestrator interface {
 	ListMedia(key docker.WorkspaceKey) ([]docker.StoredMedia, error)
 	// DeleteMedia removes one uploaded file (by its stored filename).
 	DeleteMedia(key docker.WorkspaceKey, storedName string) error
+	// Member-driven organisation of the uploads tree. MoveMedia covers renaming;
+	// DeleteFolder is recursive and reports how many files it removed.
+	CreateFolder(key docker.WorkspaceKey, rel string) error
+	MoveMedia(key docker.WorkspaceKey, fromRel, toRel string) error
+	DeleteFolder(key docker.WorkspaceKey, rel string) (int, error)
 	// OpenMedia opens one uploaded file for download (reader + display name).
 	OpenMedia(key docker.WorkspaceKey, storedName string) (io.ReadCloser, string, error)
 	// ReadMemory returns the caller's workspace MEMORY_CUSTOM.md (empty if unset).
@@ -228,6 +235,15 @@ type Server struct {
 	// Reg is the model inventory. Handlers read and write it directly; Mgr is
 	// used only to make a change take effect on disk.
 	Reg *registry.Registry
+	// MemoryGraph owns the per-workspace knowledge graphs. It backs both the
+	// read-only /v1/memory-graph* routes and the MCP endpoint the agent uses, so
+	// the interface and the bot read the same bytes.
+	MemoryGraph *memgraph.Store
+
+	// turns tracks which conversation each workspace is mid-turn on, so a
+	// memory-graph write arriving over MCP can be attributed to the chat it came out
+	// of. Built by Handler, shared with the MCP endpoint through Deps.SourceFor.
+	turns *turnRegistry
 }
 
 // turnerFor selects the turn runner for a resolved target's harness.
@@ -256,6 +272,11 @@ func turnModelFor(agent config.Agent, display string) string {
 // Handler returns the routed http.Handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Built here so the chat handler and the MCP endpoint share one instance: the
+	// chat side registers turns, the MCP side reads them.
+	if s.turns == nil {
+		s.turns = newTurnRegistry()
+	}
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/accounts", s.handleAccounts)
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
@@ -268,10 +289,43 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/media", s.handleMediaPost)
 	mux.HandleFunc("GET /v1/media", s.handleMediaList)
 	mux.HandleFunc("DELETE /v1/media", s.handleMediaDelete)
+	// Member-driven organisation of the uploads tree. Same write gate as the upload
+	// itself; the move covers renaming, since a move within one parent IS a rename.
+	mux.HandleFunc("POST /v1/media/folder", s.handleMediaFolderCreate)
+	mux.HandleFunc("DELETE /v1/media/folder", s.handleMediaFolderDelete)
+	mux.HandleFunc("POST /v1/media/move", s.handleMediaMove)
 	mux.HandleFunc("GET /v1/restart", s.handleRestartStatus)
 	mux.HandleFunc("POST /v1/restart", s.handleRestartPost)
 	mux.HandleFunc("GET /v1/memory", s.handleMemoryGet)
 	mux.HandleFunc("PUT /v1/memory", s.handleMemoryPut)
+	// memory-graph-mcp: the knowledge graph. READ ONLY — the bot writes through
+	// /v1/mcp below, and there is deliberately no write route here (FR-6.5).
+	// Distinct paths from /v1/memory on purpose: that is MEMORY_CUSTOM.md, a
+	// different thing, and the two surfaces are not unified.
+	if s.MemoryGraph != nil {
+		mux.HandleFunc("GET /v1/memory-graph", s.handleMemoryGraphGet)
+		mux.HandleFunc("GET /v1/memory-graph/nodes", s.handleMemoryGraphNodes)
+		mux.HandleFunc("GET /v1/memory-graph/search", s.handleMemoryGraphSearch)
+		mux.HandleFunc("GET /v1/memory-graph/recent", s.handleMemoryGraphRecent)
+	}
+	// The native MCP endpoint, mounted ONLY when a signing secret is configured
+	// (FR-4.5). Unlike every other route here it is reachable by any container on
+	// the proxy's network without passing through mycelium, so an unconfigured
+	// deployment must get no endpoint rather than an unauthenticated one.
+	//
+	// No method pattern: the streamable-HTTP transport uses POST, GET and DELETE
+	// (picoclaw's client uses POST and DELETE — measured, context.md E-9), and the
+	// SDK handler routes them itself.
+	if s.MemoryGraph != nil && s.Cfg != nil && s.Cfg.ResolvedMCPTokenSecret != "" {
+		mux.Handle("/v1/mcp", mcpserver.NewHandler(mcpserver.Deps{
+			Store:  s.MemoryGraph,
+			Secret: s.Cfg.ResolvedMCPTokenSecret,
+			Logf:   s.Logf,
+			// Provenance. Passed as a function so mcpserver stays free of any
+			// dependency on this package — same shape as Store.
+			SourceFor: s.turns.Current,
+		}))
+	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
 	// internal/authz. There is deliberately NO users/files/content route and no
 	// user-file write route (FR-7 privacy invariant).
@@ -510,6 +564,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logf("chat: authorized svc=%s tenant=%s subs=%s user=%s stream=%t",
 		agent.Key, tenantID, subsAccID, ident.AccID, req.Stream)
+	// Memory-graph provenance: mark this workspace as mid-turn on this conversation,
+	// so an MCP write during the turn can be attributed to it. Placed here — after
+	// authorization, before either the streaming or the synchronous branch — so one
+	// registration covers both.
+	//
+	// `defer f()()` is deliberate: Begin runs NOW, its returned closure runs on
+	// return. Deferring matters more than it looks — a leaked entry does not merely
+	// lose attribution, it mis-attributes every later write for this workspace to a
+	// conversation that already ended. The RAW session id is recorded, not the
+	// sessionKey hash, because it is what the webapp navigates by.
+	if s.turns != nil {
+		defer s.turns.Begin(scopeOf(key), req.SessionID)()
+	}
 	userContent := lastUserContent(req.Messages)
 	model := req.Model
 	if model == "" {

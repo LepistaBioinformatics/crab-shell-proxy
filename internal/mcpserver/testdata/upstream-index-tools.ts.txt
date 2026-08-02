@@ -1,0 +1,290 @@
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "create_entities",
+        description: "Create new entities in the knowledge graph",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entities: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", description: "Entity identifier" },
+                  entityType: { type: "string", description: "Entity type" },
+                  observations: { 
+                    type: "array", 
+                    items: { type: "string" },
+                    description: "Observations about the entity"
+                  },
+                },
+                required: ["name", "entityType", "observations"],
+              },
+            },
+          },
+          required: ["entities"],
+        },
+      },
+      {
+        name: "create_relations",
+        description: "Create relations between entities (active voice)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            relations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  from: { type: "string", description: "Source entity" },
+                  to: { type: "string", description: "Target entity" },
+                  relationType: { type: "string", description: "Relation type" },
+                },
+                required: ["from", "to", "relationType"],
+              },
+            },
+          },
+          required: ["relations"],
+        },
+      },
+      {
+        name: "add_observations",
+        description: "Add observations to existing entities",
+        inputSchema: {
+          type: "object",
+          properties: {
+            observations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  entityName: { type: "string", description: "Target entity" },
+                  contents: { 
+                    type: "array", 
+                    items: { type: "string" },
+                    description: "New observations"
+                  },
+                  confidence: {
+                    type: "array",
+                    items: { type: "number" },
+                    description: "Confidence scores (0-1) for each observation (optional)"
+                  },
+                },
+                required: ["entityName", "contents"],
+              },
+            },
+          },
+          required: ["observations"],
+        },
+      },
+      {
+        name: "delete_entities",
+        description: "Delete entities and their relations",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entityNames: { 
+              type: "array", 
+              items: { type: "string" },
+              description: "Entity names to delete" 
+            },
+          },
+          required: ["entityNames"],
+        },
+      },
+      {
+        name: "delete_observations",
+        description: "Delete specific observations from entities",
+        inputSchema: {
+          type: "object",
+          properties: {
+            deletions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  entityName: { type: "string" },
+                  observations: { 
+                    type: "array", 
+                    items: { type: "string" }
+                  },
+                },
+                required: ["entityName", "observations"],
+              },
+            },
+          },
+          required: ["deletions"],
+        },
+      },
+      {
+        name: "delete_relations",
+        description: "Delete specific relations",
+        inputSchema: {
+          type: "object",
+          properties: {
+            relations: { 
+              type: "array", 
+              items: {
+                type: "object",
+                properties: {
+                  from: { type: "string" },
+                  to: { type: "string" },
+                  relationType: { type: "string" },
+                },
+                required: ["from", "to", "relationType"],
+              }
+            },
+          },
+          required: ["relations"],
+        },
+      },
+      {
+        name: "read_graph",
+        description: "Read graph with controllable detail. Default returns summary with entity names, types, and first observation only.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            detailLevel: { 
+              type: "string", 
+              enum: ["minimal", "summary", "full"],
+              description: "Level of detail: minimal (names+counts), summary (default, includes first observation), full (everything)",
+              default: "summary"
+            },
+            entityNames: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional: Get full details for specific entities only"
+            },
+            includeArchived: {
+              type: "boolean",
+              description: "Include archived entities (default false)",
+              default: false
+            },
+            includeMerged: {
+              type: "boolean",
+              description: "Include merged entities (default false)",
+              default: false
+            }
+          },
+        },
+      },
+      {
+        name: "get_entity_details",
+        description: "Get complete details including all observations for specific entities",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entityNames: {
+              type: "array",
+              items: { type: "string" },
+              description: "Entity names to get full details for"
+            }
+          },
+          required: ["entityNames"],
+        },
+      },
+      {
+        name: "search_nodes",
+        description: "Search for entities strictly matching a query",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Search query" },
+            maxObservations: { 
+              type: "number", 
+              description: "Max observations per entity (default 5)",
+              default: 5
+            }
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "semantic_search",
+        description: "Advanced semantic search using ModernColBERT embeddings (recommended!). Understands meaning and context, not just keywords. Returns entities with highest semantic similarity to the query.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Natural language search query" },
+            k: { 
+              type: "number", 
+              description: "Number of results to return (default 10)",
+              default: 10
+            },
+            threshold: {
+              type: "number",
+              description: "Minimum similarity score (0-1, default 0)",
+              default: 0
+            }
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "open_nodes",
+        description: "Open specific nodes by name with full details",
+        inputSchema: {
+          type: "object",
+          properties: {
+            names: {
+              type: "array",
+              items: { type: "string" },
+              description: "Entity names to retrieve",
+            },
+          },
+          required: ["names"],
+        },
+      },
+      {
+        name: "merge_entities",
+        description: "Merge one entity into another, combining observations and updating relations",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sourceName: { type: "string", description: "Entity to merge from (will be deleted)" },
+            targetName: { type: "string", description: "Entity to merge into (will be preserved)" },
+          },
+          required: ["sourceName", "targetName"],
+        },
+      },
+      {
+        name: "archive_entity",
+        description: "Archive an entity (soft delete - hidden from normal queries)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entityName: { type: "string", description: "Entity to archive" },
+          },
+          required: ["entityName"],
+        },
+      },
+      {
+        name: "unarchive_entity",
+        description: "Unarchive a previously archived entity",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entityName: { type: "string", description: "Entity to unarchive" },
+          },
+          required: ["entityName"],
+        },
+      },
+      {
+        name: "get_recent_changes",
+        description: "Get entities, relations, and observations created/modified within specified hours",
+        inputSchema: {
+          type: "object",
+          properties: {
+            hours: { 
+              type: "number", 
+              description: "Number of hours to look back (default 24)",
+              default: 24
+            },
+          },
+        },
+      },
+    ],
+  };
+});

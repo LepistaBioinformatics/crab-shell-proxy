@@ -19,6 +19,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/hermes"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/pico"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -61,6 +62,20 @@ func main() {
 		Hermes:   &hermes.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Logf:     logger.Printf,
 		Reg:      reg,
+		// The knowledge-graph memory. Rooted at the CONTAINER data root because this
+		// process reads and writes the files itself; the host root is only ever a
+		// bind-mount source handed to the Docker daemon.
+		//
+		// Always constructed, even with no signing secret: the read-only
+		// /v1/memory-graph routes work for a graph that already exists, while the MCP
+		// endpoint the agent writes through is mounted only when the secret is set
+		// (see Handler). So turning the secret off stops new memories being written
+		// without hiding what a member already has.
+		MemoryGraph: memgraph.NewStore(cfg.ContainerDataRoot, time.Now),
+	}
+	if cfg.ResolvedMCPTokenSecret == "" {
+		logger.Printf("memory graph: CRAB_MCP_TOKEN_SECRET is unset — " +
+			"the native MCP endpoint is NOT mounted and no agent will be given memory")
 	}
 
 	// The model-inventory migration runs SYNCHRONOUSLY, before the server listens.

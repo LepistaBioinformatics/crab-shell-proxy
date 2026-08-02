@@ -16,10 +16,46 @@ import (
 const (
 	managedSkillRel  = "skills/shared-content"
 	managedMemoryRel = "memory/CONTEXT_RECOVERY.md"
+	// managedRoutingRel tells the agent WHICH memory to write to — the knowledge
+	// graph for facts, MEMORY.md for its own notes — and forbids claiming a save it
+	// did not make.
+	//
+	// A managed MEMORY file rather than a skill, deliberately. Skills are loaded by
+	// relevance: the agent has to decide to look for one, so a rule that must apply on
+	// every turn would only be found when the agent was already thinking about memory
+	// — the moment it least needs the reminder. Same reason the memory-graph tools are
+	// not registered `deferred`. picoclaw reads the memory dir every turn.
+	//
+	// Observed, not assumed: the tools were available for two turns and the model used
+	// `append_file` on MEMORY.md instead, then told the user it had also written to the
+	// graph. It only used the graph after an instruction naming the tools.
+	managedRoutingRel = "memory/MEMORY_ROUTING.md"
 )
 
 //go:embed managed
 var managedFS embed.FS
+
+// managedContentBinds are the read-only bind specs for the operator-managed content, in
+// a stable order.
+//
+// A pure function of the two paths and one flag, so it is testable without a container
+// and without root: the TestCreate* family cannot run here (chown needs privileges),
+// which is exactly why the mount list is built somewhere a test can reach it.
+//
+// The routing note is included ONLY when the memory graph is switched on. With no
+// CRAB_MCP_TOKEN_SECRET the agent has no mcp_memory_* tools at all, and a file
+// instructing it to prefer them would be actively wrong — worse than silent.
+func managedContentBinds(managedBase, mountDest string, memoryGraphEnabled bool) []string {
+	rels := []string{managedSkillRel, managedMemoryRel}
+	if memoryGraphEnabled {
+		rels = append(rels, managedRoutingRel)
+	}
+	out := make([]string, 0, len(rels))
+	for _, rel := range rels {
+		out = append(out, filepath.Join(managedBase, rel)+":"+mountDest+"/workspace/"+rel+":ro")
+	}
+	return out
+}
 
 // materializeManagedContent writes the embedded managed tree into dst (the
 // container-side ManagedSkillsDir), overwriting any prior copy so the canonical
