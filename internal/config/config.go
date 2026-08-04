@@ -501,6 +501,15 @@ func SessionsDir(root, tenantID, subsAccID, role, userAccID string) string {
 		"workspace", "sessions")
 }
 
+// CronFile is the path to a user's picoclaw scheduled-job store (used by
+// /v1/cron/tasks), under UserWorkspace/workspace/cron/jobs.json. picoclaw owns
+// the file; the proxy only reads it. It is absent until the agent creates its
+// first task, which is a normal state, not an error.
+func CronFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		"workspace", "cron", "jobs.json")
+}
+
 // UploadsDir is where user-uploaded media lands, inside the agent-readable
 // workspace (UserWorkspace/workspace/uploads) so a vision model / reader skill
 // can open it by the returned "uploads/<file>" path.
