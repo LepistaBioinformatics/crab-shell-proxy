@@ -52,6 +52,11 @@ type metaFile struct {
 // in a transcript, never silently stop the conversation from being captured.
 const cronSessionPrefix = "agent:cron-"
 
+// chatMarkerPrefix is what picoclaw prepends to our session key in scope.values.chat.
+// Named once so the reader that BUILDS the marker and the one that strips it back off
+// cannot disagree.
+const chatMarkerPrefix = "direct:pico:"
+
 // jsonlEntry is one line of a picoclaw session transcript.
 type jsonlEntry struct {
 	Role      string `json:"role"`
@@ -277,7 +282,7 @@ func FindSessionFile(sessionsDir, sessionKey string) string {
 // and the user's real one was never read at all. Filtering by session kind and
 // ordering by mtime is what makes "the conversation's current file" mean that.
 func findSessionFiles(sessionsDir, sessionKey string) []string {
-	marker := "direct:pico:" + sessionKey
+	marker := chatMarkerPrefix + sessionKey
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return nil // no sessions dir yet — no conversations at all

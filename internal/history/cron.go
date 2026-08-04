@@ -35,6 +35,13 @@ type CronRun struct {
 	JobID    string `json:"jobId"`
 	RunID    string `json:"runId"`
 	Basename string `json:"basename"`
+	// SessionKey is the conversation the run belongs to — the chat that owned the task
+	// when it was scheduled. picoclaw stamps each run's meta with that chat's marker
+	// ("direct:pico:<sessionKey>"), which is the ONLY link from unattended work back to
+	// a conversation; without it a run cannot be placed on a timeline. Empty when the
+	// marker is missing or shaped unexpectedly, which callers must treat as "no
+	// conversation" rather than guessing one.
+	SessionKey string `json:"sessionKey"`
 	// StartedAt and UpdatedAt are the meta's own timestamps: when picoclaw opened
 	// the run's session and when it last wrote to it. There is no recorded
 	// per-run outcome, so callers must not present one.
@@ -118,6 +125,7 @@ func CronRuns(sessionsDir string) ([]CronRun, error) {
 			JobID:             jobID,
 			RunID:             runID,
 			Basename:          basename,
+			SessionKey:        strings.TrimPrefix(meta.Scope.Values.Chat, chatMarkerPrefix),
 			StartedAt:         meta.CreatedAt,
 			UpdatedAt:         meta.UpdatedAt,
 			Count:             meta.Count,

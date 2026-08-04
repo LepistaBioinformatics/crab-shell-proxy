@@ -88,6 +88,30 @@ func TestCronRunsSplitsJobAndRun(t *testing.T) {
 	if newest.TranscriptMissing {
 		t.Error("TranscriptMissing = true, but the .jsonl exists")
 	}
+	// The only link from unattended work back to a conversation. Without it a run
+	// cannot be placed on a timeline beside the chat that scheduled it.
+	if newest.SessionKey != chat {
+		t.Errorf("SessionKey = %q, want the originating chat %q", newest.SessionKey, chat)
+	}
+}
+
+// A meta whose marker is missing or shaped unexpectedly must report NO conversation
+// rather than a guessed one — a run attributed to the wrong chat is worse than a run
+// attributed to none.
+func TestCronRunsWithoutAChatMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "agent_cron-abc123def456abcd-run1.meta.json",
+		`{"key":"agent:cron-abc123def456abcd-run1","count":1,"created_at":"t","updated_at":"t"}`)
+	runs, err := CronRuns(dir)
+	if err != nil {
+		t.Fatalf("CronRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("len(runs) = %d, want the row to survive a missing marker", len(runs))
+	}
+	if runs[0].SessionKey != "" {
+		t.Errorf("SessionKey = %q, want empty", runs[0].SessionKey)
+	}
 }
 
 // A one-shot job removes itself from the store but leaves its transcript, and a
