@@ -294,6 +294,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/media/folder", s.handleMediaFolderCreate)
 	mux.HandleFunc("DELETE /v1/media/folder", s.handleMediaFolderDelete)
 	mux.HandleFunc("POST /v1/media/move", s.handleMediaMove)
+	// Scheduled tasks are picoclaw's; these routes only read its store and the
+	// per-run transcripts it leaves in the sessions dir.
+	mux.HandleFunc("GET /v1/cron/tasks", s.handleCronTasks)
+	mux.HandleFunc("GET /v1/cron/runs", s.handleCronRun)
 	mux.HandleFunc("GET /v1/restart", s.handleRestartStatus)
 	mux.HandleFunc("POST /v1/restart", s.handleRestartPost)
 	mux.HandleFunc("GET /v1/memory", s.handleMemoryGet)

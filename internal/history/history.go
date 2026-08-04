@@ -52,6 +52,11 @@ type metaFile struct {
 // in a transcript, never silently stop the conversation from being captured.
 const cronSessionPrefix = "agent:cron-"
 
+// chatMarkerPrefix is what picoclaw prepends to our session key in scope.values.chat.
+// Named once so the reader that BUILDS the marker and the one that strips it back off
+// cannot disagree.
+const chatMarkerPrefix = "direct:pico:"
+
 // jsonlEntry is one line of a picoclaw session transcript.
 type jsonlEntry struct {
 	Role      string `json:"role"`
@@ -192,6 +197,19 @@ const maxLineBytes = 8 * 1024 * 1024
 // bounded because an oversized line is discarded as it is consumed, never
 // assembled. A missing file yields no lines and no error.
 func eachLine(path string, fn func(line string)) error {
+	return eachLineUntil(path, func(line string) bool {
+		fn(line)
+		return true
+	})
+}
+
+// eachLineUntil is eachLine with an early exit: fn returns false to stop reading.
+//
+// It exists so a caller that wants only the FIRST line does not need its own reader.
+// The obvious bufio.Scanner version is exactly what the comment above forbids, and it
+// fails the same way — Scan() gives up on an oversized line, which for a first-line
+// read means silently reporting no content at all.
+func eachLineUntil(path string, fn func(line string) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -216,7 +234,9 @@ func eachLine(path string, fn func(line string)) error {
 		}
 		if !oversized {
 			if line := strings.TrimSpace(string(buf)); line != "" {
-				fn(line)
+				if !fn(line) {
+					return nil
+				}
 			}
 		}
 		buf, oversized = buf[:0], false
@@ -262,7 +282,7 @@ func FindSessionFile(sessionsDir, sessionKey string) string {
 // and the user's real one was never read at all. Filtering by session kind and
 // ordering by mtime is what makes "the conversation's current file" mean that.
 func findSessionFiles(sessionsDir, sessionKey string) []string {
-	marker := "direct:pico:" + sessionKey
+	marker := chatMarkerPrefix + sessionKey
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return nil // no sessions dir yet — no conversations at all
