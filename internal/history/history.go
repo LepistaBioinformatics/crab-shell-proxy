@@ -14,11 +14,25 @@ import (
 	"time"
 )
 
+// KindStep marks a message that is the agent narrating a step of its work — a
+// frame that also carried a tool call — rather than answering. The live stream
+// already separates these (pico.processor skips tool_calls/thought frames from
+// content and re-emits them as progress); without this the transcript served on
+// reload turned every one of them back into an ordinary assistant message, which
+// is two thirds of what a conversation renders.
+const KindStep = "step"
+
 // Message is one conversational turn returned to the client.
 type Message struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
+	// Kind is KindStep on narration and empty on a plain answer.
+	Kind string `json:"kind,omitempty"`
+	// Reasoning is the model's own chain of thought (picoclaw's
+	// reasoning_content), when it emitted one. Kept separate from Content so the
+	// client can keep it out of the way; it was previously discarded here.
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // metaFile mirrors the subset of a *.meta.json we match on. picoclaw derives
@@ -62,6 +76,14 @@ type jsonlEntry struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
+	// Only the PRESENCE of tool calls is read — it is what separates the agent
+	// narrating a step from the agent answering. The calls themselves are
+	// picoclaw's business, so they stay raw and unparsed.
+	ToolCalls []json.RawMessage `json:"tool_calls"`
+	// The model's chain of thought, when the provider returns one. Frequently the
+	// only content of an entry: over half the entries carrying it have an empty
+	// Content, and those used to be dropped whole.
+	ReasoningContent string `json:"reasoning_content"`
 }
 
 // durableDir is the subdirectory (under a session's sessions/ dir) holding the
@@ -338,12 +360,67 @@ func readMessages(sessionsDir, basename string) ([]Message, error) {
 		// Only plain conversational turns — picoclaw also logs "tool" entries
 		// inline, which the live stream already discards. History should match
 		// what the user actually saw.
-		if (e.Role == "user" || e.Role == "assistant") && e.Content != "" {
-			messages = append(messages, Message{Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt})
+		if e.Role != "user" && e.Role != "assistant" {
+			return
 		}
+		// TrimSpace, not `!= ""`: an entry whose content is nothing but
+		// whitespace is as empty as one with none, and the client renders a
+		// padded band per message with only the content conditional.
+		reasoning := strings.TrimSpace(e.ReasoningContent)
+		if strings.TrimSpace(e.Content) == "" && reasoning == "" {
+			return
+		}
+		m := Message{Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt, Reasoning: reasoning}
+		if e.Role == "assistant" && len(e.ToolCalls) > 0 {
+			m.Kind = KindStep
+		}
+		messages = append(messages, m)
 	})
 	if err != nil {
 		return messages, err
 	}
+	keepAnswerlessTurns(messages)
 	return messages, nil
+}
+
+// keepAnswerlessTurns un-marks narration in any turn that has no plain answer
+// left to show.
+//
+// Demoting every tool-call frame is not safe: a model may deliver its whole reply
+// in the same frame as a trailing call. Measured against this deployment's own
+// transcripts, 7 of 112 turns did exactly that, and hiding their narration would
+// have blanked the turn entirely. So the demotion holds only while the turn still
+// has a plain assistant message with text; otherwise its narration IS the answer.
+// See crab-exoskeleton-webapp/.specs/features/thinking-vs-answer-messages/spec.md.
+func keepAnswerlessTurns(messages []Message) {
+	// A message that would actually render as an answer on its own.
+	speaks := func(m Message) bool {
+		return m.Role == "assistant" && strings.TrimSpace(m.Content) != ""
+	}
+	flush := func(turn []Message) {
+		for _, m := range turn {
+			if m.Kind == "" && speaks(m) {
+				return // the turn has a real answer; its narration stays narration
+			}
+		}
+		for i := range turn {
+			if speaks(turn[i]) {
+				turn[i].Kind = ""
+			}
+		}
+	}
+	// Turns are the spans between user messages.
+	start := 0
+	for i, m := range messages {
+		if m.Role != "user" {
+			continue
+		}
+		if i > start {
+			flush(messages[start:i])
+		}
+		start = i
+	}
+	if start < len(messages) {
+		flush(messages[start:])
+	}
 }
