@@ -15,6 +15,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
@@ -31,6 +32,8 @@ const (
 )
 
 type fakeOrch struct {
+	projects   []projects.Project
+	projectErr error
 	ensureErr  error
 	armed      int
 	scaffolded map[string]bool
@@ -245,12 +248,12 @@ func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
 	return f.restarts_().Stamp(key.TenantID, key.SubsAccID, key.Role, key.UserAccID, time.Now().UTC())
 }
 
-func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error) {
+func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, _, rawName string, r io.Reader) (docker.StoredMedia, error) {
 	n, _ := io.Copy(io.Discard, r)
 	return docker.StoredMedia{Path: "uploads/test-" + rawName, Name: rawName, Size: n}, nil
 }
 
-func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error) {
+func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, _, rawName string, r io.Reader) (docker.StoredMedia, error) {
 	n, _ := io.Copy(io.Discard, r)
 	f.attachmentWrites = append(f.attachmentWrites, rawName)
 	return docker.StoredMedia{
@@ -258,41 +261,41 @@ func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, rawName string, r
 	}, nil
 }
 
-func (f *fakeOrch) ListMedia(docker.WorkspaceKey) ([]docker.StoredMedia, error) {
+func (f *fakeOrch) ListMedia(docker.WorkspaceKey, string) ([]docker.StoredMedia, error) {
 	return nil, nil
 }
 
-func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string) error {
+func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string, string) error {
 	return nil
 }
 
 // Folder operations record what they were asked to do, so a handler test can assert
 // the path actually forwarded rather than only the status code — the mediaRelPath
 // stripping is exactly the kind of thing a status assertion would miss.
-func (f *fakeOrch) CreateFolder(_ docker.WorkspaceKey, rel string) error {
+func (f *fakeOrch) CreateFolder(_ docker.WorkspaceKey, _, rel string) error {
 	f.folderCreated = append(f.folderCreated, rel)
 	return f.folderErr
 }
 
-func (f *fakeOrch) MoveMedia(_ docker.WorkspaceKey, fromRel, toRel string) error {
+func (f *fakeOrch) MoveMedia(_ docker.WorkspaceKey, _, fromRel, toRel string) error {
 	f.moved = append(f.moved, fromRel+" -> "+toRel)
 	return f.folderErr
 }
 
-func (f *fakeOrch) DeleteFolder(_ docker.WorkspaceKey, rel string) (int, error) {
+func (f *fakeOrch) DeleteFolder(_ docker.WorkspaceKey, _, rel string) (int, error) {
 	f.folderDeleted = append(f.folderDeleted, rel)
 	return f.removedFiles, f.folderErr
 }
 
-func (f *fakeOrch) OpenMedia(docker.WorkspaceKey, string) (io.ReadCloser, string, error) {
+func (f *fakeOrch) OpenMedia(docker.WorkspaceKey, string, string) (io.ReadCloser, string, error) {
 	return io.NopCloser(strings.NewReader("data")), "file.txt", nil
 }
 
-func (f *fakeOrch) ReadMemory(docker.WorkspaceKey) (string, error) {
+func (f *fakeOrch) ReadMemory(docker.WorkspaceKey, string) (string, error) {
 	return f.memory, nil
 }
 
-func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, content string) error {
+func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, _, content string) error {
 	f.memory = content
 	return nil
 }
@@ -429,11 +432,11 @@ func (f *fakeOrch) ListSubscriptionUsers(_, _ string) ([]docker.UserRef, error) 
 	return f.users, nil
 }
 
-func (f *fakeOrch) ListUserFiles(docker.WorkspaceKey) ([]docker.FileMeta, error) {
+func (f *fakeOrch) ListUserFiles(docker.WorkspaceKey, string) ([]docker.FileMeta, error) {
 	return f.userFiles, nil
 }
 
-func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _ string) error {
+func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _, _ string) error {
 	f.userFileDeletes = append(f.userFileDeletes, key)
 	return nil
 }
@@ -1244,4 +1247,72 @@ func TestHealthzUnauthenticated(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
 	}
+}
+
+// --- projects (agent-projects) ---
+//
+// Backed by a plain slice: these tests exercise the HTTP layer's authorization,
+// status codes and parameter handling, not the store, which has its own tests in
+// internal/projects.
+
+func (f *fakeOrch) ListProjects(docker.WorkspaceKey) ([]projects.Project, error) {
+	return f.projects, f.projectErr
+}
+
+func (f *fakeOrch) CreateProject(_ docker.WorkspaceKey, name, instructions string) (projects.Project, error) {
+	if f.projectErr != nil {
+		return projects.Project{}, f.projectErr
+	}
+	p := projects.Project{ID: "p" + name, Name: name, Instructions: instructions}
+	f.projects = append(f.projects, p)
+	return p, nil
+}
+
+func (f *fakeOrch) RenameProject(_ docker.WorkspaceKey, id, name string) (projects.Project, error) {
+	return f.mutateProject(id, func(p *projects.Project) { p.Name = name })
+}
+
+func (f *fakeOrch) SetProjectInstructions(_ docker.WorkspaceKey, id, instructions string) (projects.Project, error) {
+	return f.mutateProject(id, func(p *projects.Project) { p.Instructions = instructions })
+}
+
+func (f *fakeOrch) mutateProject(id string, apply func(*projects.Project)) (projects.Project, error) {
+	if f.projectErr != nil {
+		return projects.Project{}, f.projectErr
+	}
+	for i := range f.projects {
+		if f.projects[i].ID == id {
+			apply(&f.projects[i])
+			return f.projects[i], nil
+		}
+	}
+	return projects.Project{}, projects.ErrNotFound
+}
+
+func (f *fakeOrch) DeleteProject(_ docker.WorkspaceKey, id string) error {
+	if f.projectErr != nil {
+		return f.projectErr
+	}
+	for i := range f.projects {
+		if f.projects[i].ID == id {
+			f.projects = append(f.projects[:i], f.projects[i+1:]...)
+			return nil
+		}
+	}
+	return projects.ErrNotFound
+}
+
+func (f *fakeOrch) HasProject(_ docker.WorkspaceKey, id string) (bool, error) {
+	if id == "" {
+		return true, nil
+	}
+	if f.projectErr != nil {
+		return false, f.projectErr
+	}
+	for _, p := range f.projects {
+		if p.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }

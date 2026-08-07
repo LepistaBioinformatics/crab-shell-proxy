@@ -262,6 +262,14 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 			// first-ever seed — see applyMCPServer's own comment.
 			err = m.applyMemoryGraphMCP(key, userDir)
 		}
+		if err == nil {
+			// AFTER syncEffectivePersona (it reads the resolved identity files) and
+			// after materialization (which projects the matching agents.list). The
+			// workspaces must exist and be chowned before the container starts, or
+			// picoclaw creates them itself as root and the non-root agent cannot
+			// write its own project.
+			err = m.syncProjectWorkspaces(key, userDir)
+		}
 	}
 	if err != nil {
 		return Target{}, err
@@ -299,9 +307,15 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	// Hermes is excluded because createHermes emits no persona binds at all: for a
 	// hermes workspace with an injection, expected could never be satisfied and the
 	// container would be recreated on every single request.
+	// The project .secrets mounts drift for the same structural reason as the
+	// persona ones: a project created after this container was built has no mount
+	// for its workspace, so its agent runs with no credentials at all. That
+	// presents as the model or the tools failing, never as a missing bind, so it
+	// has to be caught here rather than diagnosed later.
 	case agent.Harness != config.HarnessHermes &&
-		personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds):
-		m.logf("container %s: persona mounts stale, recreating (identity changes cannot reach it otherwise)", name)
+		(personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds) ||
+			m.projectBindDriftFor(key, st.Binds)):
+		m.logf("container %s: persona or project mounts stale, recreating (identity and project changes cannot reach it otherwise)", name)
 		if st.Running {
 			if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
 				return Target{}, err
@@ -391,7 +405,15 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		return err
 	}
 	effHost := config.EffectiveSecretsDir(m.cfg.HostDataRoot, key.UserAccID, key.Role)
-	secretsMount := effHost + ":" + mountDest + "/workspace/.secrets:ro"
+	secretsMount := effHost + ":" + mountDest + "/" + config.MainWorkspace + "/.secrets:ro"
+	// One more .secrets mount per project, same source. A project inherits its
+	// parent's credentials, and restrict_to_workspace means the parent's mount is
+	// unreachable from a project's own workspace.
+	projectList, err := m.projectStore(key).List()
+	if err != nil {
+		return fmt.Errorf("read projects: %w", err)
+	}
+	projectSecrets := projectSecretsBinds(effHost, mountDest, projectList)
 	// Cascade the tenant- and subscription-scope shared files READ-ONLY into the
 	// workspace (FR-4/NFR-3). Ensure the container-side dirs exist and are
 	// readable by the non-root agent, mirroring the secret store above, so the
@@ -454,7 +476,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 		// empty directory at the destination (personaBinds).
 		Binds: append(
 			append([]string{hostDir + ":" + mountDest, secretsMount},
-				append(append(sharedMounts, managedMounts...), skillsMount)...),
+				append(append(append(sharedMounts, managedMounts...), skillsMount), projectSecrets...)...),
 			personaBindStrings(m.cfg, key, mountDest)...),
 		Network: m.cfg.Network,
 		Init:    true,

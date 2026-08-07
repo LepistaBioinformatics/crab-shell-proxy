@@ -60,7 +60,7 @@ func runStream(t *testing.T, tr Turner) []map[string]any {
 	s.streamTurn(rec, req,
 		config.Agent{Key: "alpha", Harness: config.HarnessPicoclaw},
 		docker.WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "alpha", UserAccID: "u"},
-		"owner@example.com", "sess", "hello", "picoclaw", "chatcmpl-test")
+		"owner@example.com", "sess", "hello", "picoclaw", "chatcmpl-test", "")
 	return frames(t, rec.Body.String())
 }
 

@@ -196,7 +196,7 @@ func TestLayoutBuilders(t *testing.T) {
 		"/data/tenants/t1/subscriptions/s1/agents/alpha/users/u1"; got != want {
 		t.Errorf("UserWorkspace = %q, want %q", got, want)
 	}
-	if got, want := SessionsDir(root, "t1", "s1", "alpha", "u1"),
+	if got, want := SessionsDir(root, "t1", "s1", "alpha", "u1", MainWorkspace),
 		"/data/tenants/t1/subscriptions/s1/agents/alpha/users/u1/workspace/sessions"; got != want {
 		t.Errorf("SessionsDir = %q, want %q", got, want)
 	}

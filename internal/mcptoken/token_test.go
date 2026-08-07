@@ -192,8 +192,9 @@ func TestVerifyChecksTheMACBeforeTrustingThePayloadShape(t *testing.T) {
 	for _, payload := range []string{
 		"only-one-field",
 		"t1/s1/alpha",             // three
-		"t1/s1/alpha/u1/extra",    // five
+		"t1/s1/alpha/u1/p1/extra", // six — five is now the project shape
 		"t1//alpha/u1",            // right count, empty field
+		"t1/s1/alpha/u1/",         // project shape with an empty project
 		strings.Repeat("a/", 100), // absurd
 	} {
 		tok := b64(payload) + "." + b64(mac(secret, payload))
@@ -248,4 +249,69 @@ func TestPackageComparesTheMACInConstantTime(t *testing.T) {
 	if strings.Contains(text, "bytes.Equal(") {
 		t.Error("token.go uses bytes.Equal; use hmac.Equal for the MAC")
 	}
+}
+
+// A five-field payload is the agent-projects shape: same four scope fields plus
+// the project. It has to round-trip, and a project-less token has to stay
+// BYTE-IDENTICAL to what was minted before the field existed — that is what
+// keeps tokens already sitting in running containers verifying.
+func TestMintCarriesTheProjectAndStaysCompatibleWithout(t *testing.T) {
+	t.Parallel()
+	base := memgraph.Scope{TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1"}
+
+	plain, err := Mint(secret, base)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if payload, _ := decodePayloadForTest(plain); payload != "t1/s1/alpha/u1" {
+		t.Errorf("project-less payload = %q, want the pre-feature four-field form", payload)
+	}
+	if got, ok := Verify(secret, plain); !ok || got.Project != "" {
+		t.Errorf("Verify(project-less) = %+v, ok=%v", got, ok)
+	}
+
+	scoped := base
+	scoped.Project = "seedtrial"
+	tok, err := Mint(secret, scoped)
+	if err != nil {
+		t.Fatalf("Mint(project): %v", err)
+	}
+	got, ok := Verify(secret, tok)
+	if !ok {
+		t.Fatal("Verify refused a project token")
+	}
+	if got != scoped {
+		t.Errorf("round trip = %+v, want %+v", got, scoped)
+	}
+
+	// The two must not collide: a project token and a project-less one for the
+	// same workspace address different graphs.
+	if tok == plain {
+		t.Error("project and project-less tokens are identical")
+	}
+}
+
+// A project containing the delimiter is refused rather than silently splitting
+// into extra fields — the same rule the other scope fields already carry.
+func TestMintRejectsProjectContainingDelimiter(t *testing.T) {
+	t.Parallel()
+	sc := memgraph.Scope{
+		TenantID: "t1", SubsAccID: "s1", Role: "alpha", UserAccID: "u1",
+		Project: "seed/trial",
+	}
+	if _, err := Mint(secret, sc); !errors.Is(err, ErrInvalidScope) {
+		t.Errorf("Mint error = %v, want ErrInvalidScope", err)
+	}
+}
+
+func decodePayloadForTest(token string) (string, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return "", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", false
+	}
+	return string(raw), true
 }

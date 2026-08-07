@@ -78,9 +78,9 @@ func isInsideReserved(rel string) bool {
 
 // uploadsDir is the member's uploads root. The five-argument call is repeated all
 // over media.go; naming it once here keeps the three operations below readable.
-func (m *Manager) uploadsDir(key WorkspaceKey) string {
+func (m *Manager) uploadsDir(key WorkspaceKey, project string) string {
 	return config.UploadsDir(m.cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
 }
 
 // resolveNewWithin validates rel and returns the absolute path it WOULD have, proving
@@ -142,14 +142,14 @@ func resolveNewWithin(root, rel string) (string, error) {
 // Idempotent: an existing folder is success, not a conflict. A member clicking "new
 // folder" twice, or two tabs racing, should not produce an error about something that
 // is already true.
-func (m *Manager) CreateFolder(key WorkspaceKey, rel string) error {
+func (m *Manager) CreateFolder(key WorkspaceKey, project string, rel string) error {
 	// The system's own folder cannot be created by a member: it already exists (or the
 	// proxy makes it on the next delivery), and a member-made one by that name would
 	// collide with it.
 	if isReservedFolder(rel) || isInsideReserved(rel) {
 		return ErrMediaReserved
 	}
-	root := m.uploadsDir(key)
+	root := m.uploadsDir(key, project)
 	target, err := resolveNewWithin(root, rel)
 	if err != nil {
 		return err
@@ -171,7 +171,7 @@ func (m *Manager) CreateFolder(key WorkspaceKey, rel string) error {
 // MoveMedia moves a file or a folder to a new path inside the uploads tree. A move
 // within the same parent is a rename — deliberately not a separate operation, because
 // it is the same filesystem call with the same three failure modes.
-func (m *Manager) MoveMedia(key WorkspaceKey, fromRel, toRel string) error {
+func (m *Manager) MoveMedia(key WorkspaceKey, project string, fromRel, toRel string) error {
 	// Renaming or moving the system folder detaches every future agent delivery from
 	// the place the proxy writes them. Moving INTO it is refused for the mirror
 	// reason: the agent treats everything there as its own output.
@@ -179,7 +179,7 @@ func (m *Manager) MoveMedia(key WorkspaceKey, fromRel, toRel string) error {
 		isInsideReserved(fromRel) || isInsideReserved(toRel) {
 		return ErrMediaReserved
 	}
-	root := m.uploadsDir(key)
+	root := m.uploadsDir(key, project)
 
 	from, err := resolveWithin(root, fromRel)
 	if err != nil {
@@ -221,11 +221,11 @@ func (m *Manager) MoveMedia(key WorkspaceKey, fromRel, toRel string) error {
 // count is returned so the interface can name it in a confirmation — the member is
 // told "12 files" before the click, not after. The uploads root itself is refused
 // outright; it is not the member's to delete.
-func (m *Manager) DeleteFolder(key WorkspaceKey, rel string) (int, error) {
+func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (int, error) {
 	if isReservedFolder(rel) {
 		return 0, ErrMediaReserved
 	}
-	root := m.uploadsDir(key)
+	root := m.uploadsDir(key, project)
 	target, err := resolveWithin(root, rel)
 	if err != nil {
 		return 0, err
@@ -262,4 +262,18 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, rel string) (int, error) {
 		return 0, fmt.Errorf("delete folder: %w", err)
 	}
 	return files, nil
+}
+
+// workspaceSegment maps a project id onto the workspace directory that holds its
+// files, memory and scheduled jobs. Empty means the agent's own workspace.
+//
+// Every surface that reads or writes user content goes through this. The proxy
+// used to hardcode the main workspace, which inside a project was not "shared"
+// but WRONG: the project's agent writes into workspace-<id>/, so an upload made
+// from a project landed somewhere its own agent could not see.
+func workspaceSegment(project string) string {
+	if project == "" {
+		return config.MainWorkspace
+	}
+	return config.ProjectWorkspace(project)
 }

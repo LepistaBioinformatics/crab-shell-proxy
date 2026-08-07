@@ -7,8 +7,17 @@ import (
 	"path/filepath"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
+
+// projectList is what materializeModels needs to project agents.list and
+// agents.dispatch. Passed in rather than read inside, so the pure config
+// rewriting stays testable without a store on disk.
+type projectList struct {
+	Home     string
+	Projects []projects.Project
+}
 
 // materializeModels writes a resolved model set into one workspace. It replaces
 // applyModel's model handling and is the ONLY writer of a workspace's model
@@ -28,7 +37,7 @@ import (
 // .security.yml with old ∪ new keys, then config.json, then .security.yml pruned
 // to the new set — and every intermediate state names a model whose key is
 // present.
-func materializeModels(configPath, secPath string, res registry.Resolution) error {
+func materializeModels(configPath, secPath string, res registry.Resolution, projs projectList) error {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		return fmt.Errorf("read config.json: %w", err)
@@ -72,6 +81,12 @@ func materializeModels(configPath, secPath string, res registry.Resolution) erro
 		// may have had fallbacks and no longer does.
 		delete(defaults, "model_fallbacks")
 	}
+
+	// Projects ride along in THIS read-modify-write, not in a write of their own.
+	// This function rewrites config.json wholesale, so a separately-written
+	// agents.list would survive exactly until the user's next chat and then
+	// vanish — the project would stop routing with no error anywhere.
+	projectAgents(cfg, projs.Home, projs.Projects)
 
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -201,7 +216,18 @@ func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error 
 
 	configPath := filepath.Join(userDir, "config.json")
 	secPath := filepath.Join(userDir, ".security.yml")
-	if err := materializeModels(configPath, secPath, res); err != nil {
+
+	// Re-derived on EVERY ensure, from the store rather than from whatever
+	// config.json currently says. That is what makes a project's routing
+	// self-healing: an operator repairing the file by hand, a restored backup, or
+	// this very function rewriting the config cannot leave the rules behind.
+	list, err := m.projectStore(key).List()
+	if err != nil {
+		return fmt.Errorf("read projects: %w", err)
+	}
+
+	if err := materializeModels(configPath, secPath, res,
+		projectList{Home: m.cfg.PicoclawHome, Projects: list}); err != nil {
 		return err
 	}
 

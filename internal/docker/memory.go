@@ -18,22 +18,22 @@ const MemoryFileName = "MEMORY_CUSTOM.md"
 // MemoryDirName is the workspace subdir holding the agent's memory files.
 const MemoryDirName = "memory"
 
-func (m *Manager) memoryDir(key WorkspaceKey) string {
+func (m *Manager) memoryDir(key WorkspaceKey, project string) string {
 	return filepath.Join(
 		config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
-		"workspace", MemoryDirName,
+		workspaceSegment(project), MemoryDirName,
 	)
 }
 
-func (m *Manager) memoryPath(key WorkspaceKey) string {
-	return filepath.Join(m.memoryDir(key), MemoryFileName)
+func (m *Manager) memoryPath(key WorkspaceKey, project string) string {
+	return filepath.Join(m.memoryDir(key, project), MemoryFileName)
 }
 
 // ReadMemory returns the current MEMORY_CUSTOM.md contents for the caller's
 // workspace. An absent file is an empty document (not an error) -- the editor
 // simply opens blank.
-func (m *Manager) ReadMemory(key WorkspaceKey) (string, error) {
-	data, err := os.ReadFile(m.memoryPath(key))
+func (m *Manager) ReadMemory(key WorkspaceKey, project string) (string, error) {
+	data, err := os.ReadFile(m.memoryPath(key, project))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -48,12 +48,12 @@ func (m *Manager) ReadMemory(key WorkspaceKey) (string, error) {
 // (root) proxy wrote -- mirroring StoreMedia's chown of the uploads dir. The
 // memory dir is a dedicated workspace subdir (not the workspace root, which
 // holds the read-only .secrets/.shared bind mounts), so chowning it is safe.
-func (m *Manager) WriteMemory(key WorkspaceKey, content string) error {
-	dir := m.memoryDir(key)
+func (m *Manager) WriteMemory(key WorkspaceKey, project, content string) error {
+	dir := m.memoryDir(key, project)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir memory: %w", err)
 	}
-	if err := os.WriteFile(m.memoryPath(key), []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(m.memoryPath(key, project), []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write memory: %w", err)
 	}
 	if err := chownTree(dir, m.cfg.PicoclawUser); err != nil {

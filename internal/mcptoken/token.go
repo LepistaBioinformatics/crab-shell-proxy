@@ -30,9 +30,18 @@ import (
 // delimiter separates the four scope fields inside the signed payload.
 const delimiter = "/"
 
-// scopeFields is how many fields a payload must have. Verify requires exactly
-// this, so a payload with a valid MAC but the wrong shape is still refused.
-const scopeFields = 4
+// A payload carries four fields, or five when the scope names a project
+// (agent-projects). Verify accepts exactly those two shapes, so a payload with a
+// valid MAC but the wrong shape is still refused.
+//
+// The project is OPTIONAL rather than a fifth mandatory field so that tokens
+// already sitting in running containers' config.json keep verifying. They would
+// self-heal on the next ensure — applyMCPServer rewrites the block — but a
+// window where every agent's memory server 401s is not worth the tidier format.
+const (
+	scopeFields            = 4
+	scopeFieldsWithProject = 5
+)
 
 var (
 	// ErrNoSecret means the proxy has no CRAB_MCP_TOKEN_SECRET. Minting without one
@@ -113,7 +122,7 @@ func encodeScope(sc memgraph.Scope) (string, error) {
 		{"role", sc.Role},
 		{"userAccID", sc.UserAccID},
 	}
-	parts := make([]string, 0, scopeFields)
+	parts := make([]string, 0, scopeFieldsWithProject)
 	for _, f := range fields {
 		if f.value == "" {
 			return "", fmt.Errorf("%w: %s is empty", ErrInvalidScope, f.name)
@@ -123,26 +132,38 @@ func encodeScope(sc memgraph.Scope) (string, error) {
 		}
 		parts = append(parts, f.value)
 	}
+	// Appended last and only when set, which is what keeps a project-less token
+	// byte-identical to the ones minted before this feature existed.
+	if sc.Project != "" {
+		if strings.Contains(sc.Project, delimiter) {
+			return "", fmt.Errorf("%w: project contains %q", ErrInvalidScope, delimiter)
+		}
+		parts = append(parts, sc.Project)
+	}
 	return strings.Join(parts, delimiter), nil
 }
 
 func decodeScope(payload string) (memgraph.Scope, error) {
 	parts := strings.Split(payload, delimiter)
-	if len(parts) != scopeFields {
-		return memgraph.Scope{}, fmt.Errorf("%w: got %d fields, want %d",
-			ErrInvalidScope, len(parts), scopeFields)
+	if len(parts) != scopeFields && len(parts) != scopeFieldsWithProject {
+		return memgraph.Scope{}, fmt.Errorf("%w: got %d fields, want %d or %d",
+			ErrInvalidScope, len(parts), scopeFields, scopeFieldsWithProject)
 	}
 	for i, p := range parts {
 		if p == "" {
 			return memgraph.Scope{}, fmt.Errorf("%w: field %d is empty", ErrInvalidScope, i)
 		}
 	}
-	return memgraph.Scope{
+	sc := memgraph.Scope{
 		TenantID:  parts[0],
 		SubsAccID: parts[1],
 		Role:      parts[2],
 		UserAccID: parts[3],
-	}, nil
+	}
+	if len(parts) == scopeFieldsWithProject {
+		sc.Project = parts[4]
+	}
+	return sc, nil
 }
 
 func mac(secret, payload string) []byte {

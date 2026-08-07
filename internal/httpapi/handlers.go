@@ -24,6 +24,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mcpserver"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
@@ -41,6 +42,17 @@ type Orchestrator interface {
 	// SubscriptionScaffolded reports whether the subscription root exists.
 	SubscriptionScaffolded(tenantID, subsAccID string) bool
 	// WriteSecret validates and persists one secret into the caller's
+	// Projects: a member carving their own agent into Claude-style projects, each
+	// a picoclaw agent of its own. HasProject is separate and deliberately cheap —
+	// it gates every project-scoped request before any container work, so an
+	// unknown project cannot be answered by the default agent.
+	ListProjects(key docker.WorkspaceKey) ([]projects.Project, error)
+	CreateProject(key docker.WorkspaceKey, name, instructions string) (projects.Project, error)
+	RenameProject(key docker.WorkspaceKey, id, name string) (projects.Project, error)
+	SetProjectInstructions(key docker.WorkspaceKey, id, instructions string) (projects.Project, error)
+	DeleteProject(key docker.WorkspaceKey, id string) error
+	HasProject(key docker.WorkspaceKey, id string) (bool, error)
+
 	// per-(user, agent) store, merging native secrets into the current workspace.
 	WriteSecret(agent config.Agent, key docker.WorkspaceKey, format, name, value string) error
 	// ListSecrets returns the set secret names per format (never values).
@@ -73,28 +85,28 @@ type Orchestrator interface {
 	ArmScheduledBounce(scope docker.Scope, at time.Time)
 	// StoreMedia writes an uploaded file into the caller's workspace uploads
 	// dir and returns its workspace-relative path.
-	StoreMedia(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
+	StoreMedia(key docker.WorkspaceKey, project, rawName string, r io.Reader) (docker.StoredMedia, error)
 	// StoreAgentAttachment saves a file the HARNESS delivered out-of-band (the
 	// "Requested output delivered via tool attachment." path) into
 	// uploads/attachments/, which is what makes it reachable: the media list and
 	// download route already handle nested paths, so it appears in the uploads
 	// sidebar like any file the user uploaded.
-	StoreAgentAttachment(key docker.WorkspaceKey, rawName string, r io.Reader) (docker.StoredMedia, error)
+	StoreAgentAttachment(key docker.WorkspaceKey, project, rawName string, r io.Reader) (docker.StoredMedia, error)
 	// ListMedia returns the files in the caller's workspace uploads dir.
-	ListMedia(key docker.WorkspaceKey) ([]docker.StoredMedia, error)
+	ListMedia(key docker.WorkspaceKey, project string) ([]docker.StoredMedia, error)
 	// DeleteMedia removes one uploaded file (by its stored filename).
-	DeleteMedia(key docker.WorkspaceKey, storedName string) error
+	DeleteMedia(key docker.WorkspaceKey, project, storedName string) error
 	// Member-driven organisation of the uploads tree. MoveMedia covers renaming;
 	// DeleteFolder is recursive and reports how many files it removed.
-	CreateFolder(key docker.WorkspaceKey, rel string) error
-	MoveMedia(key docker.WorkspaceKey, fromRel, toRel string) error
-	DeleteFolder(key docker.WorkspaceKey, rel string) (int, error)
+	CreateFolder(key docker.WorkspaceKey, project, rel string) error
+	MoveMedia(key docker.WorkspaceKey, project, fromRel, toRel string) error
+	DeleteFolder(key docker.WorkspaceKey, project, rel string) (int, error)
 	// OpenMedia opens one uploaded file for download (reader + display name).
-	OpenMedia(key docker.WorkspaceKey, storedName string) (io.ReadCloser, string, error)
+	OpenMedia(key docker.WorkspaceKey, project, storedName string) (io.ReadCloser, string, error)
 	// ReadMemory returns the caller's workspace MEMORY_CUSTOM.md (empty if unset).
-	ReadMemory(key docker.WorkspaceKey) (string, error)
+	ReadMemory(key docker.WorkspaceKey, project string) (string, error)
 	// WriteMemory replaces the caller's workspace MEMORY_CUSTOM.md.
-	WriteMemory(key docker.WorkspaceKey, content string) error
+	WriteMemory(key docker.WorkspaceKey, project, content string) error
 
 	// --- admin-shared-content (authority-over-target; gated in internal/authz) ---
 
@@ -122,9 +134,9 @@ type Orchestrator interface {
 	// ListSubscriptionUsers enumerates the end users under a subscription.
 	ListSubscriptionUsers(tenantID, subsAccID string) ([]docker.UserRef, error)
 	// ListUserFiles returns a user's private-file metadata only (no bytes — FR-7).
-	ListUserFiles(key docker.WorkspaceKey) ([]docker.FileMeta, error)
+	ListUserFiles(key docker.WorkspaceKey, project string) ([]docker.FileMeta, error)
 	// DeleteUserFile removes one of a user's private files (never reads it — FR-7).
-	DeleteUserFile(key docker.WorkspaceKey, name string) error
+	DeleteUserFile(key docker.WorkspaceKey, project, name string) error
 
 	// --- admin-instance-config-editor ---
 
@@ -300,6 +312,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/cron/runs", s.handleCronRun)
 	mux.HandleFunc("GET /v1/restart", s.handleRestartStatus)
 	mux.HandleFunc("POST /v1/restart", s.handleRestartPost)
+	mux.HandleFunc("GET /v1/projects", s.handleProjectsList)
+	mux.HandleFunc("POST /v1/projects", s.handleProjectsPost)
+	mux.HandleFunc("PATCH /v1/projects/{id}", s.handleProjectsPatch)
+	mux.HandleFunc("DELETE /v1/projects/{id}", s.handleProjectsDelete)
 	mux.HandleFunc("GET /v1/memory", s.handleMemoryGet)
 	mux.HandleFunc("PUT /v1/memory", s.handleMemoryPut)
 	// memory-graph-mcp: the knowledge graph. READ ONLY — the bot writes through
@@ -477,8 +493,12 @@ type chatRequest struct {
 	Model     string    `json:"model"`
 	Stream    bool      `json:"stream"`
 	SessionID string    `json:"session_id"`
-	TenantID  string    `json:"tenant_id"`
-	SubsAccID string    `json:"subs_acc_id"`
+	// Project scopes the conversation to one of the caller's projects: it selects
+	// the picoclaw agent (through the session id prefix a dispatch rule matches)
+	// and therefore the workspace. Empty means the main agent — today's behavior.
+	Project   string `json:"project,omitempty"`
+	TenantID  string `json:"tenant_id"`
+	SubsAccID string `json:"subs_acc_id"`
 }
 
 type message struct {
@@ -566,8 +586,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Role:      agent.Key,
 		UserAccID: ident.AccID,
 	}
-	s.logf("chat: authorized svc=%s tenant=%s subs=%s user=%s stream=%t",
-		agent.Key, tenantID, subsAccID, ident.AccID, req.Stream)
+	// The project prefix is what routes this turn. picoclaw sees the prefixed
+	// value as its chat id, and the dispatch rule the projection wrote matches it
+	// with a wildcard — so every conversation in a project reaches the project's
+	// agent without a rule of its own.
+	//
+	// An unknown project is refused here, BEFORE any container work. Falling
+	// through would answer as the main agent and write the turn into the main
+	// workspace; the user would meet that days later as missing history, not now
+	// as an error.
+	if ok := s.checkProject(w, key, req.Project); !ok {
+		return
+	}
+	sessionKey = projectSessionID(req.Project, sessionKey)
+	s.logf("chat: authorized svc=%s tenant=%s subs=%s user=%s project=%q stream=%t",
+		agent.Key, tenantID, subsAccID, ident.AccID, req.Project, req.Stream)
 	// Memory-graph provenance: mark this workspace as mid-turn on this conversation,
 	// so an MCP write during the turn can be attributed to it. Placed here — after
 	// authorization, before either the streaming or the synchronous branch — so one
@@ -589,7 +622,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	id := "chatcmpl-" + randomHex(12)
 
 	if req.Stream {
-		s.streamTurn(w, r, agent, key, ident.Email, sessionKey, userContent, model, id)
+		s.streamTurn(w, r, agent, key, ident.Email, sessionKey, userContent, model, id, req.Project)
 		return
 	}
 
@@ -617,7 +650,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Content:    userContent,
 	}, turn.Sink{
 		Attachment: func(a turn.Attachment) {
-			stored, storeErr := s.storeTurnAttachment(turnCtx, key, a)
+			stored, storeErr := s.storeTurnAttachment(turnCtx, key, req.Project, a)
 			if storeErr != nil {
 				s.logf("chat: attachment %q not stored: %v", a.Filename, storeErr)
 				return
@@ -632,7 +665,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegmentOf(req.Project))
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
 		s.logf("chat: sync durable history failed: %v", syncErr)
 	}
@@ -783,7 +816,19 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
 		return
 	}
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID)
+	// A project's transcripts live under its OWN workspace, because each picoclaw
+	// agent keeps sessions beside itself. Reading the main workspace for a project
+	// chat would return an empty history rather than an error.
+	key := docker.WorkspaceKey{
+		TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
+		Role: agent.Key, UserAccID: ident.AccID,
+	}
+	segment, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
+	sessionKey = projectSessionID(projectID, sessionKey)
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID, segment)
 	// Fold in any just-completed turn before reading, then serve the durable
 	// transcript (survives picoclaw's live-file rewrites across restarts).
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
@@ -835,7 +880,7 @@ func (s *Server) handleSessionsResolve(w http.ResponseWriter, r *http.Request) {
 			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
 		return
 	}
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID)
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID, config.MainWorkspace)
 	sessionFile := history.FindSessionFile(sessionsDir, sessionKey)
 	writeJSON(w, http.StatusOK, map[string]any{"sessionKey": sessionKey, "sessionFile": sessionFile})
 }
@@ -1100,8 +1145,12 @@ func (s *Server) handleMediaPost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
 
-	stored, err := s.Mgr.StoreMedia(key, header.Filename, file)
+	stored, err := s.Mgr.StoreMedia(key, project, header.Filename, file)
 	if err != nil {
 		if errors.Is(err, docker.ErrMediaName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
@@ -1137,13 +1186,17 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
 	// GET /v1/media?path=uploads/<file> downloads that file; without `path` it
 	// lists the uploads dir.
 	if path := r.URL.Query().Get("path"); path != "" {
-		s.serveMediaFile(w, key, agent, ident, path)
+		s.serveMediaFile(w, key, project, agent, ident, path)
 		return
 	}
-	files, err := s.Mgr.ListMedia(key)
+	files, err := s.Mgr.ListMedia(key, project)
 	if err != nil {
 		s.logf("media: list failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -1162,8 +1215,8 @@ func mediaRelPath(p string) string {
 }
 
 // serveMediaFile streams one uploaded file back as a download attachment.
-func (s *Server) serveMediaFile(w http.ResponseWriter, key docker.WorkspaceKey, agent config.Agent, ident identity.Identity, path string) {
-	rc, display, err := s.Mgr.OpenMedia(key, mediaRelPath(path))
+func (s *Server) serveMediaFile(w http.ResponseWriter, key docker.WorkspaceKey, project string, agent config.Agent, ident identity.Identity, path string) {
+	rc, display, err := s.Mgr.OpenMedia(key, project, mediaRelPath(path))
 	if err != nil {
 		switch {
 		case errors.Is(err, docker.ErrMediaName):
@@ -1209,7 +1262,11 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Mgr.DeleteMedia(key, mediaRelPath(path)); err != nil {
+	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.DeleteMedia(key, project, mediaRelPath(path)); err != nil {
 		if errors.Is(err, docker.ErrMediaName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
@@ -1247,7 +1304,11 @@ func (s *Server) handleMemoryGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	content, err := s.Mgr.ReadMemory(key)
+	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
+	content, err := s.Mgr.ReadMemory(key, project)
 	if err != nil {
 		s.logf("memory: read failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -1292,7 +1353,11 @@ func (s *Server) handleMemoryPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Mgr.WriteMemory(key, req.Content); err != nil {
+	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
+	if err := s.Mgr.WriteMemory(key, project, req.Content); err != nil {
 		s.logf("memory: write failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return

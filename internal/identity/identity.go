@@ -127,3 +127,45 @@ func SessionKey(accID, sessionID string) string {
 	sum := sha256.Sum256([]byte(accID + "::" + sessionID))
 	return hex.EncodeToString(sum[:])[:32]
 }
+
+// The two functions below are the SAME FACT written twice — the project prefix
+// the proxy stamps onto a session id, and the dispatch pattern picoclaw matches
+// it against. They live side by side on purpose: if they ever disagree the rule
+// simply never matches, and the symptom is not an error but a project whose
+// chats are silently answered by the main agent, in the main workspace.
+//
+// The chain they have to agree on, verified against picoclaw v0.3.1:
+//
+//	proxy sends session_id ......... "p.<project>.<key>"
+//	pico channel builds chat_id .... "pico:" + session_id      (pkg/channels/pico/pico.go)
+//	router builds the match view ... "<chat_type>:" + chat_id, lowercased,
+//	                                 chat_type defaulting to "direct"
+//	                                 (pkg/routing/route.go, buildDispatchView)
+//	rule matches when .............. when.chat equals that, with "*" as the only
+//	                                 wildcard (our upstream patch)
+
+// ProjectSeparator joins the project id into a session id.
+//
+// It is "." rather than "-" because picoclaw's agent-id alphabet is
+// [a-z0-9_-], so a project id can never contain a dot — which makes the prefix
+// unambiguous. With "-", the projects "my" and "my-proj" would both be matched
+// by the pattern "p-my-*", quietly routing one user's conversation into the
+// other project's agent and workspace.
+const ProjectSeparator = "."
+
+// ProjectSessionID stamps a project onto a conversation's session key. An empty
+// projectID returns the key untouched, which is what keeps every non-project
+// chat byte-identical to today and unable to match any project's pattern.
+func ProjectSessionID(projectID, sessionKey string) string {
+	if projectID == "" || sessionKey == "" {
+		return sessionKey
+	}
+	return "p" + ProjectSeparator + projectID + ProjectSeparator + sessionKey
+}
+
+// ProjectChatPattern is the agents.dispatch `when.chat` value that matches every
+// session ProjectSessionID produces for one project. Lowercase throughout,
+// because the router lowercases both sides before comparing.
+func ProjectChatPattern(projectID string) string {
+	return "direct:pico:" + strings.ToLower(ProjectSessionID(projectID, "*"))
+}

@@ -22,7 +22,7 @@ func exists(t *testing.T, parts ...string) bool {
 func TestCreateFolderMakesNestedPaths(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.CreateFolder(key, "archive/2026/q3"); err != nil {
+	if err := m.CreateFolder(key, "", "archive/2026/q3"); err != nil {
 		t.Fatalf("CreateFolder: %v", err)
 	}
 	if !exists(t, uploads, "archive", "2026", "q3") {
@@ -42,10 +42,10 @@ func TestCreateFolderMakesNestedPaths(t *testing.T) {
 func TestCreateFolderIsIdempotent(t *testing.T) {
 	t.Parallel()
 	m, key, _ := mediaFixture(t)
-	if err := m.CreateFolder(key, "notes"); err != nil {
+	if err := m.CreateFolder(key, "", "notes"); err != nil {
 		t.Fatalf("first CreateFolder: %v", err)
 	}
-	if err := m.CreateFolder(key, "notes"); err != nil {
+	if err := m.CreateFolder(key, "", "notes"); err != nil {
 		t.Errorf("second CreateFolder: %v — an existing folder is success, not a conflict", err)
 	}
 }
@@ -53,7 +53,7 @@ func TestCreateFolderIsIdempotent(t *testing.T) {
 func TestCreateFolderRefusesAPathThatIsAFile(t *testing.T) {
 	t.Parallel()
 	m, key, _ := mediaFixture(t)
-	if err := m.CreateFolder(key, "top.txt"); !errors.Is(err, ErrMediaExists) {
+	if err := m.CreateFolder(key, "", "top.txt"); !errors.Is(err, ErrMediaExists) {
 		t.Errorf("err = %v, want ErrMediaExists", err)
 	}
 }
@@ -69,13 +69,13 @@ func TestFolderOperationsRefuseTraversal(t *testing.T) {
 		t.Run(rel, func(t *testing.T) {
 			t.Parallel()
 			m, key, _ := mediaFixture(t)
-			if err := m.CreateFolder(key, rel); err == nil {
+			if err := m.CreateFolder(key, "", rel); err == nil {
 				t.Errorf("CreateFolder(%q) was accepted", rel)
 			}
-			if err := m.MoveMedia(key, "top.txt", rel); err == nil {
+			if err := m.MoveMedia(key, "", "top.txt", rel); err == nil {
 				t.Errorf("MoveMedia(to %q) was accepted", rel)
 			}
-			if _, err := m.DeleteFolder(key, rel); err == nil {
+			if _, err := m.DeleteFolder(key, "", rel); err == nil {
 				t.Errorf("DeleteFolder(%q) was accepted", rel)
 			}
 		})
@@ -87,7 +87,7 @@ func TestFolderOperationsRefuseTraversal(t *testing.T) {
 func TestFolderOperationsRefuseNulByte(t *testing.T) {
 	t.Parallel()
 	m, key, _ := mediaFixture(t)
-	if err := m.CreateFolder(key, "ok\x00/evil"); err == nil {
+	if err := m.CreateFolder(key, "", "ok\x00/evil"); err == nil {
 		t.Error("a path containing NUL was accepted")
 	}
 }
@@ -102,13 +102,13 @@ func TestFolderOperationsRefuseASymlinkedEscape(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := m.CreateFolder(key, "escape/planted"); err == nil {
+	if err := m.CreateFolder(key, "", "escape/planted"); err == nil {
 		if exists(t, outside, "planted") {
 			t.Fatal("a folder was created OUTSIDE the uploads root through a symlink")
 		}
 		t.Error("CreateFolder through a symlink was accepted")
 	}
-	if err := m.MoveMedia(key, "top.txt", "escape/top.txt"); err == nil {
+	if err := m.MoveMedia(key, "", "top.txt", "escape/top.txt"); err == nil {
 		t.Error("a file was moved out of the uploads root through a symlink")
 	}
 }
@@ -118,7 +118,7 @@ func TestFolderOperationsRefuseASymlinkedEscape(t *testing.T) {
 func TestMoveFileBetweenFolders(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.MoveMedia(key, "top.txt", "reports/top.txt"); err != nil {
+	if err := m.MoveMedia(key, "", "top.txt", "reports/top.txt"); err != nil {
 		t.Fatalf("MoveMedia: %v", err)
 	}
 	if exists(t, uploads, "top.txt") {
@@ -134,7 +134,7 @@ func TestMoveFileBetweenFolders(t *testing.T) {
 func TestMoveWithinTheSameParentRenames(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.MoveMedia(key, "reports/q1.pdf", "reports/first-quarter.pdf"); err != nil {
+	if err := m.MoveMedia(key, "", "reports/q1.pdf", "reports/first-quarter.pdf"); err != nil {
 		t.Fatalf("MoveMedia: %v", err)
 	}
 	if exists(t, uploads, "reports", "q1.pdf") {
@@ -148,7 +148,7 @@ func TestMoveWithinTheSameParentRenames(t *testing.T) {
 func TestMoveFolderTakesItsContents(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.MoveMedia(key, "reports", "images/reports"); err != nil {
+	if err := m.MoveMedia(key, "", "reports", "images/reports"); err != nil {
 		t.Fatalf("MoveMedia: %v", err)
 	}
 	if !exists(t, uploads, "images", "reports", "2026", "q2.pdf") {
@@ -164,13 +164,13 @@ func TestMoveFolderTakesItsContents(t *testing.T) {
 func TestMoveNeverOverwrites(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.CreateFolder(key, "dest"); err != nil {
+	if err := m.CreateFolder(key, "", "dest"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(uploads, "dest", "top.txt"), []byte("PRECIOUS"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.MoveMedia(key, "top.txt", "dest/top.txt"); !errors.Is(err, ErrMediaExists) {
+	if err := m.MoveMedia(key, "", "top.txt", "dest/top.txt"); !errors.Is(err, ErrMediaExists) {
 		t.Fatalf("err = %v, want ErrMediaExists", err)
 	}
 	body, err := os.ReadFile(filepath.Join(uploads, "dest", "top.txt"))
@@ -189,7 +189,7 @@ func TestMoveFolderIntoItselfIsRefused(t *testing.T) {
 		t.Run(dest, func(t *testing.T) {
 			t.Parallel()
 			m, key, uploads := mediaFixture(t)
-			if err := m.MoveMedia(key, "reports", dest); !errors.Is(err, ErrMediaIntoSelf) {
+			if err := m.MoveMedia(key, "", "reports", dest); !errors.Is(err, ErrMediaIntoSelf) {
 				t.Errorf("MoveMedia(reports -> %s) err = %v, want ErrMediaIntoSelf", dest, err)
 			}
 			if !exists(t, uploads, "reports", "q1.pdf") {
@@ -204,10 +204,10 @@ func TestMoveFolderIntoItselfIsRefused(t *testing.T) {
 func TestMoveToASiblingWithASharedPrefixIsAllowed(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.CreateFolder(key, "reports-archive"); err != nil {
+	if err := m.CreateFolder(key, "", "reports-archive"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.MoveMedia(key, "reports", "reports-archive/reports"); err != nil {
+	if err := m.MoveMedia(key, "", "reports", "reports-archive/reports"); err != nil {
 		t.Fatalf("MoveMedia: %v — 'reports-archive' is not a descendant of 'reports'", err)
 	}
 	if !exists(t, uploads, "reports-archive", "reports", "q1.pdf") {
@@ -218,7 +218,7 @@ func TestMoveToASiblingWithASharedPrefixIsAllowed(t *testing.T) {
 func TestMoveOntoItselfIsANoOp(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.MoveMedia(key, "top.txt", "top.txt"); err != nil {
+	if err := m.MoveMedia(key, "", "top.txt", "top.txt"); err != nil {
 		t.Errorf("MoveMedia onto itself: %v", err)
 	}
 	if !exists(t, uploads, "top.txt") {
@@ -229,7 +229,7 @@ func TestMoveOntoItselfIsANoOp(t *testing.T) {
 func TestMoveAMissingSourceIsNotFound(t *testing.T) {
 	t.Parallel()
 	m, key, _ := mediaFixture(t)
-	if err := m.MoveMedia(key, "ghost.txt", "reports/ghost.txt"); !errors.Is(err, ErrMediaNotFound) {
+	if err := m.MoveMedia(key, "", "ghost.txt", "reports/ghost.txt"); !errors.Is(err, ErrMediaNotFound) {
 		t.Errorf("err = %v, want ErrMediaNotFound", err)
 	}
 }
@@ -239,7 +239,7 @@ func TestMoveAMissingSourceIsNotFound(t *testing.T) {
 func TestDeleteFolderRemovesTheSubtreeAndCountsFiles(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	n, err := m.DeleteFolder(key, "reports")
+	n, err := m.DeleteFolder(key, "", "reports")
 	if err != nil {
 		t.Fatalf("DeleteFolder: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestDeleteFolderRefusesTheUploadsRoot(t *testing.T) {
 	t.Parallel()
 	for _, rel := range []string{".", "/", ""} {
 		m, key, uploads := mediaFixture(t)
-		if _, err := m.DeleteFolder(key, rel); err == nil {
+		if _, err := m.DeleteFolder(key, "", rel); err == nil {
 			t.Errorf("DeleteFolder(%q) was accepted", rel)
 		}
 		if !exists(t, uploads, "top.txt") {
@@ -273,7 +273,7 @@ func TestDeleteFolderRefusesTheUploadsRoot(t *testing.T) {
 func TestDeleteFolderRefusesAFile(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if _, err := m.DeleteFolder(key, "top.txt"); !errors.Is(err, ErrMediaNotFolder) {
+	if _, err := m.DeleteFolder(key, "", "top.txt"); !errors.Is(err, ErrMediaNotFolder) {
 		t.Errorf("err = %v, want ErrMediaNotFolder", err)
 	}
 	if !exists(t, uploads, "top.txt") {
@@ -284,7 +284,7 @@ func TestDeleteFolderRefusesAFile(t *testing.T) {
 func TestDeleteFolderOnAMissingPathIsNotFound(t *testing.T) {
 	t.Parallel()
 	m, key, _ := mediaFixture(t)
-	if _, err := m.DeleteFolder(key, "ghost"); !errors.Is(err, ErrMediaNotFound) {
+	if _, err := m.DeleteFolder(key, "", "ghost"); !errors.Is(err, ErrMediaNotFound) {
 		t.Errorf("err = %v, want ErrMediaNotFound", err)
 	}
 }
@@ -292,10 +292,10 @@ func TestDeleteFolderOnAMissingPathIsNotFound(t *testing.T) {
 func TestDeleteEmptyFolderCountsZero(t *testing.T) {
 	t.Parallel()
 	m, key, _ := mediaFixture(t)
-	if err := m.CreateFolder(key, "empty"); err != nil {
+	if err := m.CreateFolder(key, "", "empty"); err != nil {
 		t.Fatal(err)
 	}
-	n, err := m.DeleteFolder(key, "empty")
+	n, err := m.DeleteFolder(key, "", "empty")
 	if err != nil {
 		t.Fatalf("DeleteFolder: %v", err)
 	}
@@ -322,16 +322,16 @@ func TestAttachmentsCannotBeCreatedRenamedOrDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := m.CreateFolder(key, "attachments"); !errors.Is(err, ErrMediaReserved) {
+	if err := m.CreateFolder(key, "", "attachments"); !errors.Is(err, ErrMediaReserved) {
 		t.Errorf("CreateFolder err = %v, want ErrMediaReserved", err)
 	}
-	if err := m.MoveMedia(key, "attachments", "anexos"); !errors.Is(err, ErrMediaReserved) {
+	if err := m.MoveMedia(key, "", "attachments", "anexos"); !errors.Is(err, ErrMediaReserved) {
 		t.Errorf("rename err = %v, want ErrMediaReserved", err)
 	}
-	if err := m.MoveMedia(key, "attachments", "reports/attachments"); !errors.Is(err, ErrMediaReserved) {
+	if err := m.MoveMedia(key, "", "attachments", "reports/attachments"); !errors.Is(err, ErrMediaReserved) {
 		t.Errorf("move err = %v, want ErrMediaReserved", err)
 	}
-	if _, err := m.DeleteFolder(key, "attachments"); !errors.Is(err, ErrMediaReserved) {
+	if _, err := m.DeleteFolder(key, "", "attachments"); !errors.Is(err, ErrMediaReserved) {
 		t.Errorf("delete err = %v, want ErrMediaReserved", err)
 	}
 
@@ -348,10 +348,10 @@ func TestNothingCanBeMovedIntoAttachments(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(uploads, "attachments"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.MoveMedia(key, "top.txt", "attachments/top.txt"); !errors.Is(err, ErrMediaReserved) {
+	if err := m.MoveMedia(key, "", "top.txt", "attachments/top.txt"); !errors.Is(err, ErrMediaReserved) {
 		t.Errorf("err = %v, want ErrMediaReserved", err)
 	}
-	if err := m.CreateFolder(key, "attachments/mine"); !errors.Is(err, ErrMediaReserved) {
+	if err := m.CreateFolder(key, "", "attachments/mine"); !errors.Is(err, ErrMediaReserved) {
 		t.Errorf("nested create err = %v, want ErrMediaReserved", err)
 	}
 	if !exists(t, uploads, "top.txt") {
@@ -365,13 +365,13 @@ func TestNothingCanBeMovedIntoAttachments(t *testing.T) {
 func TestAttachmentsIsOnlyReservedAtTheTopLevel(t *testing.T) {
 	t.Parallel()
 	m, key, uploads := mediaFixture(t)
-	if err := m.CreateFolder(key, "reports/attachments"); err != nil {
+	if err := m.CreateFolder(key, "", "reports/attachments"); err != nil {
 		t.Errorf("CreateFolder(reports/attachments): %v — a nested folder by that name is the member's", err)
 	}
 	if !exists(t, uploads, "reports", "attachments") {
 		t.Error("the nested folder was not created")
 	}
-	if _, err := m.DeleteFolder(key, "reports/attachments"); err != nil {
+	if _, err := m.DeleteFolder(key, "", "reports/attachments"); err != nil {
 		t.Errorf("the member cannot delete their own nested folder: %v", err)
 	}
 }

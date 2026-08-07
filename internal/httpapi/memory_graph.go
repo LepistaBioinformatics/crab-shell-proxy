@@ -47,7 +47,17 @@ func (s *Server) graphScope(w http.ResponseWriter, r *http.Request) (memgraph.Sc
 	if !ok {
 		return memgraph.Scope{}, false
 	}
-	return scopeOf(key), true
+	// agent-projects: each project keeps its own graph, so the read views have to
+	// be told which one. An unknown id 404s here rather than falling back to the
+	// main graph — showing one project's memory under another project's name is
+	// worse than an error.
+	_, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return memgraph.Scope{}, false
+	}
+	sc := scopeOf(key)
+	sc.Project = projectID
+	return sc, true
 }
 
 // scopeOf converts the proxy's workspace identity into the graph's. They are the same

@@ -538,7 +538,7 @@ func (s *Server) handleAdminUserFilesList(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	files, err := s.Mgr.ListUserFiles(key)
+	files, err := s.Mgr.ListUserFiles(key, "")
 	if err != nil {
 		s.logf("admin: list user files failed key=%+v: %v", key, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -563,7 +563,7 @@ func (s *Server) handleAdminUserFilesDelete(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusBadRequest, errBody(`"name" query parameter is required`))
 		return
 	}
-	if err := s.Mgr.DeleteUserFile(key, name); err != nil {
+	if err := s.Mgr.DeleteUserFile(key, "", name); err != nil {
 		if errors.Is(err, docker.ErrMediaName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return

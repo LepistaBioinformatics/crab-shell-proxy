@@ -348,6 +348,15 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("CRAB_LISTEN"); v != "" {
 		c.Listen = v
 	}
+	// CRAB_PICOCLAW_IMAGE exists so the harness image can be swapped without
+	// rebuilding this one — config.yaml is COPIED into the proxy image, so it is
+	// otherwise a rebuild to change. That matters while the stack runs a locally
+	// patched picoclaw (agent-projects needs dispatch-selector globs): rolling
+	// forward to a stock upstream release, or back off the patch, should be an
+	// edit to compose, not a build.
+	if v := os.Getenv("CRAB_PICOCLAW_IMAGE"); v != "" {
+		c.PicoclawImage = v
+	}
 	if v := os.Getenv("CRAB_PICOCLAW_USER"); v != "" {
 		c.PicoclawUser = v
 	}
@@ -494,28 +503,69 @@ func UserWorkspace(root, tenantID, subsAccID, role, userAccID string) string {
 		identity.SanitizeID(role), "users", identity.SanitizeID(userAccID))
 }
 
-// SessionsDir is the path to a user's picoclaw session transcripts (used by
-// /v1/sessions/history), under UserWorkspace/workspace/sessions.
-func SessionsDir(root, tenantID, subsAccID, role, userAccID string) string {
+// MainWorkspace is the workspace segment of the agent every user gets by
+// default — the one picoclaw's agents.defaults.workspace points at.
+const MainWorkspace = "workspace"
+
+// ProjectWorkspace is the workspace segment of one project's agent, a SIBLING of
+// MainWorkspace rather than a child of it.
+//
+// The name is not a choice: picoclaw derives a named agent's workspace as
+// <defaults.workspace>/../workspace-<id> when the agent config does not set one
+// (pkg/agent/instance.go, resolveAgentWorkspace). Writing the path explicitly
+// into agents.list keeps the proxy and picoclaw agreeing, but the SHAPE has to
+// match, because the agent's own tooling resolves it independently.
+//
+// It lands inside the per-user dir this proxy mounts at <home>/.picoclaw, so a
+// project's files persist in the same volume as everything else the user owns.
+func ProjectWorkspace(projectID string) string {
+	return "workspace-" + identity.SanitizeID(projectID)
+}
+
+// ProjectsFile is the proxy-owned list of a user's projects,
+// UserWorkspace/.projects.json.
+//
+// Deliberately ABOVE workspace/, next to config.json and .crab-owner.json: with
+// restrict_to_workspace the agent cannot read or edit it. That matters because
+// this file decides which agent identities exist and which dispatch rules get
+// written — an agent able to edit it could route a peer's conversations to
+// itself, or invent a workspace outside the ones the proxy seeded.
+//
+// It is also the SOURCE OF TRUTH, not a cache: agents.list and
+// agents.dispatch.rules in config.json are re-derived from it on every ensure,
+// because materializeModels rewrites that whole file and would otherwise erase
+// them on the user's next chat.
+func ProjectsFile(root, tenantID, subsAccID, role, userAccID string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
-		"workspace", "sessions")
+		".projects.json")
+}
+
+// SessionsDir is the path to a user's picoclaw session transcripts (used by
+// /v1/sessions/history), under UserWorkspace/<segment>/sessions.
+//
+// segment is MainWorkspace, or ProjectWorkspace(id) for a project's own agent —
+// each picoclaw agent keeps its transcripts under its own workspace, so a
+// project's history is not reachable by asking for the main one.
+func SessionsDir(root, tenantID, subsAccID, role, userAccID, segment string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		segment, "sessions")
 }
 
 // CronFile is the path to a user's picoclaw scheduled-job store (used by
-// /v1/cron/tasks), under UserWorkspace/workspace/cron/jobs.json. picoclaw owns
+// /v1/cron/tasks), under UserWorkspace/<segment>/cron/jobs.json. picoclaw owns
 // the file; the proxy only reads it. It is absent until the agent creates its
 // first task, which is a normal state, not an error.
-func CronFile(root, tenantID, subsAccID, role, userAccID string) string {
+func CronFile(root, tenantID, subsAccID, role, userAccID, segment string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
-		"workspace", "cron", "jobs.json")
+		segment, "cron", "jobs.json")
 }
 
 // UploadsDir is where user-uploaded media lands, inside the agent-readable
-// workspace (UserWorkspace/workspace/uploads) so a vision model / reader skill
+// workspace (UserWorkspace/<segment>/uploads) so a vision model / reader skill
 // can open it by the returned "uploads/<file>" path.
-func UploadsDir(root, tenantID, subsAccID, role, userAccID string) string {
+func UploadsDir(root, tenantID, subsAccID, role, userAccID, segment string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
-		"workspace", "uploads")
+		segment, "uploads")
 }
 
 // TenantModelOverrideFile is the tenant-scope model override selection file

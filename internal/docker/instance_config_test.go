@@ -384,7 +384,7 @@ func TestManagedConfigPathsMatchWriters(t *testing.T) {
 	}
 
 	before := readConfig(t, configPath)
-	if err := materializeModels(configPath, secPath, testResolution()); err != nil {
+	if err := materializeModels(configPath, secPath, testResolution(), projectList{}); err != nil {
 		t.Fatalf("materializeModels: %v", err)
 	}
 	if err := alignWorkspace(configPath, "/home/picoclaw"); err != nil {
@@ -394,7 +394,7 @@ func TestManagedConfigPathsMatchWriters(t *testing.T) {
 	// tools.mcp.enabled and tools.mcp.servers.memory, so both have to be in
 	// ManagedConfigPaths or this gate fails — which is exactly what it did when they
 	// were added to the list before the writer was wired in here.
-	if _, err := applyMCPServer(configPath, "http://crab-shell-proxy:8080", "gate-token"); err != nil {
+	if _, err := applyMCPServer(configPath, "http://crab-shell-proxy:8080", "gate-token", nil); err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
 	after := readConfig(t, configPath)
