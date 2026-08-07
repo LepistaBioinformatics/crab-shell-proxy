@@ -28,7 +28,12 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 			`{"role":"tool","content":"raw tool output"}`+"\n"+
 			`{"role":"assistant","content":"hello there","created_at":"2026-07-16T19:39:08.697371182Z"}`+"\n"+
 			`not valid json`+"\n"+
-			`{"role":"assistant","content":""}`+"\n")
+			`{"role":"assistant","content":""}`+"\n"+
+			// Whitespace-only turns are just as blank as "" — the client renders
+			// one padded band per message, so serving these opened tall empty
+			// gaps in the transcript.
+			`{"role":"assistant","content":"   "}`+"\n"+
+			`{"role":"assistant","content":"\n\n"}`+"\n")
 
 	// A different conversation that must NOT be returned.
 	writeFile(t, dir, "sk_v1_other.meta.json",
@@ -48,6 +53,75 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 	}
 	if msgs[1] != (Message{Role: "assistant", Content: "hello there", CreatedAt: "2026-07-16T19:39:08.697371182Z"}) {
 		t.Errorf("msg[1] = %+v", msgs[1])
+	}
+}
+
+// Narration (a frame that also carried a tool call) is marked KindStep, and the
+// model's reasoning_content survives -- including on the entries whose content is
+// empty, which are over half of the ones carrying it.
+func TestReadSeparatesNarrationAndReasoning(t *testing.T) {
+	dir := t.TempDir()
+	key := "narration01"
+	writeFile(t, dir, "sk_v1_n.meta.json",
+		`{"scope":{"values":{"chat":"direct:pico:`+key+`"}}}`)
+	writeFile(t, dir, "sk_v1_n.jsonl",
+		`{"role":"user","content":"do the thing"}`+"\n"+
+			`{"role":"assistant","content":"let me check","tool_calls":[{"id":"a"}]}`+"\n"+
+			`{"role":"tool","content":"raw output","tool_call_id":"a"}`+"\n"+
+			// Empty content but real reasoning: previously dropped whole.
+			`{"role":"assistant","content":"","reasoning_content":"weighing options","tool_calls":[{"id":"b"}]}`+"\n"+
+			`{"role":"assistant","content":"here is the answer","reasoning_content":" so: X "}`+"\n")
+
+	msgs, err := Read(dir, key)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("got %d messages, want 4: %+v", len(msgs), msgs)
+	}
+	if msgs[1].Kind != KindStep || msgs[1].Content != "let me check" {
+		t.Errorf("narration not marked: %+v", msgs[1])
+	}
+	if msgs[2].Kind != KindStep || msgs[2].Reasoning != "weighing options" {
+		t.Errorf("reasoning-only entry lost or mismarked: %+v", msgs[2])
+	}
+	if msgs[3].Kind != "" || msgs[3].Reasoning != "so: X" {
+		t.Errorf("answer mismarked or reasoning untrimmed: %+v", msgs[3])
+	}
+}
+
+// The safety floor: a turn whose ONLY texty assistant entry also carried a tool
+// call must keep it as the answer, not hide it as narration. This was 7 of 112
+// turns in the sampled deployment.
+func TestReadKeepsAnswerWhenTurnIsAllNarration(t *testing.T) {
+	dir := t.TempDir()
+	key := "answerless1"
+	writeFile(t, dir, "sk_v1_a.meta.json",
+		`{"scope":{"values":{"chat":"direct:pico:`+key+`"}}}`)
+	writeFile(t, dir, "sk_v1_a.jsonl",
+		// Turn 1: reply arrives in the same frame as a trailing call -- must show.
+		`{"role":"user","content":"q1"}`+"\n"+
+			`{"role":"assistant","content":"the whole reply","tool_calls":[{"id":"a"}]}`+"\n"+
+			// Turn 2: has a real answer, so its narration stays demoted.
+			`{"role":"user","content":"q2"}`+"\n"+
+			`{"role":"assistant","content":"checking","tool_calls":[{"id":"b"}]}`+"\n"+
+			`{"role":"assistant","content":"the answer"}`+"\n")
+
+	msgs, err := Read(dir, key)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("got %d messages, want 5: %+v", len(msgs), msgs)
+	}
+	if msgs[1].Kind != "" {
+		t.Errorf("answerless turn lost its only reply to narration: %+v", msgs[1])
+	}
+	if msgs[3].Kind != KindStep {
+		t.Errorf("narration should stay demoted when the turn has an answer: %+v", msgs[3])
+	}
+	if msgs[4].Kind != "" {
+		t.Errorf("plain answer mismarked: %+v", msgs[4])
 	}
 }
 
