@@ -24,40 +24,56 @@ type mediaFolderRequest struct {
 	SubsAccID string `json:"subs_acc_id"`
 	Path      string `json:"path"`
 	To        string `json:"to"`
+	// agent-projects: empty means the agent's own workspace.
+	Project string `json:"project,omitempty"`
 }
 
 // mediaFolderCaller decodes and authorizes, returning the workspace and the body.
-func (s *Server) mediaFolderCaller(w http.ResponseWriter, r *http.Request) (docker.WorkspaceKey, mediaFolderRequest, bool) {
+func (s *Server) mediaFolderCaller(w http.ResponseWriter, r *http.Request) (docker.WorkspaceKey, string, mediaFolderRequest, bool) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
-		return docker.WorkspaceKey{}, mediaFolderRequest{}, false
+		return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
 	}
 	var req mediaFolderRequest
 	// 64 KiB is far more than three short strings need; the cap exists so the body
 	// cannot be used to make the proxy allocate.
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
-		return docker.WorkspaceKey{}, mediaFolderRequest{}, false
+		return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
 	}
 	tenantID, err := uuid.Parse(req.TenantID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
-		return docker.WorkspaceKey{}, mediaFolderRequest{}, false
+		return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
 	}
 	subsAccID, err := uuid.Parse(req.SubsAccID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
-		return docker.WorkspaceKey{}, mediaFolderRequest{}, false
+		return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
 	}
 	if req.Path == "" {
 		writeJSON(w, http.StatusBadRequest, errBody(`"path" is required`))
-		return docker.WorkspaceKey{}, mediaFolderRequest{}, false
+		return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
 	}
 	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
 	if !ok {
-		return docker.WorkspaceKey{}, mediaFolderRequest{}, false
+		return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
 	}
-	return key, req, true
+	// agent-projects: folders belong to the workspace of the project they were
+	// created in. The id travels in the BODY here, like every other field this
+	// caller reads, rather than in the query string.
+	if req.Project != "" {
+		exists, err := s.Mgr.HasProject(key, req.Project)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+			return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
+		}
+		if !exists {
+			writeJSON(w, http.StatusNotFound, errBody("unknown project: "+req.Project))
+			return docker.WorkspaceKey{}, "", mediaFolderRequest{}, false
+		}
+	}
+	return key, req.Project, req, true
 }
 
 // writeMediaFolderError maps the domain's refusals onto statuses a client can act on.
@@ -88,11 +104,11 @@ func (s *Server) writeMediaFolderError(w http.ResponseWriter, err error) {
 
 // handleMediaFolderCreate is POST /v1/media/folder.
 func (s *Server) handleMediaFolderCreate(w http.ResponseWriter, r *http.Request) {
-	key, req, ok := s.mediaFolderCaller(w, r)
+	key, project, req, ok := s.mediaFolderCaller(w, r)
 	if !ok {
 		return
 	}
-	if err := s.Mgr.CreateFolder(key, mediaRelPath(req.Path)); err != nil {
+	if err := s.Mgr.CreateFolder(key, project, mediaRelPath(req.Path)); err != nil {
 		s.writeMediaFolderError(w, err)
 		return
 	}
@@ -102,7 +118,7 @@ func (s *Server) handleMediaFolderCreate(w http.ResponseWriter, r *http.Request)
 // handleMediaMove is POST /v1/media/move. It covers renaming too: a move within the
 // same parent is a rename, and it is the same call with the same failure modes.
 func (s *Server) handleMediaMove(w http.ResponseWriter, r *http.Request) {
-	key, req, ok := s.mediaFolderCaller(w, r)
+	key, project, req, ok := s.mediaFolderCaller(w, r)
 	if !ok {
 		return
 	}
@@ -110,7 +126,7 @@ func (s *Server) handleMediaMove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody(`"to" is required`))
 		return
 	}
-	if err := s.Mgr.MoveMedia(key, mediaRelPath(req.Path), mediaRelPath(req.To)); err != nil {
+	if err := s.Mgr.MoveMedia(key, project, mediaRelPath(req.Path), mediaRelPath(req.To)); err != nil {
 		s.writeMediaFolderError(w, err)
 		return
 	}
@@ -124,11 +140,11 @@ func (s *Server) handleMediaMove(w http.ResponseWriter, r *http.Request) {
 // what it reports afterwards, and the two disagreeing is how a member finds out the
 // agent wrote something in between.
 func (s *Server) handleMediaFolderDelete(w http.ResponseWriter, r *http.Request) {
-	key, req, ok := s.mediaFolderCaller(w, r)
+	key, project, req, ok := s.mediaFolderCaller(w, r)
 	if !ok {
 		return
 	}
-	removed, err := s.Mgr.DeleteFolder(key, mediaRelPath(req.Path))
+	removed, err := s.Mgr.DeleteFolder(key, project, mediaRelPath(req.Path))
 	if err != nil {
 		s.writeMediaFolderError(w, err)
 		return

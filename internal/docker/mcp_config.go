@@ -64,7 +64,17 @@ func desiredMCPServer(baseURL, token string) map[string]any {
 //
 // Only tools.mcp.servers["memory"] and tools.mcp.enabled are owned. Any other
 // server an operator added by hand survives untouched.
-func applyMCPServer(configPath, baseURL, token string) (bool, error) {
+// ProjectMCPServerName is the memory server a project agent talks to. One entry
+// per project, each with its own token, because tools.mcp.servers is GLOBAL to
+// the container: every agent in it reads the same block, so a per-project graph
+// cannot come from the token alone — it has to come from a per-project SERVER
+// that only that agent is allowed to see (its AGENT.md frontmatter carries the
+// mcpServers allowlist).
+func ProjectMCPServerName(projectID string) string {
+	return MCPServerName + "-" + projectID
+}
+
+func applyMCPServer(configPath, baseURL, token string, projectTokens map[string]string) (bool, error) {
 	if token == "" {
 		// No secret configured: the feature is off. Leave the file completely alone —
 		// including any block a previously-configured deployment wrote, because
@@ -85,10 +95,22 @@ func applyMCPServer(configPath, baseURL, token string) (bool, error) {
 	servers := childMap(mcpNode, "servers")
 
 	want := desiredMCPServer(baseURL, token)
-	if reflect.DeepEqual(servers[MCPServerName], want) && mcpNode["enabled"] == true {
+	if reflect.DeepEqual(servers[MCPServerName], want) && mcpNode["enabled"] == true &&
+		projectServersMatch(servers, baseURL, projectTokens) {
 		return false, nil
 	}
 	servers[MCPServerName] = want
+	// Rebuild the project entries, dropping any whose project is gone. Rebuild
+	// rather than merge, for the same reason the agents.list projection does: a
+	// stale server would keep a deleted project's graph reachable.
+	for name := range servers {
+		if strings.HasPrefix(name, MCPServerName+"-") {
+			delete(servers, name)
+		}
+	}
+	for projectID, ptoken := range projectTokens {
+		servers[ProjectMCPServerName(projectID)] = desiredMCPServer(baseURL, ptoken)
+	}
 	// picoclaw's own CLI flips this on when a server is added; the proxy must set it
 	// and must never set it back to false, or a hand-added sibling server would be
 	// disabled as a side effect.
@@ -314,8 +336,23 @@ func (m *Manager) applyMemoryGraphMCP(key WorkspaceKey, userDir string) error {
 	if token == "" {
 		return nil // feature disabled: no secret configured
 	}
+	// One token per project, each encoding that project in its scope, so the
+	// proxy's MCP endpoint resolves a different graph directory for each.
+	projects, err := m.projectStore(key).List()
+	if err != nil {
+		return fmt.Errorf("read projects: %w", err)
+	}
+	projectTokens := make(map[string]string, len(projects))
+	for _, p := range projects {
+		ptoken, terr := m.memoryGraphTokenFor(key, p.ID)
+		if terr != nil {
+			return terr
+		}
+		projectTokens[p.ID] = ptoken
+	}
+
 	changed, err := applyMCPServer(
-		filepath.Join(userDir, "config.json"), m.cfg.MCPBaseURL, token)
+		filepath.Join(userDir, "config.json"), m.cfg.MCPBaseURL, token, projectTokens)
 	if err != nil {
 		return fmt.Errorf("apply memory-graph mcp server: %w", err)
 	}
@@ -337,6 +374,12 @@ func (m *Manager) applyMemoryGraphMCP(key WorkspaceKey, userDir string) error {
 // with a broken token would give the agent a memory server that always 401s, which
 // is harder to diagnose than no memory server at all.
 func (m *Manager) memoryGraphToken(key WorkspaceKey) (string, error) {
+	return m.memoryGraphTokenFor(key, "")
+}
+
+// memoryGraphTokenFor mints the token for one workspace, optionally scoped to a
+// project. An empty projectID yields the pre-projects token byte for byte.
+func (m *Manager) memoryGraphTokenFor(key WorkspaceKey, projectID string) (string, error) {
 	if m.cfg.ResolvedMCPTokenSecret == "" {
 		return "", nil
 	}
@@ -345,9 +388,31 @@ func (m *Manager) memoryGraphToken(key WorkspaceKey) (string, error) {
 		SubsAccID: key.SubsAccID,
 		Role:      key.Role,
 		UserAccID: key.UserAccID,
+		Project:   projectID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("mint memory-graph token: %w", err)
 	}
 	return token, nil
+}
+
+// projectServersMatch reports whether the config already holds exactly the
+// project memory servers it should — no more (a deleted project's entry) and no
+// fewer (a project created since the last write).
+func projectServersMatch(servers map[string]any, baseURL string, tokens map[string]string) bool {
+	found := 0
+	for name := range servers {
+		if strings.HasPrefix(name, MCPServerName+"-") {
+			found++
+		}
+	}
+	if found != len(tokens) {
+		return false
+	}
+	for projectID, token := range tokens {
+		if !reflect.DeepEqual(servers[ProjectMCPServerName(projectID)], desiredMCPServer(baseURL, token)) {
+			return false
+		}
+	}
+	return true
 }

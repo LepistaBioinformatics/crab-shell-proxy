@@ -22,7 +22,7 @@ func mediaFixture(t *testing.T) (*Manager, WorkspaceKey, string) {
 	root := t.TempDir()
 	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "alpha", UserAccID: "u"}
 	m := &Manager{cfg: &config.Config{ContainerDataRoot: root, HostDataRoot: root}}
-	uploads := config.UploadsDir(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	uploads := config.UploadsDir(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, config.MainWorkspace)
 
 	for _, rel := range []string{
 		"top.txt",
@@ -43,7 +43,7 @@ func mediaFixture(t *testing.T) (*Manager, WorkspaceKey, string) {
 
 func listPaths(t *testing.T, m *Manager, key WorkspaceKey) []string {
 	t.Helper()
-	got, err := m.ListMedia(key)
+	got, err := m.ListMedia(key, "")
 	if err != nil {
 		t.Fatalf("ListMedia: %v", err)
 	}
@@ -81,10 +81,10 @@ func TestListMediaListsFoldersAndFiles(t *testing.T) {
 // The case the change exists for: a folder with nothing in it.
 func TestListMediaListsAnEmptyFolder(t *testing.T) {
 	m, key, _ := mediaFixture(t)
-	if err := m.CreateFolder(key, "brand-new"); err != nil {
+	if err := m.CreateFolder(key, "", "brand-new"); err != nil {
 		t.Fatalf("CreateFolder: %v", err)
 	}
-	entries, err := m.ListMedia(key)
+	entries, err := m.ListMedia(key, "")
 	if err != nil {
 		t.Fatalf("ListMedia: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestListMediaListsAnEmptyFolder(t *testing.T) {
 // Only folders carry the flag, or the interface would render files as branches.
 func TestListMediaMarksOnlyFoldersAsDirs(t *testing.T) {
 	m, key, _ := mediaFixture(t)
-	entries, err := m.ListMedia(key)
+	entries, err := m.ListMedia(key, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +121,10 @@ func TestListMediaMarksOnlyFoldersAsDirs(t *testing.T) {
 // over a folder would rename it on screen.
 func TestListMediaDoesNotStripAUidLikeFolderName(t *testing.T) {
 	m, key, _ := mediaFixture(t)
-	if err := m.CreateFolder(key, "ab12cd34-notes"); err != nil {
+	if err := m.CreateFolder(key, "", "ab12cd34-notes"); err != nil {
 		t.Fatalf("CreateFolder: %v", err)
 	}
-	entries, err := m.ListMedia(key)
+	entries, err := m.ListMedia(key, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestListMediaKeepsTheFolderInTheDisplayName(t *testing.T) {
 	// Two files can share a base name in different folders; without the prefix
 	// the sidebar would show two identical rows.
 	m, key, _ := mediaFixture(t)
-	got, err := m.ListMedia(key)
+	got, err := m.ListMedia(key, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestListMediaKeepsTheFolderInTheDisplayName(t *testing.T) {
 
 func TestOpenMediaReadsANestedFile(t *testing.T) {
 	m, key, _ := mediaFixture(t)
-	rc, display, err := m.OpenMedia(key, "reports/2026/q2.pdf")
+	rc, display, err := m.OpenMedia(key, "", "reports/2026/q2.pdf")
 	if err != nil {
 		t.Fatalf("OpenMedia: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestOpenMediaReadsANestedFile(t *testing.T) {
 
 func TestDeleteMediaRemovesANestedFile(t *testing.T) {
 	m, key, uploads := mediaFixture(t)
-	if err := m.DeleteMedia(key, "reports/q1.pdf"); err != nil {
+	if err := m.DeleteMedia(key, "", "reports/q1.pdf"); err != nil {
 		t.Fatalf("DeleteMedia: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(uploads, "reports", "q1.pdf")); !os.IsNotExist(err) {
@@ -189,7 +189,7 @@ func TestDeleteMediaRemovesANestedFile(t *testing.T) {
 
 func TestDeleteMediaIsIdempotent(t *testing.T) {
 	m, key, _ := mediaFixture(t)
-	if err := m.DeleteMedia(key, "reports/nope.pdf"); err != nil {
+	if err := m.DeleteMedia(key, "", "reports/nope.pdf"); err != nil {
 		t.Errorf("missing file must be a no-op, got %v", err)
 	}
 }
@@ -209,10 +209,10 @@ func TestNestedPathsCannotEscapeTheWorkspace(t *testing.T) {
 		"   ",
 	} {
 		t.Run(bad, func(t *testing.T) {
-			if _, _, err := m.OpenMedia(key, bad); err == nil {
+			if _, _, err := m.OpenMedia(key, "", bad); err == nil {
 				t.Errorf("OpenMedia(%q) must fail", bad)
 			}
-			if err := m.DeleteMedia(key, bad); err == nil {
+			if err := m.DeleteMedia(key, "", bad); err == nil {
 				// A rejected path must be an error, never a silent success that
 				// could have removed something outside the workspace.
 				t.Errorf("DeleteMedia(%q) must fail", bad)
@@ -250,7 +250,7 @@ func TestSymlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
 		t.Skipf("symlink unsupported here: %v", err)
 	}
 
-	if _, _, err := m.OpenMedia(key, "escape.txt"); err == nil {
+	if _, _, err := m.OpenMedia(key, "", "escape.txt"); err == nil {
 		t.Error("a symlink pointing outside uploads must not be readable")
 	}
 	// It must not even be advertised.
@@ -268,7 +268,7 @@ func TestSymlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
 func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
 	m, key, _ := mediaFixture(t)
 
-	stored, err := m.StoreAgentAttachment(key, "report.pdf", strings.NewReader("%PDF-1.4 fake"))
+	stored, err := m.StoreAgentAttachment(key, "", "report.pdf", strings.NewReader("%PDF-1.4 fake"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
 	}
 
 	// The two operations the sidebar performs, on the value the store returned.
-	listed, err := m.ListMedia(key)
+	listed, err := m.ListMedia(key, "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
 	if !found {
 		t.Errorf("attachment not listed: %+v", listed)
 	}
-	rc, _, err := m.OpenMedia(key, stored.Name)
+	rc, _, err := m.OpenMedia(key, "", stored.Name)
 	if err != nil {
 		t.Fatalf("open %q: %v", stored.Name, err)
 	}
@@ -310,7 +310,7 @@ func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
 func TestStoreAgentAttachmentSanitizesAndOverwrites(t *testing.T) {
 	m, key, _ := mediaFixture(t)
 
-	stored, err := m.StoreAgentAttachment(key, "../../etc/passwd", strings.NewReader("x"))
+	stored, err := m.StoreAgentAttachment(key, "", "../../etc/passwd", strings.NewReader("x"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -318,13 +318,13 @@ func TestStoreAgentAttachmentSanitizesAndOverwrites(t *testing.T) {
 		t.Errorf("path = %q, want the traversal stripped to a leaf name", stored.Path)
 	}
 
-	if _, err := m.StoreAgentAttachment(key, "report.pdf", strings.NewReader("v1")); err != nil {
+	if _, err := m.StoreAgentAttachment(key, "", "report.pdf", strings.NewReader("v1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.StoreAgentAttachment(key, "report.pdf", strings.NewReader("v2-longer")); err != nil {
+	if _, err := m.StoreAgentAttachment(key, "", "report.pdf", strings.NewReader("v2-longer")); err != nil {
 		t.Fatal(err)
 	}
-	listed, _ := m.ListMedia(key)
+	listed, _ := m.ListMedia(key, "")
 	var n int
 	for _, f := range listed {
 		if f.Path == "uploads/attachments/report.pdf" {
@@ -334,7 +334,7 @@ func TestStoreAgentAttachmentSanitizesAndOverwrites(t *testing.T) {
 	if n != 1 {
 		t.Errorf("report.pdf listed %d times, want 1 (a re-delivery overwrites)", n)
 	}
-	rc, _, err := m.OpenMedia(key, "attachments/report.pdf")
+	rc, _, err := m.OpenMedia(key, "", "attachments/report.pdf")
 	if err != nil {
 		t.Fatal(err)
 	}

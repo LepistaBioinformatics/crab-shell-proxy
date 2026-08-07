@@ -67,7 +67,7 @@ func readConfig(t *testing.T, path string) map[string]any {
 func TestMaterializeWritesModelListWithoutAnyAPIKey(t *testing.T) {
 	_, configPath, secPath := seedWorkspaceFiles(t)
 
-	if err := materializeModels(configPath, secPath, testResolution()); err != nil {
+	if err := materializeModels(configPath, secPath, testResolution(), projectList{}); err != nil {
 		t.Fatalf("materializeModels: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestMaterializeWritesModelListWithoutAnyAPIKey(t *testing.T) {
 func TestMaterializeSetsDefaultsAndFallbackOrder(t *testing.T) {
 	_, configPath, secPath := seedWorkspaceFiles(t)
 
-	if err := materializeModels(configPath, secPath, testResolution()); err != nil {
+	if err := materializeModels(configPath, secPath, testResolution(), projectList{}); err != nil {
 		t.Fatalf("materializeModels: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestMaterializeSetsDefaultsAndFallbackOrder(t *testing.T) {
 func TestMaterializeWritesKeysToSecurityAndPrunesStaleOnes(t *testing.T) {
 	_, configPath, secPath := seedWorkspaceFiles(t)
 
-	if err := materializeModels(configPath, secPath, testResolution()); err != nil {
+	if err := materializeModels(configPath, secPath, testResolution(), projectList{}); err != nil {
 		t.Fatalf("materializeModels: %v", err)
 	}
 
@@ -162,13 +162,13 @@ func TestMaterializeIsIdempotent(t *testing.T) {
 	_, configPath, secPath := seedWorkspaceFiles(t)
 	res := testResolution()
 
-	if err := materializeModels(configPath, secPath, res); err != nil {
+	if err := materializeModels(configPath, secPath, res, projectList{}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	firstCfg, _ := os.ReadFile(configPath)
 	firstSec, _ := os.ReadFile(secPath)
 
-	if err := materializeModels(configPath, secPath, res); err != nil {
+	if err := materializeModels(configPath, secPath, res, projectList{}); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	secondCfg, _ := os.ReadFile(configPath)
@@ -190,7 +190,7 @@ func TestMaterializeCarriesOptionalFieldsOnlyWhenSet(t *testing.T) {
 		ExtraBody: json.RawMessage(`{"reasoning_split":true}`),
 	}}
 
-	if err := materializeModels(configPath, secPath, res); err != nil {
+	if err := materializeModels(configPath, secPath, res, projectList{}); err != nil {
 		t.Fatalf("materializeModels: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestMaterializeLeavesEveryIntermediateStateBootable(t *testing.T) {
 		t.Skip("chmod 444 does not block this uid's write (running as root); the order is unobservable here")
 	}
 
-	err := materializeModels(configPath, secPath, testResolution())
+	err := materializeModels(configPath, secPath, testResolution(), projectList{})
 	if err == nil {
 		t.Fatal("materializeModels succeeded despite an unwritable config.json")
 	}
@@ -276,7 +276,7 @@ func TestMaterializeCreatesAMissingAgentsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := materializeModels(configPath, secPath, testResolution()); err != nil {
+	if err := materializeModels(configPath, secPath, testResolution(), projectList{}); err != nil {
 		t.Fatalf("materializeModels: %v", err)
 	}
 

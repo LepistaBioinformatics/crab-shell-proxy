@@ -95,6 +95,25 @@
 
 ---
 
+## M6: Projects (planned)
+
+**Goal:** let a user carve one agent into several projects, each with its own
+workspace and instructions, inheriting the parent's skills, model and secrets.
+
+### Features
+
+**agent-projects** - SPEC'D — spec in `.specs/features/agent-projects/`
+
+- picoclaw `agents.list` + `agents.dispatch` driven from a proxy-owned project
+  store, projected into `config.json` on every ensure.
+- **Needs a patched picoclaw image, not an upstream merge:** dispatch selectors
+  match exactly today, so one project would need one rule per conversation. A
+  ~15-line `*` wildcard fixes it, shipped as a build-time patch overlay over a
+  pinned upstream tag. Contributing it back to `sipeed/picoclaw` is a parallel,
+  optional track — see the spec's DEC-2.
+
+---
+
 ## Future Considerations
 
 - Production hardening: TLS termination, Docker-socket privilege reduction, secret-rotation automation.

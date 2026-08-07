@@ -26,8 +26,8 @@ func cronServer(t *testing.T) (*Server, string) {
 // The scope goodHeaders resolves to: role "alpha" from the service-name header,
 // user from the profile's own accId.
 func cronPaths(root string) (cronFile, sessionsDir string) {
-	return config.CronFile(root, tenantT, subsX, "alpha", accAlice),
-		config.SessionsDir(root, tenantT, subsX, "alpha", accAlice)
+	return config.CronFile(root, tenantT, subsX, "alpha", accAlice, config.MainWorkspace),
+		config.SessionsDir(root, tenantT, subsX, "alpha", accAlice, config.MainWorkspace)
 }
 
 func seedFile(t *testing.T, path, body string) {
@@ -213,11 +213,11 @@ func TestCronTasksRejectsForeignStoreVersion(t *testing.T) {
 func TestCronRoutesRequireScopeParams(t *testing.T) {
 	s, _ := cronServer(t)
 	for name, path := range map[string]string{
-		"tasks without tenant": "/v1/cron/tasks?subs_acc_id=" + subsX,
+		"tasks without tenant":  "/v1/cron/tasks?subs_acc_id=" + subsX,
 		"tasks with bad tenant": "/v1/cron/tasks?tenant_id=nope&subs_acc_id=" + subsX,
-		"tasks without subs":   "/v1/cron/tasks?tenant_id=" + tenantT,
-		"runs without tenant":  "/v1/cron/runs?subs_acc_id=" + subsX + "&run=agent_cron-a-b",
-		"runs without subs":    "/v1/cron/runs?tenant_id=" + tenantT + "&run=agent_cron-a-b",
+		"tasks without subs":    "/v1/cron/tasks?tenant_id=" + tenantT,
+		"runs without tenant":   "/v1/cron/runs?subs_acc_id=" + subsX + "&run=agent_cron-a-b",
+		"runs without subs":     "/v1/cron/runs?tenant_id=" + tenantT + "&run=agent_cron-a-b",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if rec := do(t, s, path); rec.Code != http.StatusBadRequest {
@@ -287,11 +287,11 @@ func TestCronRunRejectsUnknownRun(t *testing.T) {
 	seedFile(t, filepath.Join(sessionsDir, "..", "..", "elsewhere.jsonl"), `{"role":"user","content":"secret"}`)
 
 	for name, run := range map[string]string{
-		"traversal":            "../../elsewhere",
-		"absolute":             "/etc/passwd",
-		"a user session":       "sk_v1_7f7c41b4",
-		"nonexistent":          "agent_cron-0000000000000000-nope",
-		"empty":                "",
+		"traversal":      "../../elsewhere",
+		"absolute":       "/etc/passwd",
+		"a user session": "sk_v1_7f7c41b4",
+		"nonexistent":    "agent_cron-0000000000000000-nope",
+		"empty":          "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := do(t, s, "/v1/cron/runs?"+cronQuery+"&run="+run)

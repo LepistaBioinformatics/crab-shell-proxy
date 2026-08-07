@@ -40,8 +40,11 @@ const maxAttachmentBytes = 64 << 20
 
 // storeTurnAttachment fetches one delivered file from the harness and stores it
 // under uploads/attachments/.
+// project scopes the store to the workspace of the agent that produced the file:
+// a turn answered by a project agent delivers into that project's uploads, not
+// into the main workspace where its own agent could never open it again.
 func (s *Server) storeTurnAttachment(
-	ctx context.Context, key docker.WorkspaceKey, a turn.Attachment,
+	ctx context.Context, key docker.WorkspaceKey, project string, a turn.Attachment,
 ) (docker.StoredMedia, error) {
 	if !strings.HasPrefix(a.URL, "http://") && !strings.HasPrefix(a.URL, "https://") {
 		// The runner resolves the harness-relative path before it gets here; an
@@ -74,7 +77,7 @@ func (s *Server) storeTurnAttachment(
 	}
 
 	name := attachmentName(a, res.Header.Get("Content-Disposition"))
-	return s.Mgr.StoreAgentAttachment(key, name, io.LimitReader(res.Body, maxAttachmentBytes))
+	return s.Mgr.StoreAgentAttachment(key, project, name, io.LimitReader(res.Body, maxAttachmentBytes))
 }
 
 // attachmentName is the file name to store under. The frame's own filename is
