@@ -108,10 +108,14 @@ func escaped(err error) bool {
 		strings.Contains(pe.Err.Error(), pathEscapesMsg)
 }
 
-// stat resolves rel inside the tree. A path that would leave the root is
-// reported as ErrMediaName, an absent one as ErrMediaNotFound — the same two
-// outcomes the hand-rolled resolver produced, now decided by the syscall.
-func (t *treeRoot) stat(rel string) (os.FileInfo, error) {
+// statMedia resolves rel inside the tree, in the media API's vocabulary: a path
+// that would leave the root is ErrMediaName, an absent one ErrMediaNotFound,
+// anything else stays the real failure it was.
+//
+// The mapping lives here rather than in the generic layer because it is the
+// MEDIA API's contract. memory and projects use the same confinement with
+// different error vocabularies — see their own call sites.
+func (t *treeRoot) statMedia(rel string) (os.FileInfo, error) {
 	info, err := t.root.Stat(rel)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -142,4 +146,22 @@ func (t *treeRoot) countFiles(rel string) int {
 		return nil
 	})
 	return files
+}
+
+// copyIntoTree copies an outside source file to a path INSIDE the tree. The
+// source is proxy-owned (the effective persona set, materialized by the proxy);
+// only the destination is in territory the agent can reshape, so only the
+// destination goes through the Root.
+func copyIntoTree(t *treeRoot, src, destRel string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := t.root.WriteFile(destRel, data, 0o600); err != nil {
+		if escaped(err) {
+			return ErrMediaName
+		}
+		return err
+	}
+	return nil
 }

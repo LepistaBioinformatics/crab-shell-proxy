@@ -3,12 +3,12 @@
 package history
 
 import (
+	"io/fs"
 	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -100,15 +100,23 @@ const durableDir = "durable"
 // transcript (which survives picoclaw's live-file rewrites) and falls back to
 // the live file. Missing dir or file yields an empty slice, never an error.
 func Read(sessionsDir, sessionKey string) ([]Message, error) {
-	durablePath := filepath.Join(sessionsDir, durableDir)
-	if _, err := os.Stat(filepath.Join(durablePath, sessionKey+".jsonl")); err == nil {
-		return readMessages(durablePath, sessionKey)
+	r, err := openSessions(sessionsDir)
+	if err != nil {
+		if errors.Is(err, errNoSessionsDir) {
+			return []Message{}, nil
+		}
+		return nil, err
 	}
-	basename := FindSessionFile(sessionsDir, sessionKey)
+	defer r.Close()
+
+	if existsIn(r, durableDir+"/"+sessionKey+".jsonl") {
+		return readMessages(r, durableDir, sessionKey)
+	}
+	basename := findSessionFile(r, sessionKey)
 	if basename == "" {
 		return []Message{}, nil
 	}
-	return readMessages(sessionsDir, basename)
+	return readMessages(r, "", basename)
 }
 
 // ErrLiveTranscriptMissing means no live transcript carries this conversation's
@@ -129,12 +137,21 @@ var ErrLiveTranscriptMissing = errors.New("no live transcript matches the sessio
 // transcript exists, a live one that no longer resolves is a failure and returns
 // ErrLiveTranscriptMissing rather than reporting success.
 func SyncDurable(sessionsDir, sessionKey string) error {
-	basenames := findSessionFiles(sessionsDir, sessionKey)
-	durableDirPath := filepath.Join(sessionsDir, durableDir)
+	r, err := openSessions(sessionsDir)
+	if err != nil {
+		if errors.Is(err, errNoSessionsDir) {
+			return nil
+		}
+		return err
+	}
+	defer r.Close()
+
+	basenames := findSessionFiles(r, sessionKey)
+	durableRel := durableDir + "/" + sessionKey + ".jsonl"
 	if len(basenames) == 0 {
 		// No live transcript is normal for a conversation picoclaw hasn't
 		// persisted yet. Once a durable one exists it is not: see the error.
-		if _, err := os.Stat(filepath.Join(durableDirPath, sessionKey+".jsonl")); err == nil {
+		if existsIn(r, durableRel) {
 			return ErrLiveTranscriptMissing
 		}
 		return nil
@@ -145,7 +162,7 @@ func SyncDurable(sessionsDir, sessionKey string) error {
 	// never captured at all. Dedup below makes covering all of them safe.
 	var live []string
 	for _, basename := range basenames {
-		lines, err := readRawLines(filepath.Join(sessionsDir, basename+".jsonl"))
+		lines, err := readRawLines(r, basename+".jsonl")
 		if err != nil {
 			return err
 		}
@@ -154,11 +171,10 @@ func SyncDurable(sessionsDir, sessionKey string) error {
 	if len(live) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(durableDirPath, 0o755); err != nil {
+	if err := r.MkdirAll(durableDir, 0o755); err != nil {
 		return err
 	}
-	durablePath := filepath.Join(durableDirPath, sessionKey+".jsonl")
-	existing, err := readRawLines(durablePath)
+	existing, err := readRawLines(r, durableRel)
 	if err != nil {
 		return err
 	}
@@ -179,7 +195,7 @@ func SyncDurable(sessionsDir, sessionKey string) error {
 		return nil
 	}
 	// 0o644 so the non-root agent can read it back (per memory/CONTEXT_RECOVERY.md).
-	f, err := os.OpenFile(durablePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := r.OpenFile(durableRel, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -218,8 +234,8 @@ const maxLineBytes = 8 * 1024 * 1024
 // the conversation's durable transcript stopped growing for good. Memory stays
 // bounded because an oversized line is discarded as it is consumed, never
 // assembled. A missing file yields no lines and no error.
-func eachLine(path string, fn func(line string)) error {
-	return eachLineUntil(path, func(line string) bool {
+func eachLine(r *os.Root, rel string, fn func(line string)) error {
+	return eachLineUntil(r, rel, func(line string) bool {
 		fn(line)
 		return true
 	})
@@ -231,8 +247,8 @@ func eachLine(path string, fn func(line string)) error {
 // The obvious bufio.Scanner version is exactly what the comment above forbids, and it
 // fails the same way — Scan() gives up on an oversized line, which for a first-line
 // read means silently reporting no content at all.
-func eachLineUntil(path string, fn func(line string) bool) error {
-	f, err := os.Open(path)
+func eachLineUntil(r *os.Root, rel string, fn func(line string) bool) error {
+	f, err := r.Open(rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -241,11 +257,11 @@ func eachLineUntil(path string, fn func(line string) bool) error {
 	}
 	defer f.Close()
 
-	r := bufio.NewReaderSize(f, 64*1024)
+	br := bufio.NewReaderSize(f, 64*1024)
 	var buf []byte
 	oversized := false
 	for {
-		chunk, err := r.ReadSlice('\n')
+		chunk, err := br.ReadSlice('\n')
 		if len(buf)+len(chunk) > maxLineBytes {
 			oversized, buf = true, buf[:0]
 		} else if !oversized {
@@ -273,9 +289,9 @@ func eachLineUntil(path string, fn func(line string) bool) error {
 
 // readRawLines returns the non-empty, trimmed lines of a jsonl file (empty when
 // absent).
-func readRawLines(path string) ([]string, error) {
+func readRawLines(r *os.Root, rel string) ([]string, error) {
 	var out []string
-	err := eachLine(path, func(line string) { out = append(out, line) })
+	err := eachLine(r, rel, func(line string) { out = append(out, line) })
 	return out, err
 }
 
@@ -285,7 +301,16 @@ func readRawLines(path string) ([]string, error) {
 // picoclaw wrote. It returns "" when the sessions dir is missing or no file
 // matches yet (picoclaw hasn't persisted the transcript).
 func FindSessionFile(sessionsDir, sessionKey string) string {
-	files := findSessionFiles(sessionsDir, sessionKey)
+	r, err := openSessions(sessionsDir)
+	if err != nil {
+		return ""
+	}
+	defer r.Close()
+	return findSessionFile(r, sessionKey)
+}
+
+func findSessionFile(r *os.Root, sessionKey string) string {
+	files := findSessionFiles(r, sessionKey)
 	if len(files) == 0 {
 		return ""
 	}
@@ -303,9 +328,11 @@ func FindSessionFile(sessionsDir, sessionKey string) string {
 // "sk_v1_…", so any conversation owning a cron task resolved to a cron transcript
 // and the user's real one was never read at all. Filtering by session kind and
 // ordering by mtime is what makes "the conversation's current file" mean that.
-func findSessionFiles(sessionsDir, sessionKey string) []string {
+func findSessionFiles(r *os.Root, sessionKey string) []string {
 	marker := chatMarkerPrefix + sessionKey
-	entries, err := os.ReadDir(sessionsDir)
+	// Through the Root's own fs.FS, so the listing cannot be redirected by a
+	// symlinked sessions dir and the names it yields are names inside it.
+	entries, err := fs.ReadDir(r.FS(), ".")
 	if err != nil {
 		return nil // no sessions dir yet — no conversations at all
 	}
@@ -319,7 +346,7 @@ func findSessionFiles(sessionsDir, sessionKey string) []string {
 		if !strings.HasSuffix(name, ".meta.json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(sessionsDir, name))
+		raw, err := r.ReadFile(name)
 		if err != nil {
 			continue
 		}
@@ -335,7 +362,7 @@ func findSessionFiles(sessionsDir, sessionKey string) []string {
 		}
 		basename := strings.TrimSuffix(name, ".meta.json")
 		var mod time.Time
-		if fi, err := os.Stat(filepath.Join(sessionsDir, basename+".jsonl")); err == nil {
+		if fi, err := r.Stat(basename + ".jsonl"); err == nil {
 			mod = fi.ModTime()
 		}
 		matches = append(matches, match{basename, mod})
@@ -350,9 +377,15 @@ func findSessionFiles(sessionsDir, sessionKey string) []string {
 	return out
 }
 
-func readMessages(sessionsDir, basename string) ([]Message, error) {
+// dir is "" for the sessions root itself, or durableDir. Both are relative to the
+// Root, so neither can be redirected.
+func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
+	rel := basename + ".jsonl"
+	if dir != "" {
+		rel = dir + "/" + rel
+	}
 	messages := []Message{}
-	err := eachLine(filepath.Join(sessionsDir, basename+".jsonl"), func(line string) {
+	err := eachLine(r, rel, func(line string) {
 		var e jsonlEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			return // skip a malformed line rather than failing the whole history

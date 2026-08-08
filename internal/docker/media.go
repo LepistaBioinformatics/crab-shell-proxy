@@ -188,7 +188,7 @@ func (m *Manager) OpenMedia(key WorkspaceKey, project, storedName string) (io.Re
 	// Root here would be closing the directory handle the open file was resolved
 	// against. The *os.File itself is independent once open, so the root is closed
 	// on every path that does not hand it back.
-	info, err := tree.stat(rel)
+	info, err := tree.statMedia(rel)
 	if err != nil {
 		tree.Close()
 		return nil, "", err

@@ -136,10 +136,22 @@ var projectPersonaSeeded = []string{"USER.md"}
 //
 // effPersonaDir is the RESOLVED persona set (scope → tenant → template), already
 // materialized by syncEffectivePersona.
+// Every write below lands in a tree the project's own agent owns and can reshape
+// between two ensures — the workspace is bind-mounted read-write into its
+// container and chowned to its uid. So the whole seed runs inside an os.Root
+// anchored at the project workspace: a `sessions`, `memory` or `AGENT.md`
+// component replaced by a symlink fails the syscall rather than redirecting a
+// root-owned write out of the workspace.
 func seedProjectWorkspace(userDir, effPersonaDir string, p projects.Project, user string) error {
-	root := filepath.Join(userDir, config.ProjectWorkspace(p.ID))
+	rootPath := filepath.Join(userDir, config.ProjectWorkspace(p.ID))
+	tree, err := openTree(rootPath)
+	if err != nil {
+		return err
+	}
+	defer tree.Close()
+
 	for _, sub := range projectWorkspaceDirs {
-		if err := os.MkdirAll(filepath.Join(root, sub), 0o700); err != nil {
+		if err := tree.root.MkdirAll(sub, 0o700); err != nil {
 			return fmt.Errorf("create project dir %s: %w", sub, err)
 		}
 	}
@@ -149,20 +161,22 @@ func seedProjectWorkspace(userDir, effPersonaDir string, p projects.Project, use
 		if !fileExists(src) {
 			continue // nothing provides it; absent is a valid state
 		}
-		if err := copyFile(src, filepath.Join(root, name)); err != nil {
+		if err := copyIntoTree(tree, src, name); err != nil {
 			return fmt.Errorf("refresh project persona %s: %w", name, err)
 		}
 	}
 	for _, name := range projectPersonaSeeded {
-		dst := filepath.Join(root, name)
-		if fileExists(dst) {
+		// Lstat, not Stat: a symlink standing where USER.md belongs must count as
+		// "already there" for the seeding decision — following it to decide would
+		// mean deciding based on a file outside the workspace.
+		if _, statErr := tree.root.Lstat(name); statErr == nil {
 			continue // the agent has been writing here; leave it alone
 		}
 		src := filepath.Join(effPersonaDir, name)
 		if !fileExists(src) {
 			continue
 		}
-		if err := copyFile(src, dst); err != nil {
+		if err := copyIntoTree(tree, src, name); err != nil {
 			return fmt.Errorf("seed project persona %s: %w", name, err)
 		}
 	}
@@ -171,11 +185,11 @@ func seedProjectWorkspace(userDir, effPersonaDir string, p projects.Project, use
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(root, "AGENT.md"), []byte(agentMD), 0o600); err != nil {
+	if err := tree.root.WriteFile("AGENT.md", []byte(agentMD), 0o600); err != nil {
 		return fmt.Errorf("write project AGENT.md: %w", err)
 	}
 
-	return chownTree(root, user)
+	return chownTree(rootPath, user)
 }
 
 // composeProjectAgentMD builds a project's AGENT.md: the parent's frontmatter

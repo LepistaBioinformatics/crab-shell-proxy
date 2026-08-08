@@ -56,7 +56,7 @@ func TestTreeRootRefusesAnEscapingSymlinkOnEveryOperation(t *testing.T) {
 	if _, err := tree.root.Open("escape/secret.txt"); err == nil {
 		t.Error("Open followed a symlink out of the tree")
 	}
-	if _, err := tree.stat("escape/secret.txt"); err == nil {
+	if _, err := tree.statMedia("escape/secret.txt"); err == nil {
 		t.Error("Stat followed a symlink out of the tree")
 	}
 	// Writing through it.
@@ -184,5 +184,69 @@ func TestReadsDoNotCreateTheUploadsTree(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Error("openTreeIfExists created the uploads directory")
+	}
+}
+
+// The workspace is bind-mounted read-write into the agent's container and
+// chowned to the uid it runs as, so the agent owns `workspace/memory` — while the
+// proxy writes MEMORY_CUSTOM.md into it as root. Before this was confined, a
+// symlink planted at that component redirected a root-owned write of
+// caller-supplied content to a path the agent chose: another tenant's workspace,
+// or the proxy's own filesystem. That is the escalation this closes.
+func TestMemoryWriteCannotBeRedirectedBySymlink(t *testing.T) {
+	ws := t.TempDir()
+	elsewhere := t.TempDir()
+	victim := filepath.Join(elsewhere, "MEMORY_CUSTOM.md")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(ws, MemoryDirName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	tree, err := openTree(ws)
+	if err != nil {
+		t.Fatalf("openTree: %v", err)
+	}
+	defer tree.Close()
+
+	// Exactly the sequence WriteMemory performs.
+	_ = tree.root.MkdirAll(MemoryDirName, 0o700)
+	err = tree.root.WriteFile(memoryRel, []byte("ATTACKER CONTROLLED"), 0o600)
+	if err == nil {
+		t.Error("the write was accepted through a symlink out of the workspace")
+	}
+
+	got, readErr := os.ReadFile(victim)
+	if readErr != nil {
+		t.Fatalf("read victim: %v", readErr)
+	}
+	if string(got) != "original" {
+		t.Errorf("the file outside the workspace was overwritten: %q", got)
+	}
+}
+
+// The read side of the same swap: serving whatever the link points at back to
+// the member as their own standing notes would be an arbitrary-file disclosure
+// through the memory editor.
+func TestMemoryReadCannotBeRedirectedBySymlink(t *testing.T) {
+	ws := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, "MEMORY_CUSTOM.md"), []byte("someone else's"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(ws, MemoryDirName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	tree, err := openTree(ws)
+	if err != nil {
+		t.Fatalf("openTree: %v", err)
+	}
+	defer tree.Close()
+
+	data, err := tree.root.ReadFile(memoryRel)
+	if err == nil {
+		t.Errorf("read followed the link and returned %q", data)
 	}
 }

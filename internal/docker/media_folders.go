@@ -211,7 +211,7 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (in
 	}
 	defer tree.Close()
 
-	fi, err := tree.stat(clean)
+	fi, err := tree.statMedia(clean)
 	if err != nil {
 		return 0, ErrMediaNotFound
 	}
