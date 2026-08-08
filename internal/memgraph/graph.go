@@ -31,6 +31,11 @@ type Scope struct {
 	SubsAccID string
 	Role      string
 	UserAccID string
+	// Project is the agent-projects project this graph belongs to; empty for the
+	// agent's own workspace. A project agent builds a SEPARATE graph: it exists to
+	// keep a subject apart, and a shared graph would pour every other subject back
+	// into its context.
+	Project string
 }
 
 // Observation is one discrete fact about an entity.

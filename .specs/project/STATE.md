@@ -43,6 +43,7 @@ _None._
 
 - [ ] Per-user (not just per-agent) lifecycle-mode overrides — Captured during: project init.
 - [ ] Non-picoclaw harness support (Hermes) behind the same proxy — Captured during: project init (see parent `.specs/features/multi-harness-support/`).
+- [ ] Agent-rooted workspace tree (agent as the base instead of the tenant) — feasibility done 2026-08-07, **not** scheduled: feasible via a hybrid split, but the payoff depends on a driver the user has not stated. See `.specs/features/agent-rooted-workspaces/feasibility.md`. Carries one migration hazard worth fixing regardless: nothing detects workspace bind-mount drift, so any future relocation of the tree would silently hand every live container an empty workspace.
 
 ---
 

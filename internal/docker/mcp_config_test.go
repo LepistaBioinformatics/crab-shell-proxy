@@ -52,7 +52,7 @@ func TestApplyMCPServerWritesTheShapePicoclawActuallyWrote(t *testing.T) {
 	t.Parallel()
 	_, _, _, path := instanceConfigFixture(t, validConfigBody)
 
-	changed, err := applyMCPServer(path, mcpTestBase, "tok123")
+	changed, err := applyMCPServer(path, mcpTestBase, "tok123", nil)
 	if err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestApplyMCPServerWritesTheShapePicoclawActuallyWrote(t *testing.T) {
 func TestApplyMCPServerTrimsATrailingSlashFromTheBaseURL(t *testing.T) {
 	t.Parallel()
 	_, _, _, path := instanceConfigFixture(t, validConfigBody)
-	if _, err := applyMCPServer(path, "http://proxy:8080/", "tok"); err != nil {
+	if _, err := applyMCPServer(path, "http://proxy:8080/", "tok", nil); err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
 	got := serverBlock(t, mustReadJSON(t, path), MCPServerName)["url"]
@@ -105,7 +105,7 @@ func TestApplyMCPServerTrimsATrailingSlashFromTheBaseURL(t *testing.T) {
 func TestApplyMCPServerIsIdempotentByteForByte(t *testing.T) {
 	t.Parallel()
 	_, _, _, path := instanceConfigFixture(t, validConfigBody)
-	if _, err := applyMCPServer(path, mcpTestBase, "tok"); err != nil {
+	if _, err := applyMCPServer(path, mcpTestBase, "tok", nil); err != nil {
 		t.Fatalf("first applyMCPServer: %v", err)
 	}
 	first, err := os.ReadFile(path)
@@ -113,7 +113,7 @@ func TestApplyMCPServerIsIdempotentByteForByte(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 
-	changed, err := applyMCPServer(path, mcpTestBase, "tok")
+	changed, err := applyMCPServer(path, mcpTestBase, "tok", nil)
 	if err != nil {
 		t.Fatalf("second applyMCPServer: %v", err)
 	}
@@ -140,10 +140,10 @@ func TestApplyMCPServerReportsAChangedURLOrToken(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			_, _, _, path := instanceConfigFixture(t, validConfigBody)
-			if _, err := applyMCPServer(path, mcpTestBase, "tok"); err != nil {
+			if _, err := applyMCPServer(path, mcpTestBase, "tok", nil); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
-			changed, err := applyMCPServer(path, c.url, c.token)
+			changed, err := applyMCPServer(path, c.url, c.token, nil)
 			if err != nil {
 				t.Fatalf("applyMCPServer: %v", err)
 			}
@@ -176,7 +176,7 @@ func TestApplyMCPServerPreservesSiblingServersAndOtherToolsKeys(t *testing.T) {
   }
 }`
 	_, _, _, path := instanceConfigFixture(t, body)
-	if _, err := applyMCPServer(path, mcpTestBase, "tok"); err != nil {
+	if _, err := applyMCPServer(path, mcpTestBase, "tok", nil); err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
 	doc := mustReadJSON(t, path)
@@ -211,7 +211,7 @@ func TestApplyMCPServerWithNoTokenLeavesTheFileAlone(t *testing.T) {
 	t.Parallel()
 	_, _, _, path := instanceConfigFixture(t, validConfigBody)
 
-	changed, err := applyMCPServer(path, mcpTestBase, "")
+	changed, err := applyMCPServer(path, mcpTestBase, "", nil)
 	if err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
@@ -223,11 +223,11 @@ func TestApplyMCPServerWithNoTokenLeavesTheFileAlone(t *testing.T) {
 	}
 
 	// Now with a token, then without: the existing block must survive untouched.
-	if _, err := applyMCPServer(path, mcpTestBase, "tok"); err != nil {
+	if _, err := applyMCPServer(path, mcpTestBase, "tok", nil); err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
 	before, _ := os.ReadFile(path)
-	if _, err := applyMCPServer(path, mcpTestBase, ""); err != nil {
+	if _, err := applyMCPServer(path, mcpTestBase, "", nil); err != nil {
 		t.Fatalf("applyMCPServer: %v", err)
 	}
 	after, _ := os.ReadFile(path)
@@ -239,7 +239,7 @@ func TestApplyMCPServerWithNoTokenLeavesTheFileAlone(t *testing.T) {
 func TestApplyMCPServerRefusesAnUnparseableConfig(t *testing.T) {
 	t.Parallel()
 	_, _, _, path := instanceConfigFixture(t, `{"broken": `)
-	if _, err := applyMCPServer(path, mcpTestBase, "tok"); err == nil {
+	if _, err := applyMCPServer(path, mcpTestBase, "tok", nil); err == nil {
 		t.Error("applyMCPServer rewrote an unparseable config.json instead of refusing")
 	}
 	raw, _ := os.ReadFile(path)
@@ -251,7 +251,7 @@ func TestApplyMCPServerRefusesAnUnparseableConfig(t *testing.T) {
 func TestApplyMCPServerOnAnUnprovisionedWorkspaceErrors(t *testing.T) {
 	t.Parallel()
 	_, _, _, path := instanceConfigFixture(t, "")
-	if _, err := applyMCPServer(path, mcpTestBase, "tok"); err == nil {
+	if _, err := applyMCPServer(path, mcpTestBase, "tok", nil); err == nil {
 		t.Error("applyMCPServer invented a config.json for a workspace that has none")
 	}
 }

@@ -19,9 +19,10 @@ package history
 // exists to fail if someone tries.
 
 import (
+	"errors"
+	"io/fs"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -91,11 +92,17 @@ type cronMeta struct {
 // opens one. A missing sessions dir means the agent has no sessions at all, which
 // is not an error.
 func CronRuns(sessionsDir string) ([]CronRun, error) {
-	entries, err := os.ReadDir(sessionsDir)
+	r, err := openSessions(sessionsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, errNoSessionsDir) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	defer r.Close()
+
+	entries, err := fs.ReadDir(r.FS(), ".")
+	if err != nil {
 		return nil, err
 	}
 
@@ -105,7 +112,7 @@ func CronRuns(sessionsDir string) ([]CronRun, error) {
 		if !strings.HasSuffix(name, ".meta.json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(sessionsDir, name))
+		raw, err := r.ReadFile(name)
 		if err != nil {
 			continue // unreadable meta: skip the row, don't blank the list
 		}
@@ -119,7 +126,7 @@ func CronRuns(sessionsDir string) ([]CronRun, error) {
 
 		jobID, runID := splitCronKey(strings.TrimPrefix(meta.Key, cronSessionPrefix))
 		basename := strings.TrimSuffix(name, ".meta.json")
-		prompt, found := firstEntryContent(filepath.Join(sessionsDir, basename+".jsonl"))
+		prompt, found := firstEntryContent(r, basename+".jsonl")
 
 		runs = append(runs, CronRun{
 			JobID:             jobID,
@@ -163,12 +170,12 @@ func splitCronKey(body string) (jobID, runID string) {
 // Built on eachLineUntil rather than its own scanner: this package's reader exists
 // because bufio.Scanner abandons a file on an oversized line, and picoclaw inlines
 // whole tool results, so that is a line shape this data really has.
-func firstEntryContent(path string) (string, bool) {
-	if _, err := os.Stat(path); err != nil {
+func firstEntryContent(r *os.Root, rel string) (string, bool) {
+	if !existsIn(r, rel) {
 		return "", false
 	}
 	content := ""
-	_ = eachLineUntil(path, func(line string) bool {
+	_ = eachLineUntil(r, rel, func(line string) bool {
 		var e jsonlEntry
 		if err := json.Unmarshal([]byte(line), &e); err == nil {
 			content = e.Content
@@ -182,8 +189,17 @@ func firstEntryContent(path string) (string, bool) {
 // included. basename must already have been resolved against CronRuns by the
 // caller; nothing here interprets it beyond joining it to sessionsDir.
 func ReadCronRun(sessionsDir, basename string) ([]CronEntry, error) {
+	r, err := openSessions(sessionsDir)
+	if err != nil {
+		if errors.Is(err, errNoSessionsDir) {
+			return []CronEntry{}, nil
+		}
+		return nil, err
+	}
+	defer r.Close()
+
 	entries := []CronEntry{}
-	err := eachLine(filepath.Join(sessionsDir, basename+".jsonl"), func(line string) {
+	err = eachLine(r, basename+".jsonl", func(line string) {
 		var e CronEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			return // skip a malformed line rather than failing the whole run

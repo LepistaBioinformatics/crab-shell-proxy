@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // GraphDirName is the per-user directory holding the knowledge graph.
@@ -29,10 +30,19 @@ const GraphDirName = "memory-graph"
 const GraphFileName = "memory.jsonl"
 
 // Dir is the directory holding one workspace's graph.
+//
+// A project gets its OWN directory, a sibling of the main one. Still above
+// workspace/ and still root-owned, so the reasoning in GraphDirName's comment
+// holds unchanged for every project: the agent cannot reach any memory.jsonl
+// through its file tools or a shell, its own included.
 func (s *Store) Dir(sc Scope) string {
+	dir := GraphDirName
+	if sc.Project != "" {
+		dir = GraphDirName + "-" + identity.SanitizeID(sc.Project)
+	}
 	return filepath.Join(
 		config.UserWorkspace(s.root, sc.TenantID, sc.SubsAccID, sc.Role, sc.UserAccID),
-		GraphDirName,
+		dir,
 	)
 }
 

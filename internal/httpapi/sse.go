@@ -26,7 +26,7 @@ const turnTimeout = 10 * time.Minute
 // on Docker. Once headers are sent the HTTP status can no longer change, so a
 // cold-start or turn failure is surfaced by closing the stream cleanly (a
 // [DONE] with no content) and logging — same as server.js.
-func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, ownerEmail, sessionKey, userContent, model, id string) {
+func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, ownerEmail, sessionKey, userContent, model, id, project string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, errBody("streaming unsupported"))
@@ -132,7 +132,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		// logged and never surfaced as an error: losing the file is bad, replacing
 		// the answer the user is reading with a 502 is worse.
 		Attachment: func(a turn.Attachment) {
-			stored, err := s.storeTurnAttachment(turnCtx, key, a)
+			stored, err := s.storeTurnAttachment(turnCtx, key, project, a)
 			if err != nil {
 				s.logf("stream: attachment %q not stored: %v", a.Filename, err)
 				return
@@ -151,7 +151,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	// Fold the just-written turn into the durable transcript now — while the live
 	// file still holds it — so a later restart that rewrites the live file can't
 	// erase the history.
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegmentOf(project))
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
 		s.logf("stream: sync durable history failed: %v", syncErr)
 	}

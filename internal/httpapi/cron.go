@@ -46,16 +46,22 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// agent-projects: scheduled jobs live in the workspace of the agent that owns
+	// them, so a project has its own cron store.
+	segment, _, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
 
 	jobs, err := cron.Load(config.CronFile(s.Cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID))
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment))
 	if err != nil {
 		s.logf("cron: read store failed key=%+v: %v", key, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
 	runs, err := history.CronRuns(config.SessionsDir(s.Cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID))
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment))
 	if err != nil {
 		s.logf("cron: read runs failed key=%+v: %v", key, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -105,8 +111,14 @@ func (s *Server) handleCronRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// agent-projects: scheduled jobs live in the workspace of the agent that owns
+	// them, so a project has its own cron store.
+	segment, _, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
 	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment)
 
 	runs, err := history.CronRuns(sessionsDir)
 	if err != nil {

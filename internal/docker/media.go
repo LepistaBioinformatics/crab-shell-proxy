@@ -93,66 +93,46 @@ func safeStoredPath(name string) (string, error) {
 	return clean, nil
 }
 
-// resolveWithin joins a validated relative path onto root and proves the result
-// is still inside it AFTER following symlinks. Path validation alone is not
-// enough: a symlink inside uploads/ could otherwise point anywhere on the host.
-//
-// Go 1.23 has no os.OpenRoot, so this is done by hand.
-func resolveWithin(root, rel string) (string, error) {
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", ErrMediaNotFound
-		}
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(root, filepath.FromSlash(rel)))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", ErrMediaNotFound
-		}
-		return "", err
-	}
-	inside, err := filepath.Rel(resolvedRoot, resolved)
-	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-		return "", ErrMediaName
-	}
-	return resolved, nil
-}
 
 // StoreMedia writes an uploaded file into the caller's agent-readable workspace
 // uploads dir, keyed by the sanitized filename so re-uploading the same name
 // OVERWRITES (one file per name — no accumulating duplicates), chowned to the
 // picoclaw user. The size cap + type allowlist are enforced by the caller
 // before this is reached. Returns the "uploads/<name>" path the turn references.
-func (m *Manager) StoreMedia(key WorkspaceKey, rawName string, r io.Reader) (StoredMedia, error) {
+func (m *Manager) StoreMedia(key WorkspaceKey, project, rawName string, r io.Reader) (StoredMedia, error) {
 	name, err := sanitizeFilename(rawName)
 	if err != nil {
 		return StoredMedia{}, err
 	}
-	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return StoredMedia{}, fmt.Errorf("mkdir uploads: %w", err)
-	}
-
-	full := filepath.Join(dir, name)
-	// O_TRUNC: a re-upload of the same name replaces the previous file.
-	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tree, err := openTree(config.UploadsDir(m.cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
 	if err != nil {
+		return StoredMedia{}, err
+	}
+	defer tree.Close()
+
+	// O_TRUNC: a re-upload of the same name replaces the previous file. Opened
+	// through the Root, so a name that resolved onto a symlink out of the tree
+	// fails here instead of writing wherever it pointed.
+	f, err := tree.root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		if escaped(err) {
+			return StoredMedia{}, ErrMediaName
+		}
 		return StoredMedia{}, fmt.Errorf("create upload: %w", err)
 	}
 	n, copyErr := io.Copy(f, r)
 	closeErr := f.Close()
 	if copyErr != nil {
-		_ = os.Remove(full)
+		_ = tree.root.Remove(name)
 		return StoredMedia{}, fmt.Errorf("write upload: %w", copyErr)
 	}
 	if closeErr != nil {
-		_ = os.Remove(full)
+		_ = tree.root.Remove(name)
 		return StoredMedia{}, closeErr
 	}
 
-	if err := chownTree(dir, m.cfg.PicoclawUser); err != nil {
+	if err := chownTree(tree.path, m.cfg.PicoclawUser); err != nil {
 		return StoredMedia{}, fmt.Errorf("chown uploads: %w", err)
 	}
 
@@ -165,20 +145,28 @@ func (m *Manager) StoreMedia(key WorkspaceKey, rawName string, r io.Reader) (Sto
 
 // DeleteMedia removes one uploaded file (by its stored filename from the list)
 // from the caller's uploads dir. Missing file = success (idempotent).
-func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
+func (m *Manager) DeleteMedia(key WorkspaceKey, project, storedName string) error {
 	rel, err := safeStoredPath(storedName)
 	if err != nil {
 		return err
 	}
-	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
-	full, err := resolveWithin(root, rel)
+	tree, err := openTreeIfExists(config.UploadsDir(m.cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
 	if err != nil {
 		if errors.Is(err, ErrMediaNotFound) {
-			return nil // idempotent
+			return nil // nothing uploaded yet — delete is idempotent
 		}
 		return err
 	}
-	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+	defer tree.Close()
+
+	if err := tree.root.Remove(rel); err != nil {
+		if os.IsNotExist(err) {
+			return nil // idempotent
+		}
+		if escaped(err) {
+			return ErrMediaName
+		}
 		return err
 	}
 	return nil
@@ -186,34 +174,38 @@ func (m *Manager) DeleteMedia(key WorkspaceKey, storedName string) error {
 
 // OpenMedia opens one uploaded file for download and returns the reader plus its
 // display name. The caller must Close the reader.
-func (m *Manager) OpenMedia(key WorkspaceKey, storedName string) (io.ReadCloser, string, error) {
+func (m *Manager) OpenMedia(key WorkspaceKey, project, storedName string) (io.ReadCloser, string, error) {
 	rel, err := safeStoredPath(storedName)
 	if err != nil {
 		return nil, "", err
 	}
-	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
-	full, err := resolveWithin(root, rel)
+	tree, err := openTreeIfExists(config.UploadsDir(m.cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
 	if err != nil {
 		return nil, "", err
 	}
-	// Only regular files are downloadable: resolveWithin proves containment, but
-	// a directory or a device node would still be openable.
-	info, err := os.Stat(full)
+	// NOT deferred: the returned reader outlives this function, and closing the
+	// Root here would be closing the directory handle the open file was resolved
+	// against. The *os.File itself is independent once open, so the root is closed
+	// on every path that does not hand it back.
+	info, err := tree.statMedia(rel)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, "", ErrMediaNotFound
-		}
+		tree.Close()
 		return nil, "", err
 	}
+	// Only regular files are downloadable: the Root proves containment, but a
+	// directory or a device node would still be openable.
 	if !info.Mode().IsRegular() {
+		tree.Close()
 		return nil, "", ErrMediaNotFound
 	}
-	f, err := os.Open(full)
+	f, err := tree.root.Open(rel)
+	tree.Close()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, "", ErrMediaNotFound
 		}
-		return nil, "", err
+		return nil, "", ErrMediaName
 	}
 	// Download name is the base only -- a browser can't save into a folder.
 	return f, uidPrefixRe.ReplaceAllString(path.Base(rel), ""), nil
@@ -235,8 +227,8 @@ const maxListedMedia = 2000
 // interface derived the tree purely from the folder PREFIXES of file paths — which
 // works until a folder is empty. A member who created one saw nothing: no row, and
 // therefore no drop target to put a file into, which made creating a folder pointless.
-func (m *Manager) ListMedia(key WorkspaceKey) ([]StoredMedia, error) {
-	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+func (m *Manager) ListMedia(key WorkspaceKey, project string) ([]StoredMedia, error) {
+	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
 	out := make([]StoredMedia, 0, 32)
 	err := filepath.WalkDir(dir, func(full string, e fs.DirEntry, err error) error {
 		if err != nil {
@@ -314,12 +306,12 @@ const AttachmentsSubdir = "attachments"
 // caller may push INTO a container; this file was written by the agent inside its
 // own workspace, so refusing it here would drop legitimate deliverables while
 // adding no boundary that the workspace itself does not already have.
-func (m *Manager) StoreAgentAttachment(key WorkspaceKey, rawName string, r io.Reader) (StoredMedia, error) {
+func (m *Manager) StoreAgentAttachment(key WorkspaceKey, project, rawName string, r io.Reader) (StoredMedia, error) {
 	name, err := sanitizeFilename(rawName)
 	if err != nil {
 		return StoredMedia{}, err
 	}
-	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
 	dir := filepath.Join(root, AttachmentsSubdir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return StoredMedia{}, fmt.Errorf("mkdir attachments: %w", err)
