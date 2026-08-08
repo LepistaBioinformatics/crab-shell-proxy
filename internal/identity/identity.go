@@ -99,6 +99,20 @@ func principalEmail(owners []mycelium.Owner) string {
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
+// pathSegment is what SanitizeID's output must be: ONE path segment — no
+// separator, not "." or "..", not starting with a character that would make it
+// one. Anchored at both ends; a partial match would defeat the purpose.
+//
+// This is a GUARD, not a second rewrite. Every caller of SanitizeID uses the
+// result as a directory or file name (workspaces, effective-secrets, restart
+// markers, project workspaces), so "cannot contain a separator" is a property
+// the filesystem layout depends on — and until now it held only as a side effect
+// of the substitution above, which is documented as making ids *Docker-safe*.
+// Loosening that regex to admit "/" for some future purpose would silently turn
+// every one of those call sites into a path traversal. This makes that a test
+// failure instead.
+var pathSegment = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
 // SanitizeID maps an account id to a Docker-name-safe token used in container
 // names and per-user data dirs. accId is normally a UUID (already safe); this
 // only guards against unexpected characters. Docker also requires the first
@@ -106,7 +120,15 @@ var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 func SanitizeID(accID string) string {
 	s := unsafeName.ReplaceAllString(strings.TrimSpace(accID), "-")
 	s = strings.Trim(s, "-._")
-	if s == "" {
+	// The value leaves ONLY through the branch where a full match succeeded.
+	//
+	// Today this never fires: the substitution leaves nothing outside
+	// [a-zA-Z0-9._-], and the trim guarantees the first character is alphanumeric,
+	// so the match is already implied. That is exactly why it is safe to add to a
+	// system whose directory names are on disk — the output cannot change, so no
+	// existing workspace is orphaned. What it buys is the invariant becoming
+	// enforced rather than emergent.
+	if s == "" || !pathSegment.MatchString(s) {
 		// Deterministic fallback for a pathological id.
 		sum := sha256.Sum256([]byte(accID))
 		return hex.EncodeToString(sum[:])[:16]

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
@@ -83,58 +82,6 @@ func (m *Manager) uploadsDir(key WorkspaceKey, project string) string {
 		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
 }
 
-// resolveNewWithin validates rel and returns the absolute path it WOULD have, proving
-// containment for a target that may not exist yet — and whose PARENTS may not exist
-// either.
-//
-// resolveWithin cannot be used: it calls EvalSymlinks on the whole path, which fails
-// on anything missing. Nor is checking only the immediate parent enough, because
-// CreateFolder is documented to create missing parents, so the parent can be absent
-// too (that was the first version of this, and the test for a nested create caught
-// it).
-//
-// So: resolve the DEEPEST EXISTING ancestor with symlinks followed, prove THAT is
-// inside the root, then append the remaining segments. Each remaining segment was
-// already validated by safeStoredPath as a plain name, so nothing appended can climb
-// back out — and the final containment check re-proves it anyway.
-func resolveNewWithin(root, rel string) (string, error) {
-	clean, err := safeStoredPath(rel)
-	if err != nil {
-		return "", err
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", err
-	}
-
-	segs := strings.Split(clean, "/")
-	base := resolvedRoot
-	i := 0
-	for ; i < len(segs); i++ {
-		candidate := filepath.Join(base, segs[i])
-		resolved, statErr := filepath.EvalSymlinks(candidate)
-		if statErr != nil {
-			break // this segment and everything after it does not exist yet
-		}
-		// An EXISTING segment may be a symlink pointing anywhere. Check every one as
-		// we descend rather than only at the end.
-		inside, relErr := filepath.Rel(resolvedRoot, resolved)
-		if relErr != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-			return "", ErrMediaName
-		}
-		base = resolved
-	}
-	full := base
-	for ; i < len(segs); i++ {
-		full = filepath.Join(full, segs[i])
-	}
-
-	inside, err := filepath.Rel(resolvedRoot, full)
-	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-		return "", ErrMediaName
-	}
-	return full, nil
-}
 
 // CreateFolder makes a folder (and any missing parents) inside the member's uploads
 // tree, chowned so the non-root agent can use it too.
@@ -149,23 +96,34 @@ func (m *Manager) CreateFolder(key WorkspaceKey, project string, rel string) err
 	if isReservedFolder(rel) || isInsideReserved(rel) {
 		return ErrMediaReserved
 	}
-	root := m.uploadsDir(key, project)
-	target, err := resolveNewWithin(root, rel)
+	clean, err := safeStoredPath(rel)
 	if err != nil {
 		return err
 	}
-	if fi, statErr := os.Stat(target); statErr == nil {
+	tree, err := openTree(m.uploadsDir(key, project))
+	if err != nil {
+		return err
+	}
+	defer tree.Close()
+
+	if fi, statErr := tree.root.Stat(clean); statErr == nil {
 		if !fi.IsDir() {
 			return ErrMediaExists
 		}
 		return nil
 	}
-	if err := os.MkdirAll(target, 0o700); err != nil {
+	// MkdirAll on the Root: every intermediate component is resolved with the
+	// tree as a boundary, so a missing parent cannot be satisfied by a symlink
+	// pointing out of it.
+	if err := tree.root.MkdirAll(clean, 0o700); err != nil {
+		if escaped(err) {
+			return ErrMediaName
+		}
 		return fmt.Errorf("create folder: %w", err)
 	}
 	// Same reason StoreMedia chowns: the agent runs non-root and has to be able to
 	// read and write what the member organised.
-	return chownTree(target, m.cfg.PicoclawUser)
+	return chownTree(tree.abs(clean), m.cfg.PicoclawUser)
 }
 
 // MoveMedia moves a file or a folder to a new path inside the uploads tree. A move
@@ -179,39 +137,50 @@ func (m *Manager) MoveMedia(key WorkspaceKey, project string, fromRel, toRel str
 		isInsideReserved(fromRel) || isInsideReserved(toRel) {
 		return ErrMediaReserved
 	}
-	root := m.uploadsDir(key, project)
+	from, err := safeStoredPath(fromRel)
+	if err != nil {
+		return err
+	}
+	to, err := safeStoredPath(toRel)
+	if err != nil {
+		return err
+	}
+	tree, err := openTreeIfExists(m.uploadsDir(key, project))
+	if err != nil {
+		return err
+	}
+	defer tree.Close()
 
-	from, err := resolveWithin(root, fromRel)
-	if err != nil {
-		return err
-	}
-	to, err := resolveNewWithin(root, toRel)
-	if err != nil {
-		return err
-	}
 	if from == to {
 		return nil
 	}
-	if _, statErr := os.Stat(to); statErr == nil {
-		// Never overwrite. os.Rename would happily replace a file, and a drag that
+	if _, statErr := tree.root.Stat(to); statErr == nil {
+		// Never overwrite. Rename would happily replace a file, and a drag that
 		// lands on a same-named file would destroy it with no undo.
 		return ErrMediaExists
 	}
 
 	// Dropping a folder into itself or into its own descendant detaches the subtree.
-	// Compared on the RESOLVED paths with a separator appended, so a sibling whose
-	// name merely starts with the source's ("notes" vs "notes-old") is not mistaken
-	// for a descendant.
-	if fi, statErr := os.Stat(from); statErr == nil && fi.IsDir() {
-		if to == from || strings.HasPrefix(to, from+string(filepath.Separator)) {
+	// Compared on the CLEANED relative paths — both are already normalised, root-
+	// relative and separator-free at the ends — with a separator appended, so a
+	// sibling whose name merely starts with the source's ("notes" vs "notes-old")
+	// is not mistaken for a descendant.
+	if fi, statErr := tree.root.Stat(from); statErr == nil && fi.IsDir() {
+		if to == from || strings.HasPrefix(to, from+"/") {
 			return ErrMediaIntoSelf
 		}
 	}
 
-	if err := os.Rename(from, to); err != nil {
+	if err := tree.root.Rename(from, to); err != nil {
+		if os.IsNotExist(err) {
+			return ErrMediaNotFound
+		}
+		if escaped(err) {
+			return ErrMediaName
+		}
 		return fmt.Errorf("move: %w", err)
 	}
-	return chownTree(to, m.cfg.PicoclawUser)
+	return chownTree(tree.abs(to), m.cfg.PicoclawUser)
 }
 
 // DeleteFolder removes a folder and everything under it, returning how many FILES
@@ -225,19 +194,24 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (in
 	if isReservedFolder(rel) {
 		return 0, ErrMediaReserved
 	}
-	root := m.uploadsDir(key, project)
-	target, err := resolveWithin(root, rel)
-	if err != nil {
-		return 0, err
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return 0, err
-	}
-	if target == resolvedRoot {
+	// The uploads root itself, in the three spellings that name it. Checked BEFORE
+	// safeStoredPath, which would reject all of them as malformed and answer "that
+	// is not a valid name" — true, but not the answer to what was asked. The member
+	// aimed at the root, and the message says the root is not theirs to delete.
+	if trimmed := strings.Trim(strings.TrimSpace(rel), "/"); trimmed == "" || trimmed == "." {
 		return 0, ErrMediaRoot
 	}
-	fi, err := os.Stat(target)
+	clean, err := safeStoredPath(rel)
+	if err != nil {
+		return 0, err
+	}
+	tree, err := openTreeIfExists(m.uploadsDir(key, project))
+	if err != nil {
+		return 0, err
+	}
+	defer tree.Close()
+
+	fi, err := tree.stat(clean)
 	if err != nil {
 		return 0, ErrMediaNotFound
 	}
@@ -247,18 +221,12 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (in
 
 	// Counted BEFORE the removal: afterwards there is nothing left to count, and the
 	// number is what the caller reports back to the member.
-	files := 0
-	_ = filepath.Walk(target, func(_ string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if !info.IsDir() {
-			files++
-		}
-		return nil
-	})
+	files := tree.countFiles(clean)
 
-	if err := os.RemoveAll(target); err != nil {
+	if err := tree.root.RemoveAll(clean); err != nil {
+		if escaped(err) {
+			return 0, ErrMediaName
+		}
 		return 0, fmt.Errorf("delete folder: %w", err)
 	}
 	return files, nil
