@@ -177,7 +177,22 @@ func (r *Registry) DeleteAssignment(ref WorkspaceRef) error {
 // writer between the read and the write could silently demote a deliberate pin.
 // A missing prior assignment is the normal first-materialization case; any other
 // read error is returned rather than being treated as "no pin".
-func (r *Registry) RecordMaterialization(ref WorkspaceRef, modelName string, chain []string) error {
+//
+// It takes the whole Resolution rather than a name and a chain because with a
+// member's own model primary the two halves diverge: ModelName/Chain keep
+// describing the INVENTORY side — the cascade model, which is also the runtime
+// fallback, so a key edit to it still reaches this workspace through
+// WorkspacesUsing — while UserModel records what is actually primary. Writing the
+// synthesized `own-<slug>` into ModelName instead would preserve it under a
+// Source of "explicit" and turn an admin pin into a pin naming a model the
+// inventory does not have, which candidateTx treats as a hard failure.
+func (r *Registry) RecordMaterialization(ref WorkspaceRef, res Resolution) error {
+	modelName, chain := res.CascadeName, res.ChainNames()
+	if res.UserModel != "" {
+		// The cascade model IS the chain here, so recording both would name it
+		// twice. ModelName alone is what referrersTx and WorkspacesUsing scan.
+		chain = nil
+	}
 	return r.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bAssignments)
 		source := SourceInherited
@@ -186,6 +201,11 @@ func (r *Registry) RecordMaterialization(ref WorkspaceRef, modelName string, cha
 		case err == nil:
 			if prev.Source == SourceExplicit {
 				source = SourceExplicit
+				// An explicit pin's model is what a deselect must restore, so it
+				// survives a personal model taking over as primary.
+				if res.UserModel != "" && prev.ModelName != "" {
+					modelName, chain = prev.ModelName, prev.Chain
+				}
 			}
 		case errors.Is(err, ErrNotFound):
 			// First materialization for this workspace.
@@ -193,7 +213,8 @@ func (r *Registry) RecordMaterialization(ref WorkspaceRef, modelName string, cha
 			return err
 		}
 		return putJSON(b, ref.Key(), Assignment{
-			ModelName: modelName, Chain: chain, Source: source, MaterializedAt: r.now(),
+			ModelName: modelName, Chain: chain, Source: source,
+			UserModel: res.UserModel, MaterializedAt: r.now(),
 		})
 	})
 }

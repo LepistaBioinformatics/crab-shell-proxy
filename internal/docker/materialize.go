@@ -235,7 +235,7 @@ func (m *Manager) resolveAndMaterialize(key WorkspaceKey, userDir string) error 
 	// same transaction that reads it: re-materializing must not demote a
 	// deliberate per-user choice into an inherited one, which would let the next
 	// scope-default change silently override it.
-	if err := m.reg.RecordMaterialization(ref, res.Primary.ModelName, res.ChainNames()); err != nil {
+	if err := m.reg.RecordMaterialization(ref, res); err != nil {
 		return fmt.Errorf("record assignment: %w", err)
 	}
 

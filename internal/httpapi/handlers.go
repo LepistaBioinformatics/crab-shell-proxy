@@ -256,6 +256,10 @@ type Server struct {
 	// memory-graph write arriving over MCP can be attributed to the chat it came out
 	// of. Built by Handler, shared with the MCP endpoint through Deps.SourceFor.
 	turns *turnRegistry
+
+	// probes throttles the connectivity test in user_models.go. Per account, so
+	// one member cannot spend the instance's outbound budget while another waits.
+	probes *probeLimiter
 }
 
 // turnerFor selects the turn runner for a resolved target's harness.
@@ -289,12 +293,25 @@ func (s *Server) Handler() http.Handler {
 	if s.turns == nil {
 		s.turns = newTurnRegistry()
 	}
+	if s.probes == nil {
+		s.probes = newProbeLimiter()
+	}
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/accounts", s.handleAccounts)
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/sessions/history", s.handleSessionsHistory)
 	mux.HandleFunc("GET /v1/sessions/resolve", s.handleSessionsResolve)
+	// user-owned-models: a member's own model, and which one they run. Under
+	// /v1/models/ rather than /v1/secrets/ because it is a model, not a
+	// credential — the key it carries is one field of a definition.
+	mux.HandleFunc("GET /v1/models/mine", s.handleUserModelsList)
+	mux.HandleFunc("POST /v1/models/mine", s.handleUserModelCreate)
+	mux.HandleFunc("PUT /v1/models/mine", s.handleUserModelUpdate)
+	mux.HandleFunc("DELETE /v1/models/mine", s.handleUserModelDelete)
+	mux.HandleFunc("POST /v1/models/mine/test", s.handleUserModelTest)
+	mux.HandleFunc("PUT /v1/models/mine/selection", s.handleUserModelSelect)
+	mux.HandleFunc("DELETE /v1/models/mine/selection", s.handleUserModelDeselect)
 	mux.HandleFunc("POST /v1/secrets", s.handleSecretsPost)
 	mux.HandleFunc("GET /v1/secrets", s.handleSecretsList)
 	mux.HandleFunc("DELETE /v1/secrets", s.handleSecretsDelete)
@@ -395,6 +412,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/model-defaults", s.handleAdminModelDefaultGet)
 	mux.HandleFunc("PUT /v1/admin/model-defaults", s.handleAdminModelDefaultSet)
 	mux.HandleFunc("DELETE /v1/admin/model-defaults", s.handleAdminModelDefaultClear)
+	// user-owned-models, admin half: see what members registered, switch one off,
+	// and lock a scope against personal models entirely.
+	mux.HandleFunc("GET /v1/admin/user-models", s.handleAdminUserModelsList)
+	mux.HandleFunc("PUT /v1/admin/user-models/status", s.handleAdminUserModelStatus)
+	mux.HandleFunc("GET /v1/admin/model-policy", s.handleAdminModelPolicyGet)
+	mux.HandleFunc("PUT /v1/admin/model-policy", s.handleAdminModelPolicySet)
+	mux.HandleFunc("DELETE /v1/admin/model-policy", s.handleAdminModelPolicyClear)
 	mux.HandleFunc("GET /v1/admin/model-assignments", s.handleAdminModelAssignmentList)
 	mux.HandleFunc("POST /v1/admin/model-assignments", s.handleAdminModelAssignmentSet)
 	mux.HandleFunc("DELETE /v1/admin/model-assignments", s.handleAdminModelAssignmentClear)

@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -44,6 +45,13 @@ func requiredFields(m Model) error {
 	switch {
 	case m.ModelName == "":
 		return fmt.Errorf("%w: model_name is required", ErrInvalid)
+	case strings.HasPrefix(m.ModelName, OwnPrefix):
+		// Reserved for a member's own model (usermodels.go). Both end up in the
+		// same workspace model_list — one as primary, the other as the fallback —
+		// so a collision here would silently point picoclaw's fallback at the
+		// wrong entry.
+		return fmt.Errorf("%w: model_name must not start with %q, which is reserved for members' own models",
+			ErrInvalid, OwnPrefix)
 	case m.Provider == "":
 		return fmt.Errorf("%w: provider is required", ErrInvalid)
 	case m.Model == "":
