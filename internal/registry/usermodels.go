@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -107,13 +108,20 @@ type UserSelection struct {
 	SelectedAt time.Time `json:"selected_at"`
 }
 
-// ScopePolicy is the administrator's lock (parent R7). AllowUserModels is a
-// POINTER: "not set at this level" and "explicitly allowed here" are different
+// ScopePolicy is what an administrator decides for a scope. Both fields are
+// POINTERS: "not set at this level" and "explicitly allowed here" are different
 // answers, and only the pointer can tell an inherited allow from a deliberate one
 // when a wider level says deny.
+//
+// The two default in OPPOSITE directions, and deliberately so. Personal models
+// are allowed unless an administrator objects — the feature is the point.
+// Endpoints outside the catalog are refused unless an administrator says
+// otherwise: a member who cannot name an endpoint cannot aim the instance at one,
+// which is the whole class of risk rather than a governed instance of it.
 type ScopePolicy struct {
-	AllowUserModels *bool     `json:"allow_user_models,omitempty"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	AllowUserModels     *bool     `json:"allow_user_models,omitempty"`
+	AllowCustomEndpoint *bool     `json:"allow_custom_endpoint,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // MaxUserModelsPerAccount bounds a member's personal list. Not a licensing knob
@@ -477,27 +485,83 @@ func (r *Registry) SelectionsOf(ownerAccID, slug string) ([]WorkspaceRef, error)
 	return out, nil
 }
 
-// SetScopePolicy writes the administrator's lock at one level.
-func (r *Registry) SetScopePolicy(sel ScopeSel, allow bool) error {
+// SetScopePolicy patches one level. A nil field is LEFT ALONE rather than
+// cleared: the two switches are set from different controls, and a write of one
+// that silently reset the other would be a lock an administrator did not lift.
+func (r *Registry) SetScopePolicy(sel ScopeSel, patch ScopePolicy) error {
 	key, err := sel.Key()
 	if err != nil {
 		return err
 	}
 	return r.db.Update(func(tx *bolt.Tx) error {
-		return putJSON(tx.Bucket(bScopePolicy), key, ScopePolicy{
-			AllowUserModels: &allow, UpdatedAt: r.now(),
-		})
+		b := tx.Bucket(bScopePolicy)
+		var cur ScopePolicy
+		if err := getJSON(b, key, &cur); err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if patch.AllowUserModels != nil {
+			cur.AllowUserModels = patch.AllowUserModels
+		}
+		if patch.AllowCustomEndpoint != nil {
+			cur.AllowCustomEndpoint = patch.AllowCustomEndpoint
+		}
+		cur.UpdatedAt = r.now()
+		return putJSON(b, key, cur)
 	})
 }
 
+// AllowUserModelsPolicy / AllowCustomEndpointPolicy build a one-field patch, so a
+// caller setting one switch cannot express "and clear the other" by accident.
+func AllowUserModelsPolicy(v bool) ScopePolicy     { return ScopePolicy{AllowUserModels: &v} }
+func AllowCustomEndpointPolicy(v bool) ScopePolicy { return ScopePolicy{AllowCustomEndpoint: &v} }
+
+// PolicyField names one switch, for a caller that wants to clear just that one.
+type PolicyField string
+
+const (
+	FieldUserModels     PolicyField = "user_models"
+	FieldCustomEndpoint PolicyField = "custom_endpoint"
+)
+
 // ClearScopePolicy removes a level's policy so it inherits again.
-func (r *Registry) ClearScopePolicy(sel ScopeSel) error {
+//
+// With no field it drops the whole record. With one, it unsets THAT switch and
+// leaves the other: the two are set from separate controls, so "let this one
+// inherit" must not silently lift a lock the administrator did not touch.
+func (r *Registry) ClearScopePolicy(sel ScopeSel, fields ...PolicyField) error {
 	key, err := sel.Key()
 	if err != nil {
 		return err
 	}
 	return r.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bScopePolicy).Delete([]byte(key))
+		b := tx.Bucket(bScopePolicy)
+		if len(fields) == 0 {
+			return b.Delete([]byte(key))
+		}
+		var cur ScopePolicy
+		if err := getJSON(b, key, &cur); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil // already inheriting
+			}
+			return err
+		}
+		for _, f := range fields {
+			switch f {
+			case FieldUserModels:
+				cur.AllowUserModels = nil
+			case FieldCustomEndpoint:
+				cur.AllowCustomEndpoint = nil
+			default:
+				return fmt.Errorf("%w: unknown policy field %q", ErrInvalid, f)
+			}
+		}
+		// Nothing set left: drop the record rather than keep an empty one, so
+		// GetScopePolicy answers ErrNotFound like it would have before any write.
+		if cur.AllowUserModels == nil && cur.AllowCustomEndpoint == nil {
+			return b.Delete([]byte(key))
+		}
+		cur.UpdatedAt = r.now()
+		return putJSON(b, key, cur)
 	})
 }
 
@@ -537,7 +601,10 @@ func (r *Registry) UserModelsAllowed(ref WorkspaceRef) (bool, ScopeLevel, error)
 	return allowed, by, err
 }
 
-func userModelsAllowedTx(tx *bolt.Tx, ref WorkspaceRef) (bool, ScopeLevel) {
+// policyCascadeTx walks the levels most-specific-first and returns the first that
+// SETS the field pick reads. The default is the caller's, because the two
+// switches disagree about it.
+func policyCascadeTx(tx *bolt.Tx, ref WorkspaceRef, pick func(ScopePolicy) *bool) (bool, ScopeLevel, bool) {
 	b := tx.Bucket(bScopePolicy)
 	sels := []ScopeSel{
 		{Level: LevelSubscription, TenantID: ref.TenantID, SubsAccID: ref.SubsAccID},
@@ -554,10 +621,37 @@ func userModelsAllowedTx(tx *bolt.Tx, ref WorkspaceRef) (bool, ScopeLevel) {
 		if err := getJSON(b, key, &p); err != nil {
 			continue
 		}
-		if p.AllowUserModels == nil {
-			continue
+		if v := pick(p); v != nil {
+			return *v, sel.Level, true
 		}
-		return *p.AllowUserModels, sel.Level
 	}
-	return true, ""
+	return false, "", false
+}
+
+func userModelsAllowedTx(tx *bolt.Tx, ref WorkspaceRef) (bool, ScopeLevel) {
+	v, level, found := policyCascadeTx(tx, ref, func(p ScopePolicy) *bool { return p.AllowUserModels })
+	if !found {
+		return true, ""
+	}
+	return v, level
+}
+
+// CustomEndpointAllowed answers whether this workspace's member may name an
+// endpoint the catalog does not carry.
+//
+// Unset everywhere means NO, the opposite of UserModelsAllowed. A member picking
+// a provider is choosing among endpoints the instance already ships; a member
+// typing one is aiming the proxy's outbound request wherever they like, and the
+// address guard is a floor under that, not a licence for it. An administrator who
+// runs a self-hosted gateway turns it on for their scope.
+func (r *Registry) CustomEndpointAllowed(ref WorkspaceRef) (bool, ScopeLevel, error) {
+	allowed, by := false, ScopeLevel("")
+	err := r.db.View(func(tx *bolt.Tx) error {
+		v, level, found := policyCascadeTx(tx, ref, func(p ScopePolicy) *bool { return p.AllowCustomEndpoint })
+		if found {
+			allowed, by = v, level
+		}
+		return nil
+	})
+	return allowed, by, err
 }

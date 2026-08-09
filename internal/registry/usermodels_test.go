@@ -187,7 +187,7 @@ func TestScopePolicyMostSpecificWins(t *testing.T) {
 		t.Fatalf("unset everywhere = (%v, %q, %v); want allowed by nothing", allowed, by, err)
 	}
 
-	if err := r.SetScopePolicy(ScopeSel{Level: LevelGlobal}, false); err != nil {
+	if err := r.SetScopePolicy(ScopeSel{Level: LevelGlobal}, AllowUserModelsPolicy(false)); err != nil {
 		t.Fatalf("SetScopePolicy: %v", err)
 	}
 	if allowed, by, _ := r.UserModelsAllowed(w); allowed || by != LevelGlobal {
@@ -196,7 +196,7 @@ func TestScopePolicyMostSpecificWins(t *testing.T) {
 
 	// A narrower ALLOW overrides a wider deny: the lock is a cascade, not a
 	// one-way ratchet, so a tenant can opt one subscription back in.
-	if err := r.SetScopePolicy(ScopeSel{Level: LevelSubscription, TenantID: "t1", SubsAccID: "s1"}, true); err != nil {
+	if err := r.SetScopePolicy(ScopeSel{Level: LevelSubscription, TenantID: "t1", SubsAccID: "s1"}, AllowUserModelsPolicy(true)); err != nil {
 		t.Fatalf("SetScopePolicy: %v", err)
 	}
 	if allowed, by, _ := r.UserModelsAllowed(w); !allowed || by != LevelSubscription {
@@ -236,4 +236,52 @@ func TestMaxUserModelsPerAccount(t *testing.T) {
 	// The cap is per account, so another member is unaffected by the first one
 	// filling theirs.
 	mustCreateOwn(t, r, "u2", "mine")
+}
+
+// The two switches live in one record and are set from different controls, so a
+// write of one must not reset the other.
+func TestSettingOneSwitchLeavesTheOtherAlone(t *testing.T) {
+	r := testRegistry(t)
+	sel := ScopeSel{Level: LevelTenant, TenantID: "t1"}
+
+	if err := r.SetScopePolicy(sel, AllowCustomEndpointPolicy(true)); err != nil {
+		t.Fatalf("SetScopePolicy: %v", err)
+	}
+	if err := r.SetScopePolicy(sel, AllowUserModelsPolicy(false)); err != nil {
+		t.Fatalf("SetScopePolicy: %v", err)
+	}
+
+	p, err := r.GetScopePolicy(sel)
+	if err != nil {
+		t.Fatalf("GetScopePolicy: %v", err)
+	}
+	if p.AllowCustomEndpoint == nil || !*p.AllowCustomEndpoint {
+		t.Error("the endpoint permission was cleared by a write to the other switch")
+	}
+	if p.AllowUserModels == nil || *p.AllowUserModels {
+		t.Error("the personal-model lock did not take")
+	}
+}
+
+// The two defaults point in opposite directions on purpose: the feature is on
+// unless an administrator objects, and naming an endpoint is off until one
+// agrees.
+func TestCustomEndpointsAreRefusedUntilAnAdminAgrees(t *testing.T) {
+	r := testRegistry(t)
+
+	if allowed, by, err := r.CustomEndpointAllowed(ref()); err != nil || allowed || by != "" {
+		t.Fatalf("unset = (%v, %q, %v); want refused by nothing", allowed, by, err)
+	}
+	// While personal models, unset, are allowed.
+	if allowed, _, _ := r.UserModelsAllowed(ref()); !allowed {
+		t.Error("personal models must be allowed when nothing is set")
+	}
+
+	if err := r.SetScopePolicy(ScopeSel{Level: LevelSubscription, TenantID: "t1", SubsAccID: "s1"},
+		AllowCustomEndpointPolicy(true)); err != nil {
+		t.Fatalf("SetScopePolicy: %v", err)
+	}
+	if allowed, by, _ := r.CustomEndpointAllowed(ref()); !allowed || by != LevelSubscription {
+		t.Errorf("after the grant = (%v, %q); want allowed by subscription", allowed, by)
+	}
 }

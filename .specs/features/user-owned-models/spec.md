@@ -17,7 +17,7 @@ HTTP surface for both the member and the administrator.
 |---|---|---|
 | `user_models` | `<accID>/<slug>` | `UserModel` (definition + key + last test) |
 | `user_selection` | `WorkspaceRef.Key()` | `UserSelection{Slug}` |
-| `scope_policy` | the `ScopeSel` key already used by `scope_defaults` | `ScopePolicy{AllowUserModels *bool}` |
+| `scope_policy` | the `ScopeSel` key already used by `scope_defaults` | `ScopePolicy{AllowUserModels, AllowCustomEndpoint *bool}` |
 
 A personal model is NOT a row in `models`. Every invariant that bucket enforces is
 a cross-user invariant — `model_name` unique instance-wide, `fallbacks` and
@@ -94,6 +94,29 @@ for the policy, authority-over-scope for the listing):
 
 Every mutation ends in `ReapplyModelUser(key, bounce=false)`: re-materialize, then
 raise the per-workspace restart notice. No forced bounce (parent R8).
+
+## Endpoints outside the catalog need an administrator
+
+`AllowCustomEndpoint` defaults the OPPOSITE way to `AllowUserModels`, and the two
+sit in one record with independent switches.
+
+Personal models are on unless an administrator objects — the feature is the
+point. Naming an endpoint the catalog does not carry is off until one agrees:
+picking a provider chooses among endpoints the instance already ships, while
+typing one aims the proxy's outbound request wherever the member likes. The
+address guard in the probe is a floor under that, not a licence for it.
+
+Enforced on all three routes that accept an `api_base` — create, update and
+**test**. The probe is the one place an unsaved endpoint reaches the network, so
+testing an endpoint you may not register is exactly the request the rule exists
+to stop.
+
+An `api_base` that MATCHES the catalog's for that provider is never custom, so
+the ordinary path needs no permission at all.
+
+`ClearScopePolicy` takes an optional field: the two switches come from separate
+controls, so releasing one to inheritance must not lift the other. A record with
+neither set is deleted rather than kept empty.
 
 ## The provider picker carries the endpoint
 

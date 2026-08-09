@@ -156,6 +156,30 @@ func UserModelProviderOptions() []UserProviderOption {
 	return out
 }
 
+// catalogEndpointFor is the endpoint the embedded catalog carries for a provider,
+// or "" when it carries none. It is the value the member's form fills in, and the
+// yardstick for whether an api_base they submitted is "custom".
+func catalogEndpointFor(provider string) string {
+	want := strings.ToLower(strings.TrimSpace(provider))
+	for _, o := range UserModelProviderOptions() {
+		if o.Provider == want {
+			return o.APIBase
+		}
+	}
+	return ""
+}
+
+// sameEndpointAs compares an api_base with the catalog's, ignoring the trailing
+// slash and case in the scheme and host — the differences that change nothing
+// about where the request goes.
+func sameEndpointAs(apiBase, catalog string) bool {
+	if catalog == "" {
+		return false
+	}
+	norm := func(v string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(v), "/")) }
+	return norm(apiBase) == norm(catalog)
+}
+
 // inputError is a rejection a MEMBER has to act on, so its message is a CODE the
 // interface resolves into their language (lib/i18n/errors.ts) rather than
 // English prose. The inventory's admin routes keep returning prose: their

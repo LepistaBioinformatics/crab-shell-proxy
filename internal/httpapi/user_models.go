@@ -93,6 +93,35 @@ func workspaceParams(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UU
 	return tenantID, subsAccID, true
 }
 
+// requireAllowedEndpoint refuses an api_base outside the catalog unless an
+// administrator opened this scope to them.
+//
+// The default is refusal, which is the opposite of the personal-model switch and
+// deliberately so: picking a provider chooses among endpoints the instance
+// already ships, while typing one aims the proxy's outbound request wherever the
+// member likes. The address guard in the probe is a floor under that, not a
+// licence for it.
+//
+// An api_base that MATCHES the catalog's is never custom, so the ordinary path —
+// pick a provider, let the form fill the endpoint — needs no permission at all.
+func (s *Server) requireAllowedEndpoint(w http.ResponseWriter, ref registry.WorkspaceRef, provider, apiBase string) bool {
+	if sameEndpointAs(apiBase, catalogEndpointFor(provider)) {
+		return true
+	}
+	allowed, by, err := s.Reg.CustomEndpointAllowed(ref)
+	if err != nil {
+		status, body := userModelErrStatus(err)
+		writeJSON(w, status, body)
+		return false
+	}
+	if allowed {
+		return true
+	}
+	_ = by
+	writeJSON(w, http.StatusForbidden, errBody("custom_endpoint_not_allowed"))
+	return false
+}
+
 func userRef(key docker.WorkspaceKey) registry.WorkspaceRef {
 	return registry.WorkspaceRef{
 		TenantID: key.TenantID, SubsAccID: key.SubsAccID,
@@ -174,13 +203,21 @@ func (s *Server) handleUserModelsList(w http.ResponseWriter, r *http.Request) {
 		organisation = name
 	}
 
+	// Reported so the form can present the endpoint as fixed rather than let a
+	// member type one and be refused on submit.
+	customAllowed, _, err := s.Reg.CustomEndpointAllowed(ref)
+	if err != nil {
+		s.logf("user models: read endpoint policy %s: %v", ref.Key(), err)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"models":             out,
-		"selected":           selected,
-		"allowed":            allowed,
-		"blocked_by":         string(blockedBy),
-		"organisation_model": organisation,
-		"providers":          UserModelProviderOptions(),
+		"models":                  out,
+		"selected":                selected,
+		"allowed":                 allowed,
+		"blocked_by":              string(blockedBy),
+		"organisation_model":      organisation,
+		"custom_endpoint_allowed": customAllowed,
+		"providers":               UserModelProviderOptions(),
 	})
 }
 
@@ -207,6 +244,9 @@ func (s *Server) handleUserModelCreate(w http.ResponseWriter, r *http.Request) {
 	if _, err := probeURL(req.APIBase); err != nil {
 		status, body := userModelErrStatus(err)
 		writeJSON(w, status, body)
+		return
+	}
+	if !s.requireAllowedEndpoint(w, userRef(key), req.Provider, req.APIBase) {
 		return
 	}
 	created, err := s.Reg.CreateUserModel(registry.UserModel{
@@ -251,6 +291,9 @@ func (s *Server) handleUserModelUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, err := probeURL(req.APIBase); err != nil {
 		status, body := userModelErrStatus(err)
 		writeJSON(w, status, body)
+		return
+	}
+	if !s.requireAllowedEndpoint(w, userRef(key), req.Provider, req.APIBase) {
 		return
 	}
 	updated, err := s.Reg.UpdateUserModel(key.UserAccID, slug, req.Version, func(m *registry.UserModel) error {
@@ -408,6 +451,12 @@ func (s *Server) handleUserModelTest(w http.ResponseWriter, r *http.Request) {
 	if err := validateProbeDraft(draft); err != nil {
 		status, body := userModelErrStatus(err)
 		writeJSON(w, status, body)
+		return
+	}
+	// The probe is the one place an unsaved endpoint reaches the network, so the
+	// permission is checked HERE too rather than only at save: testing an endpoint
+	// you may not register is the request this rule exists to stop.
+	if !s.requireAllowedEndpoint(w, userRef(key), draft.Provider, draft.APIBase) {
 		return
 	}
 

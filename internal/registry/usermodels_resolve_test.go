@@ -105,7 +105,7 @@ func TestAScopeLockIgnoresTheSelection(t *testing.T) {
 		t.Fatalf("SetScopeDefault: %v", err)
 	}
 	selectOwn(t, r, "mine")
-	if err := r.SetScopePolicy(ScopeSel{Level: LevelTenant, TenantID: "t1"}, false); err != nil {
+	if err := r.SetScopePolicy(ScopeSel{Level: LevelTenant, TenantID: "t1"}, AllowUserModelsPolicy(false)); err != nil {
 		t.Fatalf("SetScopePolicy: %v", err)
 	}
 

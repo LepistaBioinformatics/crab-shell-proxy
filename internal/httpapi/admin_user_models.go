@@ -196,14 +196,25 @@ func (s *Server) handleAdminModelPolicySet(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	// Pointers, so a screen that owns one switch cannot clear the other by
+	// omitting it. At least one has to be present, or the write says nothing.
 	var req struct {
-		AllowUserModels bool `json:"allow_user_models"`
+		AllowUserModels     *bool `json:"allow_user_models"`
+		AllowCustomEndpoint *bool `json:"allow_custom_endpoint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
 		return
 	}
-	if err := s.Reg.SetScopePolicy(sel, req.AllowUserModels); err != nil {
+	if req.AllowUserModels == nil && req.AllowCustomEndpoint == nil {
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`at least one of "allow_user_models" or "allow_custom_endpoint" is required`))
+		return
+	}
+	patch := registry.ScopePolicy{
+		AllowUserModels: req.AllowUserModels, AllowCustomEndpoint: req.AllowCustomEndpoint,
+	}
+	if err := s.Reg.SetScopePolicy(sel, patch); err != nil {
 		status, body := registryErrStatus(err)
 		writeJSON(w, status, body)
 		return
@@ -217,7 +228,18 @@ func (s *Server) handleAdminModelPolicyClear(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	if err := s.Reg.ClearScopePolicy(sel); err != nil {
+	// `?field=` clears one switch; its absence clears the level entirely. A screen
+	// with two controls always names the one it is releasing.
+	var fields []registry.PolicyField
+	switch f := registry.PolicyField(r.URL.Query().Get("field")); f {
+	case "":
+	case registry.FieldUserModels, registry.FieldCustomEndpoint:
+		fields = append(fields, f)
+	default:
+		writeJSON(w, http.StatusBadRequest, errBody(`"field" must be user_models or custom_endpoint`))
+		return
+	}
+	if err := s.Reg.ClearScopePolicy(sel, fields...); err != nil {
 		status, body := registryErrStatus(err)
 		writeJSON(w, status, body)
 		return
