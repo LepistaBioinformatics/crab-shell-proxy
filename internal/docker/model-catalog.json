@@ -61,7 +61,7 @@
   },
   {
     "provider": "nvidia",
-    "model": "nemotron-4-340b-instruct",
+    "model": "nvidia/llama-3.3-nemotron-super-49b-v1",
     "api_base": "https://integrate.api.nvidia.com/v1"
   },
   {
