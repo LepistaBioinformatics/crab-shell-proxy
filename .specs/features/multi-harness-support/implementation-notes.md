@@ -131,9 +131,12 @@ explicit, documented `501`.
 
 ## 8. History: `state.db`, and it was never wired up
 
-Hermes keeps its own transcripts in a **SQLite** `state.db` under `/opt/data`, with a
-sessions/messages schema — conversations keyed by session, messages rowed under them with role and
-content.
+Hermes keeps its own transcripts in a **SQLite** `state.db` under `/opt/data`.
+
+**The schema is NOT recorded here, and this file will not guess at it.** The proxy never opened the
+file (see below), so nothing in this codebase ever depended on its shape. Inspect it directly on a
+re-add — `sqlite3 <userDir>/state.db .schema` inside a provisioned workspace — rather than trusting a
+second-hand description.
 
 Session scoping over the wire used two headers, which is why `turn.Request` has both fields:
 
