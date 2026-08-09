@@ -19,6 +19,11 @@ const (
 	// LevelUser is reported by Resolve as the winning level. It is never a
 	// scope-defaults key: a per-user choice is an assignment, not a default.
 	LevelUser ScopeLevel = "user"
+	// LevelUserModel is reported when the member's OWN registered model won.
+	// Distinct from LevelUser, which means an administrator pinned them: an admin
+	// screen that showed a personal model as a pin would offer to unpin something
+	// no administrator set.
+	LevelUserModel ScopeLevel = "user_model"
 )
 
 // ScopeSel identifies one scope-defaults entry.

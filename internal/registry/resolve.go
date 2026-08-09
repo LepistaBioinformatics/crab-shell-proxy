@@ -24,6 +24,15 @@ type Resolution struct {
 	// at a model the inventory no longer has. The registry carries no logger, so
 	// the omission is reported here for the caller to log — same shape as Skipped.
 	SkippedLevels []string
+	// UserModel is `<owner>/<slug>` when Primary is the member's own model. It is
+	// what tells materialization to record the assignment honestly instead of
+	// writing a synthesized name over the inventory fields (see Assignment).
+	UserModel string
+	// CascadeName is the model the ADMINISTRATOR's cascade resolved. With a
+	// personal model primary it is the automatic fallback; otherwise it is
+	// Primary's own name. Empty means the cascade resolved nothing, which is only
+	// survivable because a personal model is running.
+	CascadeName string
 }
 
 // Names returns primary + chain model names in materialization order.
@@ -64,6 +73,37 @@ func (r *Registry) Resolve(ref WorkspaceRef) (Resolution, error) {
 	var res Resolution
 	err := r.db.View(func(tx *bolt.Tx) error {
 		models := tx.Bucket(bModels)
+
+		// The member's own model outranks everything, including an admin pin —
+		// their key, their choice — and the administrator's control is the scope
+		// lock rather than a per-user veto. When it applies, the ordinary cascade
+		// is still walked, but only to supply the runtime fallback: a personal
+		// model that fails mid-turn degrades to the organisation's model instead
+		// of leaving the member with an agent that cannot answer.
+		if own, ok := userModelTx(tx, ref); ok {
+			cascade, _, skippedLevels, err := candidateTx(tx, ref, Assignment{}, false)
+			if err != nil && !errors.Is(err, ErrNoModelResolvable) {
+				return err
+			}
+			var chain []Model
+			if cascade != "" {
+				var fb Model
+				if err := getJSON(models, cascade, &fb); err == nil && fb.Status != StatusDisabled {
+					chain = append(chain, fb)
+				} else {
+					cascade = ""
+				}
+			}
+			res = Resolution{
+				Primary:       own.asModel(),
+				Chain:         chain,
+				Level:         LevelUserModel,
+				SkippedLevels: skippedLevels,
+				UserModel:     userModelKey(own.OwnerAccID, own.Slug),
+				CascadeName:   cascade,
+			}
+			return nil
+		}
 
 		var existing Assignment
 		hasAssignment := false
@@ -115,6 +155,7 @@ func (r *Registry) Resolve(ref WorkspaceRef) (Resolution, error) {
 		res = Resolution{
 			Primary: primary, Chain: chain, Level: level,
 			Skipped: skipped, SkippedLevels: skippedLevels,
+			CascadeName: primary.ModelName,
 		}
 		return nil
 	})
@@ -122,6 +163,33 @@ func (r *Registry) Resolve(ref WorkspaceRef) (Resolution, error) {
 		return Resolution{}, err
 	}
 	return res, nil
+}
+
+// userModelTx answers whether this workspace runs one of its member's own
+// models. Three conditions, all inside the caller's transaction so a concurrent
+// delete or an administrator's switch cannot land between them:
+//
+//	the member selected one, it still exists and is enabled, and the scope allows it.
+//
+// A missing or unreadable record is simply "no personal model": this rung is an
+// addition to the cascade, so failing it must fall through to the administrator's
+// answer rather than break resolution for everyone.
+func userModelTx(tx *bolt.Tx, ref WorkspaceRef) (UserModel, bool) {
+	var sel UserSelection
+	if err := getJSON(tx.Bucket(bUserSelection), ref.Key(), &sel); err != nil || sel.Slug == "" {
+		return UserModel{}, false
+	}
+	var m UserModel
+	if err := getJSON(tx.Bucket(bUserModels), userModelKey(ref.UserAccID, sel.Slug), &m); err != nil {
+		return UserModel{}, false
+	}
+	if !m.Enabled {
+		return UserModel{}, false
+	}
+	if allowed, _ := userModelsAllowedTx(tx, ref); !allowed {
+		return UserModel{}, false
+	}
+	return m, true
 }
 
 // candidateTx returns the model_name the cascade selects, the level that selected

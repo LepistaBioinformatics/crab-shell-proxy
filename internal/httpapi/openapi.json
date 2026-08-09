@@ -1526,6 +1526,860 @@
           }
         }
       }
+    },
+    "/v1/models/mine": {
+      "get": {
+        "operationId": "listOwnModels",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "The caller's own models, their selection, and whether personal models are allowed here",
+        "description": "One call rather than four: 'you selected X' and 'your scope blocks personal models' are only meaningful together. api_key is never returned \u2014 has_key reports whether one is stored.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "registerOwnModel",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "Register a personal model",
+        "description": "provider must be one of the OpenAI-compatible family the connectivity probe represents (the `providers` field of the GET). api_base must be an https URL.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid definition, unsupported provider, or the per-account cap was reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateOwnModel",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "Edit a personal model",
+        "description": "Omitting api_key keeps the stored one; sending an empty one is refused rather than treated as a clear. Any edit to what the probe would send drops the stored test result.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's own name for the model. Scoped to the caller; there is no route that names another member's model."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteOwnModel",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "Delete a personal model",
+        "description": "Selections naming it are dropped in the same transaction, and the affected workspaces fall back to the administrator's cascade.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's own name for the model. Scoped to the caller; there is no route that names another member's model."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/mine/test": {
+      "post": {
+        "operationId": "testOwnModel",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "Probe an unsaved model definition",
+        "description": "Sends one minimal completion to POST {api_base}/chat/completions \u2014 the same request picoclaw's own client makes. https only, no redirects followed, and the resolved address is refused when it is inside the deployment. The provider's response body is never returned: the answer is {ok, status_code, latency_ms, detail}, where detail is an error class. Rate-limited per account.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Another probe from this account was too recent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/mine/selection": {
+      "put": {
+        "operationId": "selectOwnModel",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "Run one of the caller's own models in this workspace",
+        "description": "The selected model outranks an administrator's pin and every scope default. It is refused when the scope is locked, rather than stored and silently ignored. The workspace is re-materialized and left with a restart notice; it is not bounced.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deselectOwnModel",
+        "tags": [
+          "user-models"
+        ],
+        "summary": "Go back to the model the administrator provides",
+        "description": "A separate route from select, so a client cannot express it by accident with an empty field. Destroys no personal model.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/user-models": {
+      "get": {
+        "operationId": "adminListUserModels",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Every personal model under one subscription",
+        "description": "Gated by AuthorizeUserManagement over the (tenant, subscription). Never returns a key.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/user-models/status": {
+      "put": {
+        "operationId": "adminSetUserModelStatus",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Enable or disable one member's personal model",
+        "description": "Disabling drops the owner's workspaces back to the cascade, with a restart notice rather than a forced bounce. The named owner is re-checked against the subscription roster, so authority over one subscription cannot reach a member of another.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/model-policy": {
+      "get": {
+        "operationId": "adminGetModelPolicy",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Whether personal models are allowed at ONE scope level",
+        "description": "Reports that level only, without inheritance, so a screen can tell 'allowed here' from 'inherits from above'. {\"policy\": null} means unset.",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "global",
+                "agent",
+                "tenant",
+                "subscription"
+              ]
+            },
+            "description": "Same gating as /v1/admin/model-defaults: global and agent need HasAdminPrivileges; tenant and subscription need AuthorizeSharedScope."
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "adminSetModelPolicy",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Lock or unlock a scope against personal models",
+        "description": "The most specific level that is SET decides; unset everywhere means allowed. Nothing is re-materialized: affected workspaces re-resolve on their next start, and the member's own screen reports that their selection is blocked.",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "global",
+                "agent",
+                "tenant",
+                "subscription"
+              ]
+            },
+            "description": "Same gating as /v1/admin/model-defaults: global and agent need HasAdminPrivileges; tenant and subscription need AuthorizeSharedScope."
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "adminClearModelPolicy",
+        "tags": [
+          "admin-models"
+        ],
+        "summary": "Clear one level's lock so it inherits again",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "global",
+                "agent",
+                "tenant",
+                "subscription"
+              ]
+            },
+            "description": "Same gating as /v1/admin/model-defaults: global and agent need HasAdminPrivileges; tenant and subscription need AuthorizeSharedScope."
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subs_acc_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not licensed to use this subscription for this agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The routed agent does not run picoclaw, so it has no model_list to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -150,7 +150,11 @@ func TestRecordMaterializationFirstTimeIsInherited(t *testing.T) {
 	r := testRegistry(t)
 	ref := WorkspaceRef{TenantID: "t", SubsAccID: "s", Agent: "alpha", UserAccID: "u"}
 
-	if err := r.RecordMaterialization(ref, "main", []string{"fb"}); err != nil {
+	if err := r.RecordMaterialization(ref, Resolution{
+		Primary:     Model{ModelName: "main"},
+		Chain:       []Model{{ModelName: "fb"}},
+		CascadeName: "main",
+	}); err != nil {
 		t.Fatalf("RecordMaterialization: %v", err)
 	}
 
@@ -173,7 +177,7 @@ func TestRecordMaterializationPreservesExplicitSource(t *testing.T) {
 		t.Fatalf("PutAssignment: %v", err)
 	}
 
-	if err := r.RecordMaterialization(ref, "new", nil); err != nil {
+	if err := r.RecordMaterialization(ref, Resolution{Primary: Model{ModelName: "new"}, CascadeName: "new"}); err != nil {
 		t.Fatalf("RecordMaterialization: %v", err)
 	}
 
@@ -195,7 +199,7 @@ func TestRecordMaterializationKeepsInheritedSource(t *testing.T) {
 		t.Fatalf("PutAssignment: %v", err)
 	}
 
-	if err := r.RecordMaterialization(ref, "new", nil); err != nil {
+	if err := r.RecordMaterialization(ref, Resolution{Primary: Model{ModelName: "new"}, CascadeName: "new"}); err != nil {
 		t.Fatalf("RecordMaterialization: %v", err)
 	}
 

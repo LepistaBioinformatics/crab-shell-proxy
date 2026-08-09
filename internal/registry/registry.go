@@ -52,8 +52,8 @@ type Model struct {
 	AuthMethod string          `json:"auth_method,omitempty"`
 	ExtraBody  json.RawMessage `json:"extra_body,omitempty"`
 
-	Status     Status   `json:"status"`
-	ReplacedBy string   `json:"replaced_by,omitempty"`
+	Status     Status `json:"status"`
+	ReplacedBy string `json:"replaced_by,omitempty"`
 	// Fallbacks is this model's own ordered fallback chain, by model_name. It is
 	// expanded one level only when materialized, matching picoclaw's flat
 	// agents.defaults.model_fallbacks.
@@ -75,9 +75,17 @@ type Model struct {
 // alongside the primary so a key edit reaches every workspace holding the model
 // as a fallback, not only those where it is primary.
 type Assignment struct {
-	ModelName      string    `json:"model_name"`
-	Chain          []string  `json:"chain,omitempty"`
-	Source         Source    `json:"source"`
+	ModelName string   `json:"model_name"`
+	Chain     []string `json:"chain,omitempty"`
+	Source    Source   `json:"source"`
+	// UserModel names the personal model (`<owner>/<slug>`) actually running as
+	// primary, when the member selected one. It is a SEPARATE field rather than a
+	// value in ModelName on purpose: ModelName/Chain describe the INVENTORY side,
+	// and overwriting ModelName with a name the inventory does not have would both
+	// lose the admin pin this record carries and make candidateTx resolve a pin to
+	// a missing model — a hard failure that would leave the workspace unbootable
+	// the moment the member deselected.
+	UserModel      string    `json:"user_model,omitempty"`
 	MaterializedAt time.Time `json:"materialized_at"`
 }
 
@@ -121,6 +129,12 @@ var (
 	// ErrNoModelResolvable: no cascade level yields a model. Provisioning must
 	// refuse rather than write a workspace picoclaw cannot boot.
 	ErrNoModelResolvable = errors.New("registry: no model resolvable for this workspace")
+	// ErrUserModelLimit / ErrUserModelDisabled are their own sentinels rather than
+	// flavours of ErrInvalid because a MEMBER sees them: the handler turns each
+	// into a distinct code, and "you already have 10" needs a different next
+	// action from "an administrator switched this off".
+	ErrUserModelLimit    = errors.New("registry: personal model limit reached")
+	ErrUserModelDisabled = errors.New("registry: personal model is disabled")
 )
 
 // Referrer names one thing that keeps a model alive.
@@ -155,6 +169,14 @@ var (
 	kSchemaVersion = []byte("schema_version")
 )
 
+// allBuckets is what Open ensures. The personal-model buckets (usermodels.go)
+// are listed here rather than created lazily so an upgrade of an existing store
+// gets them on first boot, before any handler reads one.
+var allBuckets = [][]byte{
+	bModels, bAssignments, bScopeDefaults, bMeta,
+	bUserModels, bUserSelection, bScopePolicy,
+}
+
 // Registry is the inventory store. Every mutation runs in one bolt write
 // transaction, so a check-then-write (e.g. "nobody uses this" then delete)
 // cannot interleave with another admin's write.
@@ -174,7 +196,7 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 		return nil, fmt.Errorf("open model registry %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bModels, bAssignments, bScopeDefaults, bMeta} {
+		for _, name := range allBuckets {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
