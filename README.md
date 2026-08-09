@@ -118,3 +118,20 @@ See [`config.yaml`](./config.yaml) for the full set of options and env overrides
 Actively developed as part of a Mycelium + picoclaw stack. The core — per-user
 isolation, lifecycle, OpenAI surface, non-root, per-instance keys — is
 implemented and covered by unit tests plus real-daemon integration tests.
+
+---
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](./LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([`LICENSE-MIT`](./LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
