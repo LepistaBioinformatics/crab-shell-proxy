@@ -222,12 +222,11 @@ func TestMigrateCapturesEveryWorkspacesCurrentModelAndChain(t *testing.T) {
 
 // TestMigrateCapturesAWorkspaceWhoseAgentIsNotInConfig guards a deviation from
 // the brief's reference code: step 4 walks disk (allExistingWorkspaces), not
-// m.cfg.Agents. config.Load deletes a hermes agent from cfg.Agents when its
-// token or provider key env is unset (DisabledAgents), and an agent removed
-// from config.yaml entirely is likewise absent — in both cases its existing
-// workspaces must still be captured, or they are orphaned the instant a scope
-// default changes. testManagerWithRegistry's cfg.Agents is empty, so this test
-// would fail against a migration that looped m.cfg.Agents instead of disk.
+// m.cfg.Agents. An agent removed from config.yaml is absent from cfg.Agents, and
+// its existing workspaces must still be captured, or they are orphaned the
+// instant a scope default changes. testManagerWithRegistry's cfg.Agents is empty,
+// so this test would fail against a migration that looped m.cfg.Agents instead of
+// disk.
 func TestMigrateCapturesAWorkspaceWhoseAgentIsNotInConfig(t *testing.T) {
 	m, reg, root := testManagerWithRegistry(t)
 	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "decommissioned", UserAccID: "u1"}

@@ -52,20 +52,16 @@ type Docker interface {
 // (an HTTP GET returning 2xx on the harness port).
 type HealthChecker func(ctx context.Context, name string, port int) error
 
-// hermesAPIPort is the OpenAI-compatible API server port hermes-agent listens on
-// (API_SERVER_PORT); the picoclaw port is configurable (cfg.PicoclawPort).
-const hermesAPIPort = 8642
-
 // Target is the resolved connection info for a running per-user container.
 type Target struct {
 	Name string
-	// Endpoint is the harness-specific address: ws://<name>:<port>/pico/ws
-	// (picoclaw) or http://<name>:8642 (hermes).
+	// Endpoint is the harness-specific address: ws://<name>:<port>/pico/ws for
+	// picoclaw, the only harness.
 	Endpoint string
-	// AuthToken is the pico channel token (picoclaw) or API server bearer key
-	// (hermes).
+	// AuthToken is the pico channel token.
 	AuthToken string
-	// Harness selects which turner runs against this target.
+	// Harness records which runtime this target runs, so a caller need not look the
+	// agent up again to know what it is talking to.
 	Harness string
 }
 
@@ -152,9 +148,6 @@ func (m *Manager) ContainerName(key WorkspaceKey) string {
 
 // harnessPort is the health/API port for an agent's harness.
 func (m *Manager) harnessPort(agent config.Agent) int {
-	if agent.Harness == config.HarnessHermes {
-		return hermesAPIPort
-	}
 	return m.cfg.PicoclawPort
 }
 
@@ -169,9 +162,6 @@ func (m *Manager) startupDeadline(agent config.Agent) time.Duration {
 
 // endpoint is the address a turner dials for a running container of this agent.
 func (m *Manager) endpoint(agent config.Agent, name string) string {
-	if agent.Harness == config.HarnessHermes {
-		return fmt.Sprintf("http://%s:%d", name, hermesAPIPort)
-	}
 	return fmt.Sprintf("ws://%s:%d/pico/ws", name, m.cfg.PicoclawPort)
 }
 
@@ -211,65 +201,58 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
-	model := agent.Model
-
-	// Provision the per-user data dir and obtain the auth token to reach the
-	// container: picoclaw's pico channel token, or hermes' generated API server
-	// bearer key. Both are persisted per user so a returning user reuses them.
+	// Provision the per-user data dir and obtain picoclaw's pico channel token,
+	// persisted per user so a returning user reuses it.
 	var authToken string
 	var err error
-	if agent.Harness == config.HarnessHermes {
-		authToken, err = provisionHermes(userDir, templateDir, m.cfg.PicoclawUser, model)
-	} else {
-		// Materialize the effective secret view BEFORE provisioning: it is the
-		// bind-mount source, and resolveAndMaterialize reads the native overlay
-		// out of it — native slots now arrive from the admin cascade, not only
-		// from the user's own store.
-		if _, syncErr := m.syncEffectiveSecrets(key); syncErr != nil {
-			return Target{}, syncErr
-		}
-		// The template is the persona cascade's LAST layer, and the cascade is
-		// resolved before provisioning — so a missing template has to self-heal
-		// first. Left inside provision (where it used to live), a first-ever
-		// provision resolved the cascade against a template that did not exist yet
-		// and produced a workspace with no identity files at all.
-		if tErr := ensurePicoclawTemplate(templateDir, m.cfg.PicoclawUser); tErr != nil {
-			return Target{}, tErr
-		}
-		// Same discipline as the secrets above, and for two reasons: this is the
-		// bind-mount source for the read-only identity files, and seedWorkspace
-		// reads USER.md out of it (an operator's injection is what a first provision
-		// starts from). Both need it materialized before provision runs.
-		if syncErr := m.syncEffectivePersona(key, templateDir); syncErr != nil {
-			return Target{}, syncErr
-		}
-		personaDir := config.EffectivePersonaDir(
-			m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role)
-		authToken, err = provision(userDir, templateDir, personaDir,
-			config.SubscriptionAgentConfigOverlay(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role),
-			m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
-		if err == nil {
-			// Materialize AFTER seeding, so the template's (now empty) model_list
-			// is replaced by the inventory's answer, and the native overlay lands
-			// on top of THAT. A workspace with no resolvable model fails here,
-			// before any container exists.
-			err = m.resolveAndMaterialize(key, userDir)
-		}
-		if err == nil {
-			// The native memory-graph MCP server. Beside resolveAndMaterialize rather
-			// than inside it (model resolution and MCP injection are unrelated), and
-			// beside it rather than in alignWorkspace, which only ever runs on a
-			// first-ever seed — see applyMCPServer's own comment.
-			err = m.applyMemoryGraphMCP(key, userDir)
-		}
-		if err == nil {
-			// AFTER syncEffectivePersona (it reads the resolved identity files) and
-			// after materialization (which projects the matching agents.list). The
-			// workspaces must exist and be chowned before the container starts, or
-			// picoclaw creates them itself as root and the non-root agent cannot
-			// write its own project.
-			err = m.syncProjectWorkspaces(key, userDir)
-		}
+	// Materialize the effective secret view BEFORE provisioning: it is the
+	// bind-mount source, and resolveAndMaterialize reads the native overlay
+	// out of it — native slots now arrive from the admin cascade, not only
+	// from the user's own store.
+	if _, syncErr := m.syncEffectiveSecrets(key); syncErr != nil {
+		return Target{}, syncErr
+	}
+	// The template is the persona cascade's LAST layer, and the cascade is
+	// resolved before provisioning — so a missing template has to self-heal
+	// first. Left inside provision (where it used to live), a first-ever
+	// provision resolved the cascade against a template that did not exist yet
+	// and produced a workspace with no identity files at all.
+	if tErr := ensurePicoclawTemplate(templateDir, m.cfg.PicoclawUser); tErr != nil {
+		return Target{}, tErr
+	}
+	// Same discipline as the secrets above, and for two reasons: this is the
+	// bind-mount source for the read-only identity files, and seedWorkspace
+	// reads USER.md out of it (an operator's injection is what a first provision
+	// starts from). Both need it materialized before provision runs.
+	if syncErr := m.syncEffectivePersona(key, templateDir); syncErr != nil {
+		return Target{}, syncErr
+	}
+	personaDir := config.EffectivePersonaDir(
+		m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role)
+	authToken, err = provision(userDir, templateDir, personaDir,
+		config.SubscriptionAgentConfigOverlay(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role),
+		m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
+	if err == nil {
+		// Materialize AFTER seeding, so the template's (now empty) model_list
+		// is replaced by the inventory's answer, and the native overlay lands
+		// on top of THAT. A workspace with no resolvable model fails here,
+		// before any container exists.
+		err = m.resolveAndMaterialize(key, userDir)
+	}
+	if err == nil {
+		// The native memory-graph MCP server. Beside resolveAndMaterialize rather
+		// than inside it (model resolution and MCP injection are unrelated), and
+		// beside it rather than in alignWorkspace, which only ever runs on a
+		// first-ever seed — see applyMCPServer's own comment.
+		err = m.applyMemoryGraphMCP(key, userDir)
+	}
+	if err == nil {
+		// AFTER syncEffectivePersona (it reads the resolved identity files) and
+		// after materialization (which projects the matching agents.list). The
+		// workspaces must exist and be chowned before the container starts, or
+		// picoclaw creates them itself as root and the non-root agent cannot
+		// write its own project.
+		err = m.syncProjectWorkspaces(key, userDir)
 	}
 	if err != nil {
 		return Target{}, err
@@ -283,13 +266,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	createdNow := false
 	switch {
 	case !st.Exists:
-		var cerr error
-		if agent.Harness == config.HarnessHermes {
-			cerr = m.createHermes(ctx, agent, key, name, model, authToken)
-		} else {
-			cerr = m.create(ctx, agent, key, name)
-		}
-		if cerr != nil {
+		if cerr := m.create(ctx, agent, key, name); cerr != nil {
 			return Target{}, cerr
 		}
 		createdNow = true
@@ -304,17 +281,13 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	// the check belongs: syncEffectivePersona ran a few lines above and returned an
 	// error if it failed, so the effective dir it compares against is current.
 	//
-	// Hermes is excluded because createHermes emits no persona binds at all: for a
-	// hermes workspace with an injection, expected could never be satisfied and the
-	// container would be recreated on every single request.
 	// The project .secrets mounts drift for the same structural reason as the
 	// persona ones: a project created after this container was built has no mount
 	// for its workspace, so its agent runs with no credentials at all. That
 	// presents as the model or the tools failing, never as a missing bind, so it
 	// has to be caught here rather than diagnosed later.
-	case agent.Harness != config.HarnessHermes &&
-		(personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds) ||
-			m.projectBindDriftFor(key, st.Binds)):
+	case personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds) ||
+		m.projectBindDriftFor(key, st.Binds):
 		m.logf("container %s: persona or project mounts stale, recreating (identity and project changes cannot reach it otherwise)", name)
 		if st.Running {
 			if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {

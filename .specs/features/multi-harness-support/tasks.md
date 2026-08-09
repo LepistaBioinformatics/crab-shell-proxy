@@ -1,5 +1,20 @@
 # multi-harness-support Tasks (crab-shell-proxy)
 
+> **⚠️ WITHDRAWN — implemented, verified live, then removed.**
+>
+> The Hermes (Nous Research `hermes-agent`) harness described here **shipped and worked
+> end-to-end**, and was then removed for **current infrastructure compatibility**: a 180s startup
+> deadline against a 35s global health-wait, turns sitting near mycelium's 60s `gatewayTimeout`, a
+> heavyweight per-user image, and a second code branch no deployment exercised.
+>
+> This document is kept as the **future-implementation record** — it is not a description of the
+> current codebase. Nothing below is in the shipped surface today.
+>
+> - **Why, and what exactly was withdrawn:** root `.specs/features/hermes-removal/DECISION.md`
+>   and `.specs/features/hermes-removal/spec.md`.
+> - **What was learned by running it** (read this first on a re-add): `./implementation-notes.md`.
+> - **Recovery SHAs:** `d2f0a9a`, `748e0fe`, `3e9e95c`.
+
 Sequential; each ends build-green. Gate after every task: `go build ./...`.
 Final gate: `go vet ./... && go test ./...`.
 

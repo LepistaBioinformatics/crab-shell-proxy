@@ -118,4 +118,4 @@ workspace and instructions, inheriting the parent's skills, model and secrets.
 
 - Production hardening: TLS termination, Docker-socket privilege reduction, secret-rotation automation.
 - Per-user (not just per-agent) lifecycle-mode overrides.
-- Non-picoclaw harness support (e.g. Hermes Agent) behind the same proxy — see parent `.specs/features/multi-harness-support/`.
+- Non-picoclaw harness support behind the same proxy — **deferred.** Hermes Agent was built and verified live, then withdrawn for current-infra compatibility (root `.specs/features/hermes-removal/DECISION.md`). Restarting point: `.specs/features/multi-harness-support/implementation-notes.md`.

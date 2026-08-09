@@ -42,14 +42,13 @@ const (
 	ModeContinuous Mode = "continuous"
 )
 
-// Harness kinds select the agent runtime an agent orchestrates.
+// Harness kinds select the agent runtime an agent orchestrates. Picoclaw is
+// currently the only one; the discriminator is kept because it is a published
+// admin-API field and clients branch on it.
 const (
 	// HarnessPicoclaw is the default: a picoclaw container spoken to over the
 	// Pico Protocol WebSocket.
 	HarnessPicoclaw = "picoclaw"
-	// HarnessHermes is Nous Research's hermes-agent, driven over its
-	// OpenAI-compatible HTTP API server.
-	HarnessHermes = "hermes"
 )
 
 // secret is a value sourced either inline or from an environment variable
@@ -94,26 +93,24 @@ func (s secret) resolve() (string, error) {
 // picoclaw config/.security.yml at provisioning time.
 type ModelConfig struct {
 	Provider  string `yaml:"provider"`
-	Name      string `yaml:"name"`      // picoclaw: a model_list model_name; hermes: model.default
+	Name      string `yaml:"name"`      // a picoclaw model_list model_name
 	APIKeyEnv string `yaml:"apiKeyEnv"` // env var (in THIS proxy) holding the API key
 	APIKey    string `yaml:"-"`         // resolved from APIKeyEnv at load
-	// BaseURL is the provider endpoint for OpenAI-compatible harnesses (hermes):
-	// written to config.yaml's model.base_url (e.g. https://api.z.ai/api/paas/v4).
-	// Ignored by picoclaw.
+	// BaseURL optionally names the provider endpoint. Picoclaw does not read it —
+	// its only consumer is the boot migration, which imports it as the model
+	// registry's APIBase (migrate_models.go). Empty for every shipped agent, and
+	// the migration falls back to the template's model_list definition then.
 	BaseURL string `yaml:"baseUrl"`
-	// KeyEnvName is the env var name the HARNESS reads the key under INSIDE its
-	// container (hermes only; provider-specific and not derivable from Provider,
-	// e.g. "GLM_API_KEY" for provider "zai"). The proxy injects APIKey under this
-	// name. Ignored by picoclaw.
-	KeyEnvName string `yaml:"keyEnvName"`
 }
 
 // Agent is one declared picoclaw agent (e.g. alpha, beta).
 type Agent struct {
 	// Key is the catalog key (map key), e.g. "alpha".
 	Key string `yaml:"-"`
-	// Harness selects the agent runtime kind (HarnessPicoclaw | HarnessHermes).
-	// Empty defaults to picoclaw at Load, so existing configs are unchanged.
+	// Harness selects the agent runtime kind. HarnessPicoclaw is the only accepted
+	// value; empty defaults to it at Load, so existing configs are unchanged. The
+	// field is retained because the admin API publishes it and clients branch on
+	// it to decide which per-agent surfaces an agent offers.
 	Harness string `yaml:"harness"`
 	// ServiceName matches the value mycelium injects as x-mycelium-service-name
 	// (e.g. "picoclaw-alpha"). Requests are routed to an agent by this value.
@@ -129,10 +126,10 @@ type Agent struct {
 	// IdleTimeout is the scale-to-zero inactivity window (ignored when continuous).
 	IdleTimeout Duration `yaml:"idleTimeout"`
 	// StartupDeadline optionally overrides the global StartupDeadline for this
-	// agent's cold-start health-wait. Heavy harnesses (e.g. hermes: bundled-skill
-	// sync + browser bootstrap) need much longer than picoclaw to serve their
-	// port. Safe to raise well past mycelium's 60s gatewayTimeout because chat is
-	// streamed (the 200 is flushed before the cold start). 0 => use the global.
+	// agent's cold-start health-wait, for an agent whose image takes unusually long
+	// to serve its port. Safe to raise well past mycelium's 60s gatewayTimeout
+	// because chat is streamed (the 200 is flushed before the cold start).
+	// 0 => use the global.
 	StartupDeadline Duration `yaml:"startupDeadline"`
 	// Model optionally pins the picoclaw provider/model and injects the API key
 	// from the environment into each user's config at provisioning time.
@@ -196,10 +193,7 @@ type Config struct {
 	// Network is the docker network spawned containers join (compose-qualified).
 	Network       string `yaml:"network"`
 	PicoclawImage string `yaml:"picoclawImage"`
-	// HermesImage is the image for hermes-agent harness agents. Defaulted so
-	// existing configs need not set it.
-	HermesImage  string `yaml:"hermesImage"`
-	PicoclawPort int    `yaml:"picoclawPort"`
+	PicoclawPort  int    `yaml:"picoclawPort"`
 	// PicoclawUser is the "uid:gid" the spawned picoclaw containers run as.
 	// Empty => root (the image default). Non-root requires relocating HOME
 	// (PicoclawHome) because the image's /root is 0700.
@@ -247,12 +241,6 @@ type Config struct {
 	// ResolvedMCPTokenSecret is filled by Load from MCPTokenSecret. Empty means the
 	// memory graph is disabled; see MCPTokenSecret.
 	ResolvedMCPTokenSecret string `yaml:"-"`
-
-	// DisabledAgents lists agents dropped at Load because their deployment did
-	// not provide their required secrets (currently: a hermes agent missing its
-	// token or its provider API key). Dropped agents are not registered, so
-	// nothing (reconcile or on-demand) ever starts them.
-	DisabledAgents []string `yaml:"-"`
 }
 
 // Load reads, validates, and env-resolves the config at path.
@@ -274,14 +262,6 @@ func Load(path string) (*Config, error) {
 	for key, agent := range cfg.Agents {
 		tok, err := agent.Token.resolve()
 		if err != nil {
-			// A hermes agent whose token env is unset means this deployment is
-			// not configured for it: drop it (so nothing starts it) instead of
-			// failing the whole proxy. Picoclaw still requires its token.
-			if agent.Harness == HarnessHermes {
-				cfg.DisabledAgents = append(cfg.DisabledAgents, key)
-				delete(cfg.Agents, key)
-				continue
-			}
 			return nil, fmt.Errorf("agent %q token: %w", key, err)
 		}
 		agent.Key = key
@@ -297,20 +277,6 @@ func Load(path string) (*Config, error) {
 		for _, mc := range agent.Models {
 			if mc.APIKeyEnv != "" {
 				mc.APIKey = os.Getenv(mc.APIKeyEnv)
-			}
-		}
-		// Only register a hermes agent when its deployment actually provides its
-		// secrets: mycelium cannot route to it without a token, and it cannot
-		// reach its provider without the API key. A hermes entry left in
-		// config.yaml with its token/key unset is dropped here instead of being
-		// started (reconcile and on-demand both key off cfg.Agents). Picoclaw is
-		// unchanged -- its empty key is still tolerated (see above).
-		if agent.Harness == HarnessHermes {
-			keyMissing := agent.Model != nil && agent.Model.APIKeyEnv != "" && agent.Model.APIKey == ""
-			if tok == "" || keyMissing {
-				cfg.DisabledAgents = append(cfg.DisabledAgents, key)
-				delete(cfg.Agents, key)
-				continue
 			}
 		}
 		cfg.Agents[key] = agent
@@ -383,9 +349,6 @@ func (c *Config) applyDefaults() {
 		// reaches this proxy in every environment this repo ships.
 		c.MCPBaseURL = "http://crab-shell-proxy:8080"
 	}
-	if c.HermesImage == "" {
-		c.HermesImage = "docker.io/nousresearch/hermes-agent:latest"
-	}
 	if c.PicoclawPort == 0 {
 		c.PicoclawPort = 18790
 	}
@@ -439,11 +402,14 @@ func (c *Config) validate() error {
 		if agent.Template == "" {
 			return fmt.Errorf("agent %q: template is required", key)
 		}
+		// An unknown harness fails the load rather than defaulting: a stale config
+		// naming a runtime this proxy no longer orchestrates would otherwise hand a
+		// user a picoclaw container under a role provisioned for something else.
 		switch agent.Harness {
-		case "", HarnessPicoclaw, HarnessHermes:
+		case "", HarnessPicoclaw:
 		default:
-			return fmt.Errorf("agent %q: harness must be %q or %q, got %q",
-				key, HarnessPicoclaw, HarnessHermes, agent.Harness)
+			return fmt.Errorf("agent %q: harness must be %q (or omitted), got %q",
+				key, HarnessPicoclaw, agent.Harness)
 		}
 		switch agent.Mode {
 		case ModeScaleToZero, ModeContinuous:

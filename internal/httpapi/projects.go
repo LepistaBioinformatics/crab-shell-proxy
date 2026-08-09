@@ -63,27 +63,10 @@ func (s *Server) resolveProjectCaller(
 		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
 		return docker.WorkspaceKey{}, false
 	}
-	if !projectsSupported(agent) {
-		writeJSON(w, http.StatusNotImplemented, errBody(
-			"projects are not available for this agent: they are built on picoclaw's agents.list and agents.dispatch"))
-		return docker.WorkspaceKey{}, false
-	}
 	if write {
 		return s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
 	}
 	return s.authorizeRestartRead(w, agent, ident, tenantID, subsAccID)
-}
-
-// projectsSupported gates the whole feature on the harness.
-//
-// A project IS a picoclaw agents.list entry plus a dispatch rule. Hermes takes an
-// entirely separate provisioning branch (provisionHermes) that never reads
-// config.json, so on a hermes agent the store would fill up, a workspace would be
-// seeded that nothing ever opens, and a chat naming a project would run as the
-// ordinary agent in the main workspace — the silent misroute the 404 on unknown
-// projects exists to prevent, arrived at from the other direction.
-func projectsSupported(agent config.Agent) bool {
-	return agent.Harness != config.HarnessHermes
 }
 
 func (s *Server) handleProjectsList(w http.ResponseWriter, r *http.Request) {
@@ -223,11 +206,6 @@ func (s *Server) workspaceSegmentFor(
 	if projectID == "" {
 		return config.MainWorkspace, "", true
 	}
-	if agent, ok := s.Cfg.Agents[key.Role]; ok && !projectsSupported(agent) {
-		writeJSON(w, http.StatusNotImplemented, errBody(
-			"projects are not available for this agent's harness"))
-		return "", "", false
-	}
 	exists, err := s.Mgr.HasProject(key, projectID)
 	if err != nil {
 		s.logf("projects: lookup failed user=%s project=%s: %v", key.UserAccID, projectID, err)
@@ -254,11 +232,6 @@ func projectSessionID(projectID, sessionKey string) string {
 func (s *Server) checkProject(w http.ResponseWriter, key docker.WorkspaceKey, projectID string) bool {
 	if projectID == "" {
 		return true
-	}
-	if agent, ok := s.Cfg.Agents[key.Role]; ok && !projectsSupported(agent) {
-		writeJSON(w, http.StatusNotImplemented, errBody(
-			"projects are not available for this agent's harness"))
-		return false
 	}
 	exists, err := s.Mgr.HasProject(key, projectID)
 	if err != nil {

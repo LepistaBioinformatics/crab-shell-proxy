@@ -103,12 +103,12 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		return
 	}
 
-	_, err = s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
+	_, err = s.Pico.RunTurn(turnCtx, turn.Request{
 		Endpoint:   tgt.Endpoint,
 		AuthToken:  tgt.AuthToken,
 		SessionID:  sessionKey,
 		SessionKey: key.UserAccID + ":" + key.Role,
-		Model:      turnModelFor(agent, model),
+		Model:      model,
 		Content:    userContent,
 	}, turn.Sink{
 		Content: func(delta string) {

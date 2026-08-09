@@ -438,7 +438,9 @@ func TestModelOverrideFilePaths(t *testing.T) {
 	}
 }
 
-const hermesSample = `
+// harnessSample declares one agent with the harness field omitted and one that
+// names it explicitly, so both accepted spellings are exercised by one Load.
+const harnessSample = `
 listen: ":9000"
 hostDataRoot: "/host/data"
 network: "net"
@@ -448,60 +450,53 @@ agents:
     token: { env: "TOK_ALPHA" }
     template: "alpha"
     mode: "continuous"
-  hermes-glm:
-    harness: hermes
-    serviceName: "hermes-glm"
-    token: { env: "MYC_HERMES_TOK" }
-    template: "hermes-glm"
+  beta:
+    harness: picoclaw
+    serviceName: "picoclaw-beta"
+    token: { env: "TOK_BETA" }
+    template: "beta"
     mode: "continuous"
-    model:
-      provider: "zai"
-      name: "glm-4.7-flash"
-      baseUrl: "https://api.z.ai/api/paas/v4"
-      apiKeyEnv: "GLM_KEY"
 `
 
-func TestHermesDisabledWhenSecretsMissing(t *testing.T) {
+// TestHarnessAcceptsPicoclawAndDefaultsWhenOmitted pins the two legal spellings.
+// An omitted harness must keep defaulting to picoclaw: every shipped agent block
+// omits it, so requiring it would break all of them.
+func TestHarnessAcceptsPicoclawAndDefaultsWhenOmitted(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "x")
-	// MYC_HERMES_TOK and GLM_KEY intentionally left unset.
-	cfg, err := Load(writeConfig(t, hermesSample))
+	t.Setenv("TOK_BETA", "y")
+	cfg, err := Load(writeConfig(t, harnessSample))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if _, ok := cfg.Agents["hermes-glm"]; ok {
-		t.Fatalf("hermes-glm should be dropped when its token/key are unset")
-	}
-	if _, ok := cfg.Agents["alpha"]; !ok {
-		t.Fatalf("picoclaw alpha should remain registered")
-	}
-	found := false
-	for _, k := range cfg.DisabledAgents {
-		if k == "hermes-glm" {
-			found = true
+	for _, key := range []string{"alpha", "beta"} {
+		a, ok := cfg.Agents[key]
+		if !ok {
+			t.Fatalf("agent %q should be registered", key)
 		}
-	}
-	if !found {
-		t.Fatalf("hermes-glm should be recorded in DisabledAgents, got %v", cfg.DisabledAgents)
+		if a.Harness != HarnessPicoclaw {
+			t.Errorf("agent %q harness = %q, want %q", key, a.Harness, HarnessPicoclaw)
+		}
 	}
 }
 
-func TestHermesEnabledWhenSecretsPresent(t *testing.T) {
+// TestUnknownHarnessIsRejected pins the removal of the hermes harness: a stale
+// operator config naming a runtime this proxy no longer orchestrates must fail
+// loudly at Load, not boot into a code path that is gone. Silently defaulting it
+// to picoclaw would hand a user a picoclaw container under a role provisioned for
+// something else.
+func TestUnknownHarnessIsRejected(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "x")
-	t.Setenv("MYC_HERMES_TOK", "htok")
-	t.Setenv("GLM_KEY", "gkey")
-	cfg, err := Load(writeConfig(t, hermesSample))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	t.Setenv("TOK_BETA", "y")
+	stale := strings.Replace(harnessSample, "harness: picoclaw", "harness: hermes", 1)
+	_, err := Load(writeConfig(t, stale))
+	if err == nil {
+		t.Fatal("Load should reject an unknown harness value")
 	}
-	a, ok := cfg.Agents["hermes-glm"]
-	if !ok {
-		t.Fatalf("hermes-glm should be registered when its secrets are set")
+	if !strings.Contains(err.Error(), HarnessPicoclaw) {
+		t.Errorf("error should name the accepted value %q, got: %v", HarnessPicoclaw, err)
 	}
-	if a.ResolvedToken != "htok" || a.Model == nil || a.Model.APIKey != "gkey" {
-		t.Fatalf("hermes secrets not resolved: token=%q key=%v", a.ResolvedToken, a.Model)
-	}
-	if len(cfg.DisabledAgents) != 0 {
-		t.Fatalf("no agents should be disabled, got %v", cfg.DisabledAgents)
+	if !strings.Contains(err.Error(), "hermes") {
+		t.Errorf("error should echo the rejected value, got: %v", err)
 	}
 }
 

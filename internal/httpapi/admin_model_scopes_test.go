@@ -188,14 +188,20 @@ func TestReorderDoesNotReapplyAnything(t *testing.T) {
 	}
 }
 
-// hermesService registers a second agent running a non-picoclaw harness and
+// otherHarness is a harness value config.Load would reject. These fixtures build
+// config.Agent structs in memory and never go through Load, so an arbitrary value
+// works — which is the point: it lets the model-inventory gate stay covered now
+// that picoclaw is the only harness a real config can declare.
+const otherHarness = "some-other-harness"
+
+// otherHarnessService registers a second agent running a non-picoclaw harness and
 // returns the service-name header value that routes to it.
-func hermesService(s *Server) string {
+func otherHarnessService(s *Server) string {
 	s.Cfg.Agents["nous"] = config.Agent{
-		Key: "nous", ServiceName: "hermes-nous", ResolvedToken: "bearer",
-		Harness: config.HarnessHermes, Mode: config.ModeContinuous,
+		Key: "nous", ServiceName: "other-nous", ResolvedToken: "bearer",
+		Harness: otherHarness, Mode: config.ModeContinuous,
 	}
-	return "hermes-nous"
+	return "other-nous"
 }
 
 func doAdminAs(t *testing.T, s *Server, profile, service, method, path, body string) *httptest.ResponseRecorder {
@@ -212,14 +218,18 @@ func doAdminAs(t *testing.T, s *Server, profile, service, method, path, body str
 	return rec
 }
 
-// TestModelAssignmentRejectedForANonPicoclawAgent — hermes agents read their model
-// from the proxy's config.yaml, so a pin written for one is a record nothing reads:
-// it restarts the container for nothing and leaves a phantom workspace referrer that
-// blocks delete and disable of that model forever. The gate is server-side because
-// the proxy is the gate (NFR-6); the UI filter is secondary.
+// TestModelAssignmentRejectedForANonPicoclawAgent — a harness that reads its model
+// from somewhere other than the inventory takes a pin nothing reads: it restarts the
+// container for nothing and leaves a phantom workspace referrer that blocks delete
+// and disable of that model forever. The gate is server-side because the proxy is
+// the gate (NFR-6); the UI filter is secondary.
+//
+// No shipped config can declare such an agent now that picoclaw is the only legal
+// harness, so the fixture synthesizes one. The gate is what makes "picoclaw only"
+// safe rather than assumed, so it stays covered.
 func TestModelAssignmentRejectedForANonPicoclawAgent(t *testing.T) {
 	s, admin, _ := newTestServer(t)
-	service := hermesService(s)
+	service := otherHarnessService(s)
 	doAdmin(t, s, admin, "POST", "/v1/admin/models",
 		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
 
@@ -228,7 +238,7 @@ func TestModelAssignmentRejectedForANonPicoclawAgent(t *testing.T) {
 	for _, method := range []string{"POST", "DELETE"} {
 		rec := doAdminAs(t, s, admin, service, method, "/v1/admin/model-assignments", body)
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("%s assignment for a hermes agent = %d, want 400: %s", method, rec.Code, rec.Body.String())
+			t.Errorf("%s assignment for a non-picoclaw agent = %d, want 400: %s", method, rec.Code, rec.Body.String())
 		}
 	}
 	ref := registry.WorkspaceRef{TenantID: tenantT, SubsAccID: subsX, Agent: "nous", UserAccID: accBob}
@@ -239,7 +249,7 @@ func TestModelAssignmentRejectedForANonPicoclawAgent(t *testing.T) {
 
 func TestAgentModelDefaultRejectedForANonPicoclawAgent(t *testing.T) {
 	s, admin, _ := newTestServer(t)
-	service := hermesService(s)
+	service := otherHarnessService(s)
 	doAdmin(t, s, admin, "POST", "/v1/admin/models",
 		`{"model_name":"m","provider":"openai","model":"m","api_base":"https://x","api_key":"sk"}`)
 
@@ -249,7 +259,7 @@ func TestAgentModelDefaultRejectedForANonPicoclawAgent(t *testing.T) {
 	} {
 		rec := doAdminAs(t, s, admin, service, tc.method, "/v1/admin/model-defaults?scope=agent", tc.body)
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("%s agent default for a hermes agent = %d, want 400: %s", tc.method, rec.Code, rec.Body.String())
+			t.Errorf("%s agent default for a non-picoclaw agent = %d, want 400: %s", tc.method, rec.Code, rec.Body.String())
 		}
 	}
 	if _, err := s.Reg.GetScopeDefault(registry.ScopeSel{Level: registry.LevelAgent, Agent: "nous"}); !errors.Is(err, registry.ErrNotFound) {
@@ -263,7 +273,7 @@ func TestAgentModelDefaultRejectedForANonPicoclawAgent(t *testing.T) {
 
 func TestAdminAgentsReportsTheHarness(t *testing.T) {
 	s, admin, _ := newTestServer(t)
-	hermesService(s)
+	otherHarnessService(s)
 
 	rec := doAdmin(t, s, admin, "GET", "/v1/admin/agents", "")
 	var body struct {
@@ -279,9 +289,10 @@ func TestAdminAgentsReportsTheHarness(t *testing.T) {
 	for _, a := range body.Agents {
 		got[a.Key] = a.Harness
 	}
-	// The client needs this to keep hermes agents out of the model picker.
-	if got["nous"] != "hermes" {
-		t.Errorf("agents = %s, want nous reported as hermes", rec.Body.String())
+	// The client needs this to keep an agent the inventory does not govern out of
+	// the model picker.
+	if got["nous"] != otherHarness {
+		t.Errorf("agents = %s, want nous reported as %s", rec.Body.String(), otherHarness)
 	}
 	if _, present := got["alpha"]; !present {
 		t.Errorf("agents = %s, want alpha listed", rec.Body.String())

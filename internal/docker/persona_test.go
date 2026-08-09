@@ -318,8 +318,8 @@ func TestPersonaBindDrift(t *testing.T) {
 		t.Error("a bind whose effective source no longer exists must read as drifted")
 	}
 
-	// Nothing materialized and nothing mounted is a legitimate state (a hermes-style
-	// template ships no workspace/*.md), not drift.
+	// Nothing materialized and nothing mounted is a legitimate state (a template
+	// that ships no workspace/*.md), not drift.
 	empty, emptyKey, _ := personaFixture(t)
 	if personaBindDrift(empty, emptyKey, dest, base) {
 		t.Error("no expected mounts and none present is not drift")

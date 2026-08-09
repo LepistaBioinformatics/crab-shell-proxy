@@ -48,7 +48,7 @@ func ensurePicoclawTemplate(templateDir, user string) error {
 	if _, err := os.Stat(filepath.Join(templateDir, "config.json")); err == nil {
 		return nil
 	}
-	// "picoclaw" is the only harness reaching here; hermes has its own path.
+	// "picoclaw" is the only harness there is; the layout is per-harness anyway.
 	if err := materializeDefaultTemplate(templateDir, "picoclaw", user); err != nil {
 		return fmt.Errorf("materialize default template: %w", err)
 	}

@@ -228,8 +228,7 @@ type Orchestrator interface {
 	SyncEffectivePersonaForScope(scope docker.Scope) error
 }
 
-// Turner runs one conversational turn (satisfied by *pico.Client and
-// *hermes.Client).
+// Turner runs one conversational turn (satisfied by *pico.Client).
 type Turner interface {
 	RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error)
 }
@@ -239,11 +238,9 @@ type Server struct {
 	Cfg      *config.Config
 	Resolver identity.Resolver
 	Mgr      Orchestrator
-	// Pico runs picoclaw turns; Hermes runs hermes-agent turns. Selected per
-	// target by turnerFor.
-	Pico   Turner
-	Hermes Turner
-	Logf   func(string, ...any)
+	// Pico runs picoclaw turns.
+	Pico Turner
+	Logf func(string, ...any)
 	// Reg is the model inventory. Handlers read and write it directly; Mgr is
 	// used only to make a change take effect on disk.
 	Reg *registry.Registry
@@ -260,29 +257,6 @@ type Server struct {
 	// probes throttles the connectivity test in user_models.go. Per account, so
 	// one member cannot spend the instance's outbound budget while another waits.
 	probes *probeLimiter
-}
-
-// turnerFor selects the turn runner for a resolved target's harness.
-func (s *Server) turnerFor(harness string) Turner {
-	if harness == config.HarnessHermes {
-		return s.Hermes
-	}
-	return s.Pico
-}
-
-// turnModelFor is the model name to send in the turn request body. picoclaw
-// ignores it (it is pinned server-side), so the OpenAI display value is fine.
-// hermes puts it straight into its request body, so the "picoclaw" display
-// sentinel must NOT leak — send the agent's configured model, or "" to let
-// hermes fall back to its config.yaml default.
-func turnModelFor(agent config.Agent, display string) string {
-	if agent.Harness != config.HarnessHermes {
-		return display
-	}
-	if agent.Model != nil {
-		return agent.Model.Name
-	}
-	return ""
 }
 
 // Handler returns the routed http.Handler.
@@ -665,12 +639,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// stream to notice it in. Notices are collected and appended to the answer
 	// below, since there is no incremental channel to write them to.
 	var notices []string
-	content, err := s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
+	content, err := s.Pico.RunTurn(turnCtx, turn.Request{
 		Endpoint:   tgt.Endpoint,
 		AuthToken:  tgt.AuthToken,
 		SessionID:  sessionKey,
 		SessionKey: key.UserAccID + ":" + key.Role,
-		Model:      turnModelFor(agent, model),
+		Model:      model,
 		Content:    userContent,
 	}, turn.Sink{
 		Attachment: func(a turn.Attachment) {
