@@ -133,6 +133,16 @@ Guards (parent S1/S2), all in the same place:
   makes, redirect hops included, so a permitted host that redirects inward is
   refused when the hop is dialled. Checking at dial rather than before it is also
   what closes the DNS-rebinding window;
+- the address check also refuses the forms that smuggle an IPv4 address inside an
+  IPv6 one — 6to4, Teredo, NAT64 — which `net.IP`'s own predicates do not unwrap,
+  plus CGNAT. `2002:7f00:0001::1` is 127.0.0.1 and `64:ff9b::a9fe:a9fe` is the
+  metadata address; both passed until CodeQL's SSRF alert sent us back to look.
+  Refused outright rather than unwrapped: no provider is reachable only through a
+  transition mechanism, so there is nothing to lose and no arithmetic to get
+  wrong;
+- both outbound requests (the completion and the model listing) build their URL
+  through the same validator. The listing used to be string concatenation, valid
+  only because its single caller happened to validate first;
 - 15s timeout, 8 KiB read cap, no body echoed;
 - one probe at a time per account, and a minimum interval between probes.
 

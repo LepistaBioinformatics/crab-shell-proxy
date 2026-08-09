@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -210,9 +211,50 @@ func probeURL(apiBase string) (string, error) {
 	return strings.TrimRight(u.String(), "/") + "/chat/completions", nil
 }
 
+// probeSiblingURL validates api_base exactly as probeURL does and appends a
+// different path. Two callers, one validation: the scheme and host rules cannot
+// hold for the completion request and quietly not for the model listing.
+func probeSiblingURL(apiBase, path string) (string, error) {
+	base, err := probeURL(apiBase)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(base, "/chat/completions") + path, nil
+}
+
+// blockedPrefixes are ranges net.IP's own predicates do not cover.
+//
+// The IPv6 entries are the reason this list exists: 6to4, Teredo and NAT64 all
+// EMBED an arbitrary IPv4 address, and IsLoopback/IsPrivate do not unwrap them —
+// so `2002:7f00:0001::1` (6to4 for 127.0.0.1) and `64:ff9b::a9fe:a9fe` (NAT64 for
+// the metadata address) both passed the guard. Whether a given host can route
+// them depends on its network, which is exactly the assumption a guard must not
+// make. They are refused outright rather than unwrapped: no LLM provider is
+// reachable only through a transition mechanism, so there is nothing to lose and
+// no unwrapping arithmetic to get subtly wrong.
+//
+// The IPv4 entries are ranges that are private in practice — carrier-grade NAT is
+// the host's own network on some deployments — but that IsPrivate (RFC 1918 only)
+// does not report.
+var blockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT (RFC 6598)
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("192.0.2.0/24"),  // documentation
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("2002::/16"),      // 6to4 — wraps any v4, ours included
+	netip.MustParsePrefix("2001::/32"),      // Teredo — same
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64
+	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64 (RFC 8215)
+	netip.MustParsePrefix("100::/64"),       // discard-only
+	netip.MustParsePrefix("2001:db8::/32"),  // documentation
+}
+
 // blockedAddr reports whether an address is one the proxy must never be talked
 // into reaching on a member's behalf: its own loopback, the docker network every
-// container and the gateway share, or the cloud metadata service.
+// container and the gateway share, the cloud metadata service, or anything that
+// smuggles one of those inside another address family.
 func blockedAddr(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -221,9 +263,24 @@ func blockedAddr(ip net.IP) bool {
 		// Link-local, which is also where 169.254.169.254 lives.
 		return true
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast()
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		// Unparseable is refused: a guard that cannot read an address cannot
+		// clear it.
+		return true
+	}
+	addr = addr.Unmap()
+	for _, p := range blockedPrefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 var errBlockedTarget = errors.New("api_base resolves to an address inside the deployment")
@@ -441,7 +498,15 @@ func probeErrClass(err error) string {
 // between two messages: if the list cannot be read, nothing is claimed and the
 // original "check the address" stands.
 func modelIsUnknown(ctx context.Context, d probeDraft) bool {
-	endpoint := strings.TrimRight(strings.TrimSpace(d.APIBase), "/") + "/models"
+	// Through the validator, not by concatenation. Today this only runs after
+	// runProbe has already validated the same api_base, so the check is
+	// redundant — and that is precisely the kind of redundancy that stops being
+	// redundant when someone calls this from somewhere else. The guard belongs at
+	// the place the URL is built.
+	endpoint, err := probeSiblingURL(d.APIBase, "/models")
+	if err != nil {
+		return false
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return false

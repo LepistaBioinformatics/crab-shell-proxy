@@ -52,6 +52,27 @@ func TestBlockedAddrCoversTheDeploymentsOwnNetwork(t *testing.T) {
 			t.Errorf("%s: allowed, want blocked", raw)
 		}
 	}
+	// The forms that smuggle a v4 address inside a v6 one. net.IP's own
+	// predicates do not unwrap these, so every one of them passed the guard until
+	// CodeQL's SSRF alert sent me back to check.
+	smuggled := []string{
+		"2002:7f00:0001::1",   // 6to4 wrapping 127.0.0.1
+		"2002:0a00:0001::1",   // 6to4 wrapping 10.0.0.1
+		"64:ff9b::7f00:1",     // NAT64 wrapping 127.0.0.1
+		"64:ff9b::a9fe:a9fe",  // NAT64 wrapping the metadata address
+		"2001:0:4136:e378::1", // Teredo
+	}
+	for _, raw := range smuggled {
+		if !blockedAddr(net.ParseIP(raw)) {
+			t.Errorf("%s: allowed — a v4 address inside a v6 one is still that address", raw)
+		}
+	}
+	// Carrier-grade NAT is the host's own network on some deployments, and
+	// IsPrivate reports only RFC 1918.
+	if !blockedAddr(net.ParseIP("100.64.0.1")) {
+		t.Error("100.64.0.1: allowed, want blocked (CGNAT)")
+	}
+
 	// A real provider address must still be reachable, or the guard has simply
 	// turned the feature off.
 	for _, raw := range []string{"1.1.1.1", "104.18.6.192", "2606:4700::1111"} {
@@ -119,6 +140,25 @@ func TestProbeFollowsARedirectTheContainerWouldFollow(t *testing.T) {
 	}
 	if err := checkProbeRedirect(hop("https://example.com/v1"), chain); !errors.Is(err, errTooManyRedirects) {
 		t.Errorf("long chain = %v, want it refused", err)
+	}
+}
+
+// The model listing is a second outbound request built from the same member
+// input, so it has to pass the same door. It did not: it was string
+// concatenation, valid only because its one caller happened to have validated
+// already.
+func TestTheModelListingURLGoesThroughTheSameValidator(t *testing.T) {
+	got, err := probeSiblingURL("https://api.openai.com/v1", "/models")
+	if err != nil {
+		t.Fatalf("probeSiblingURL: %v", err)
+	}
+	if got != "https://api.openai.com/v1/models" {
+		t.Errorf("probeSiblingURL = %q", got)
+	}
+	for _, bad := range []string{"http://api.example.com/v1", "", "ftp://x/v1"} {
+		if _, err := probeSiblingURL(bad, "/models"); err == nil {
+			t.Errorf("%q: accepted for the listing but refused for the completion", bad)
+		}
 	}
 }
 
