@@ -59,9 +59,9 @@ func (m *Manager) migrateModelRegistry() error {
 
 	// 1. config.yaml: declared models, and each agent's default.
 	//
-	// config.ModelConfig carries only a name for a picoclaw model: BaseURL is a
-	// hermes-only field and is EMPTY for every picoclaw one, and there is no field
-	// at all for the provider's own model id. Both lived in the TEMPLATE's
+	// config.ModelConfig carries only a name for a picoclaw model: BaseURL is EMPTY
+	// for every shipped agent, and there is no field at all for the provider's own
+	// model id. Both lived in the TEMPLATE's
 	// model_list, where model_name and model differ for most entries
 	// (claude-sonnet-4.6 -> claude-sonnet-4-6, nearai-glm -> zai-org/GLM-5.1-FP8).
 	// Importing {Model: mc.Name, APIBase: ""} alone would write a model id the
@@ -136,8 +136,7 @@ func (m *Manager) migrateModelRegistry() error {
 	//
 	// Enumerated directly from disk (allExistingWorkspaces), not via
 	// m.existingWorkspaces(agent.Key) looped over m.cfg.Agents: an agent removed
-	// from config.yaml, or a hermes agent config.Load dropped for missing secrets
-	// (DisabledAgents), would otherwise make every workspace under its role
+	// from config.yaml would otherwise make every workspace under its role
 	// invisible to this pass. This is the anti-orphaning step — it must see every
 	// workspace that exists, not only the ones the current config still declares.
 	captureFailures := 0

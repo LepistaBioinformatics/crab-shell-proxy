@@ -16,7 +16,6 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
-	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/hermes"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
@@ -34,9 +33,6 @@ func main() {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Fatalf("config: %v", err)
-	}
-	if len(cfg.DisabledAgents) > 0 {
-		logger.Printf("disabled agents (required secrets not set): %v", cfg.DisabledAgents)
 	}
 
 	socket := os.Getenv("DOCKER_SOCKET")
@@ -59,7 +55,6 @@ func main() {
 		Resolver: identity.NewSDKResolver(),
 		Mgr:      mgr,
 		Pico:     &pico.Client{TurnTimeout: cfg.TurnTimeout.Std()},
-		Hermes:   &hermes.Client{TurnTimeout: cfg.TurnTimeout.Std()},
 		Logf:     logger.Printf,
 		Reg:      reg,
 		// The knowledge-graph memory. Rooted at the CONTAINER data root because this

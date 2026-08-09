@@ -38,9 +38,10 @@ func scopeSelFromQuery(get func(string) string, routedAgent string) (registry.Sc
 // not governed by the model inventory.
 //
 // The gate lives HERE, in the proxy, because the proxy is the gate (NFR-6) — a
-// webapp-only filter leaves this open. hermes agents read their model from the
-// proxy's config.yaml (CTX-MR-13), so an assignment or agent-level default written
-// for one is a record nothing ever reads: it restarts the container for nothing and
+// webapp-only filter leaves this open. Picoclaw is currently the only harness, so
+// nothing reaches the 400 today; the check is kept because it is the thing that
+// makes that safe. A harness that read its model from somewhere else would take an
+// assignment nothing ever consults: the write restarts the container for nothing and
 // leaves a phantom workspace referrer that blocks delete and disable of that model
 // forever.
 func rejectNonPicoclawAgent(w http.ResponseWriter, agent config.Agent) bool {
@@ -58,9 +59,9 @@ func rejectNonPicoclawAgent(w http.ResponseWriter, agent config.Agent) bool {
 // tenant to express, and letting a tenant admin set them would hand them the whole
 // instance.
 //
-// mutating narrows the agent-level check to writes: reading a hermes agent's
-// (never-consulted) default is harmless and lets a UI render what is stored, while
-// writing one is the operation that does nothing and blocks a model forever.
+// mutating narrows the agent-level check to writes: reading a never-consulted
+// default is harmless and lets a UI render what is stored, while writing one is the
+// operation that does nothing and blocks a model forever.
 func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request, mutating bool) (registry.ScopeSel, bool) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {

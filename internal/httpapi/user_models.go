@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -42,14 +41,6 @@ type userModelRequest struct {
 	SubsAccID string          `json:"subs_acc_id"`
 }
 
-// userModelsSupported gates the feature on the harness, exactly as projects
-// does. A personal model IS a picoclaw model_list entry plus agents.defaults;
-// hermes takes a separate provisioning branch that never reads config.json, so a
-// selection there would be stored, reported as active, and change nothing.
-func userModelsSupported(agent config.Agent) bool {
-	return agent.Harness != config.HarnessHermes
-}
-
 // resolveUserModelCaller runs the preamble every route here shares. write selects
 // which permission the profile must carry: reading one's own list needs read,
 // registering or selecting is a write.
@@ -58,11 +49,6 @@ func (s *Server) resolveUserModelCaller(
 ) (docker.WorkspaceKey, bool) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
-		return docker.WorkspaceKey{}, false
-	}
-	if !userModelsSupported(agent) {
-		writeJSON(w, http.StatusNotImplemented, errBody(
-			"personal models are not available for this agent: they are built on picoclaw's model_list"))
 		return docker.WorkspaceKey{}, false
 	}
 	tenantID, subsAccID, ok := workspaceParams(w, r)
