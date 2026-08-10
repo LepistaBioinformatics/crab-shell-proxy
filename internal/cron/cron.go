@@ -8,6 +8,20 @@
 //
 // The record shape below was taken from sipeed/picoclaw:latest by creating jobs
 // and dumping the file, not from documentation.
+//
+// There is exactly ONE store per container, shared by the main agent and every
+// project agent — picoclaw builds one CronService per gateway and gives it the
+// default workspace (config.CronFile records the citations). A project's tasks are
+// told apart by JobProject, not by which file they came from.
+//
+// Their EXECUTION, unlike their storage, is already per-project and needs nothing
+// from this package: CronTool.ExecuteJob replays the job through
+// ProcessDirectWithChannel with the chat id the job recorded, which reaches
+// processMessage and is dispatched by resolveMessageRoute
+// (pkg/agent/agent_message.go:149) like any inbound message. So a project's job is
+// answered by the project's agent and its transcript is written under that agent's
+// workspace — which is why run listings stay per-segment while the job listing is
+// filtered out of one shared file.
 package cron
 
 import (
@@ -15,6 +29,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
 // storeVersion is the only layout this package claims to understand. Anything
@@ -102,4 +119,48 @@ func Load(path string) ([]Job, error) {
 		return nil, fmt.Errorf("unsupported cron store version %d, want %d", s.Version, storeVersion)
 	}
 	return s.Jobs, nil
+}
+
+// picoChatPrefix is what picoclaw's pico channel puts in front of a session id to
+// form the chat identifier a job records: chatID = "pico:" + sessionID
+// (pkg/channels/pico/pico.go:1195).
+const picoChatPrefix = "pico:"
+
+// projectPrefix is the leading marker identity.ProjectSessionID writes:
+// "p" + separator + projectID + separator + sessionKey.
+const projectPrefix = "p" + identity.ProjectSeparator
+
+// JobProject reports which project a job belongs to, or "" for one created in the
+// agent's own workspace.
+//
+// This is the ONLY thing separating one project's tasks from another's, because
+// the store holding them is shared by the whole container (see config.CronFile).
+// The answer is derivable because picoclaw records the conversation a job was
+// created in: CronTool.addJob reads the live turn's channel and chat id from the
+// tool context and passes them to AddJob (pkg/tools/cron.go:167-191), and the
+// proxy has already stamped the project into that session id.
+//
+// So a job scheduled in the main workspace carries "pico:<32-hex>", and one
+// scheduled inside project "seedtrial" carries "pico:p.seedtrial.<32-hex>".
+//
+// The separator matters and is taken from identity rather than written literally:
+// with "-" instead of ".", "p-my-proj-<hash>" would be read as project "my", so
+// one project's tasks would appear under another's. The parse takes the FIRST
+// separator after the marker and requires a third segment to follow, which is
+// what stops "pico:p.seedtrial" (no session key, so not a session id this proxy
+// ever produced) from being attributed to anything.
+func JobProject(j Job) string {
+	to, ok := strings.CutPrefix(j.Payload.To, picoChatPrefix)
+	if !ok {
+		return ""
+	}
+	rest, ok := strings.CutPrefix(to, projectPrefix)
+	if !ok {
+		return ""
+	}
+	id, sessionKey, ok := strings.Cut(rest, identity.ProjectSeparator)
+	if !ok || id == "" || sessionKey == "" {
+		return ""
+	}
+	return id
 }

@@ -184,3 +184,39 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 		t.Error("Load on truncated JSON = nil error, want a parse error")
 	}
 }
+
+// The only thing separating one project's scheduled tasks from another's, because
+// the store holding them is shared by the whole container. A helper that returns
+// "" for a real project id produces an empty panel, which looks exactly like the
+// bug this exists to fix — so every shape gets a case.
+func TestJobProject(t *testing.T) {
+	const hash = "3b45242eed5c6b8169e36767ac50543a"
+
+	cases := []struct {
+		name string
+		to   string
+		want string
+	}{
+		{"main workspace", "pico:" + hash, ""},
+		{"project", "pico:p.seedtrial." + hash, "seedtrial"},
+		// The reason the separator is "." and not "-": with "-", "p-my-proj-<hash>"
+		// splits at the first dash and attributes this job to a project called "my",
+		// quietly listing it under a sibling project's panel.
+		{"project id containing a dash", "pico:p.my-proj." + hash, "my-proj"},
+		{"marker with no id", "pico:p.." + hash, ""},
+		{"marker with no session key", "pico:p.seedtrial", ""},
+		{"trailing separator, empty session key", "pico:p.seedtrial.", ""},
+		{"another channel", "telegram:p.seedtrial." + hash, ""},
+		{"a chat id that merely starts with p", "pico:project-notes." + hash, ""},
+		{"no delivery target at all", "", ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := JobProject(Job{Payload: Payload{Channel: "pico", To: c.to}})
+			if got != c.want {
+				t.Errorf("JobProject(%q) = %q, want %q", c.to, got, c.want)
+			}
+		})
+	}
+}

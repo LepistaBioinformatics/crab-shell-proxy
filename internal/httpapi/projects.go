@@ -199,6 +199,12 @@ func writeProjectError(w http.ResponseWriter, s *Server, key docker.WorkspaceKey
 // workspace. Falling through would answer as the default agent and write the
 // conversation into the main workspace — a failure the user experiences as lost
 // history days later, not as an error now.
+//
+// QUERY ONLY, deliberately. handleMediaPost is multipart and carries the project
+// as a form field, so it uses checkProject instead; widening this helper to also
+// read the form would make every GET and DELETE on it parse a body they do not
+// have. The two are not interchangeable — reading the query on that one handler
+// is what sent project uploads into the main workspace.
 func (s *Server) workspaceSegmentFor(
 	w http.ResponseWriter, r *http.Request, key docker.WorkspaceKey,
 ) (segment, projectID string, ok bool) {

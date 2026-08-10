@@ -80,6 +80,11 @@ type fakeOrch struct {
 	// Names the harness delivered as attachments, so a test can assert the file
 	// actually reached the workspace.
 	attachmentWrites []string
+	// The project each upload resolved to, in order. "" is the agent's own
+	// workspace; a project id means the file landed in that project's uploads.
+	mediaProjects []string
+	// Same, for the memory-note writes.
+	memoryProjects []string
 	// Canned answer for the resolved persona read (content + which layer produced
 	// it), so a handler test can exercise the inherited-preload path.
 	personaDoc       string
@@ -248,8 +253,12 @@ func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
 	return f.restarts_().Stamp(key.TenantID, key.SubsAccID, key.Role, key.UserAccID, time.Now().UTC())
 }
 
-func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, _, rawName string, r io.Reader) (docker.StoredMedia, error) {
+// The project is RECORDED, not ignored: it is the whole difference between a file
+// the project's agent can open and one it cannot, and the upload is the only media
+// route that carries it in a form field rather than the query.
+func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, project, rawName string, r io.Reader) (docker.StoredMedia, error) {
 	n, _ := io.Copy(io.Discard, r)
+	f.mediaProjects = append(f.mediaProjects, project)
 	return docker.StoredMedia{Path: "uploads/test-" + rawName, Name: rawName, Size: n}, nil
 }
 
@@ -295,8 +304,12 @@ func (f *fakeOrch) ReadMemory(docker.WorkspaceKey, string) (string, error) {
 	return f.memory, nil
 }
 
-func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, _, content string) error {
+// The project is RECORDED for the same reason StoreMedia records it: a note saved
+// inside a project must not overwrite the main workspace's document, and the write
+// takes its project from the BODY, which no query-based test would catch.
+func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, project, content string) error {
 	f.memory = content
+	f.memoryProjects = append(f.memoryProjects, project)
 	return nil
 }
 
