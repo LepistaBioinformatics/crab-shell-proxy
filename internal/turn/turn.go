@@ -66,6 +66,14 @@ type Sink struct {
 	Content    func(string)
 	Progress   func(Progress)
 	Attachment func(Attachment)
+	// Error reports that the turn FAILED, as a signal rather than as prose.
+	//
+	// It exists because picoclaw reports most failures as an ordinary assistant
+	// message and never persists it, so a client that treats it as content shows it
+	// for a moment and then loses it to the next reconcile against the durable
+	// transcript. The text is still delivered through Content — this is additional,
+	// never a substitution (see the sse.go writer).
+	Error func(string)
 }
 
 // EmitContent calls the content callback when one is set.
@@ -79,6 +87,13 @@ func (s Sink) EmitContent(delta string) {
 func (s Sink) EmitProgress(p Progress) {
 	if s.Progress != nil {
 		s.Progress(p)
+	}
+}
+
+// EmitError calls the error callback when one is set.
+func (s Sink) EmitError(message string) {
+	if s.Error != nil {
+		s.Error(message)
 	}
 }
 

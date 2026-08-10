@@ -152,6 +152,20 @@ func progressFor(pl Payload) (kind, text, tool string) {
 	}
 }
 
+// processingErrorPrefix is what picoclaw puts in front of a turn it could not
+// complete — `fmt.Sprintf("Error processing message: %v", err)` in
+// pkg/agent/error_format.go, published through PublishResponseIfNeeded like any
+// other assistant message.
+//
+// A string match is unsatisfying and it is what upstream offers: the frame carries
+// no type, kind or severity that separates a failure from an answer. If picoclaw
+// ever grows a real marker, this is the one place that has to change.
+const processingErrorPrefix = "Error processing message:"
+
+func isProcessingError(content string) bool {
+	return strings.HasPrefix(content, processingErrorPrefix)
+}
+
 // signal tells the transport driver how to manage the finalize grace timer.
 type signal struct {
 	arm    bool   // (re)arm the finalize grace timer
@@ -199,6 +213,23 @@ func (p *processor) handle(f Frame) signal {
 		// Cumulative content: emit only the newly-appended suffix.
 		if len(pl.Content) > len(prev) {
 			p.sink.EmitContent(pl.Content[len(prev):])
+		}
+		// A FAILED turn arrives here, as an ordinary assistant message. picoclaw
+		// formats it in pkg/agent/error_format.go and publishes it through the same
+		// call an answer takes — no distinct frame type, no kind, no severity — so
+		// this prefix is the only discriminator on the wire.
+		//
+		// Reported as a signal AS WELL AS content, never instead of it: a generic
+		// OpenAI client reads delta.content and nothing else, and the non-streaming
+		// path derives its whole body from this same plain-content bookkeeping.
+		//
+		// Tested against the CUMULATIVE content, not the suffix just emitted: the
+		// prefix is only reliably at the start of the whole message, so a failure
+		// whose text arrives as an update after a partial would otherwise slip
+		// through. Comparing against `prev` is what keeps it to one report per
+		// message rather than one per update.
+		if isProcessingError(pl.Content) && !isProcessingError(prev) {
+			p.sink.EmitError(pl.Content)
 		}
 		return p.maybeArmGrace()
 	case "typing.start":
