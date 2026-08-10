@@ -278,3 +278,108 @@ func TestAttachmentFrameNeverErasesOrEndsTheAnswer(t *testing.T) {
 		})
 	}
 }
+
+// A FAILED turn arrives as an ordinary assistant message — picoclaw formats it in
+// pkg/agent/error_format.go and publishes it through the same call an answer takes,
+// with no frame type, kind or severity to separate the two. The prefix is the only
+// discriminator on the wire, and without acting on it the member cannot tell "it
+// answered nothing" from "it broke": the text is not persisted either, so whatever
+// showed it loses it to the next reconcile against the durable transcript.
+func TestProcessingErrorIsReportedAsWellAsStreamed(t *testing.T) {
+	const errText = `Error processing message: selected vision model "glm-4.7-flash" ` +
+		`does not support image input; update agents.defaults.image_model to a multimodal model`
+
+	cases := []struct {
+		name     string
+		frames   []Frame
+		wantErrs []string
+		wantText string
+	}{
+		{
+			// The reported shape: one frame, whole error.
+			name: "error in a single frame",
+			frames: []Frame{
+				{Type: "typing.start"},
+				msg("m1", errText, "", false),
+				{Type: "typing.stop"},
+			},
+			wantErrs: []string{errText},
+			wantText: errText,
+		},
+		{
+			// Content is CUMULATIVE and only the suffix is streamed, so a prefix test
+			// against the emitted delta would miss this entirely.
+			name: "error arriving as an update after a partial",
+			frames: []Frame{
+				msg("m1", "Error proc", "", false),
+				msg("m1", errText, "", false),
+			},
+			wantErrs: []string{errText},
+			wantText: errText,
+		},
+		{
+			// Once per message, not once per update: a banner that re-fires on every
+			// frame of a long error is noise.
+			name: "further updates of an errored message report once",
+			frames: []Frame{
+				msg("m1", errText, "", false),
+				msg("m1", errText+"\n\nOriginal error:\nboom", "", false),
+			},
+			wantErrs: []string{errText},
+			wantText: errText + "\n\nOriginal error:\nboom",
+		},
+		{
+			name: "an ordinary answer reports nothing",
+			frames: []Frame{
+				{Type: "typing.start"},
+				msg("m1", "Here is your answer.", "", false),
+				{Type: "typing.stop"},
+			},
+			wantErrs: nil,
+			wantText: "Here is your answer.",
+		},
+		{
+			// The word appearing mid-sentence is the agent talking about errors, not
+			// picoclaw reporting one.
+			name: "the prefix must be at the start",
+			frames: []Frame{
+				msg("m1", "I hit an Error processing message: check the log", "", false),
+			},
+			wantErrs: nil,
+			wantText: "I hit an Error processing message: check the log",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var errs []string
+			var streamed string
+			p := newProcessor(turn.Sink{
+				Content: func(d string) { streamed += d },
+				Error:   func(m string) { errs = append(errs, m) },
+			}, "", "")
+			for _, f := range c.frames {
+				p.handle(f)
+			}
+
+			if len(errs) != len(c.wantErrs) {
+				t.Fatalf("reported %d error(s) %q, want %d %q", len(errs), errs, len(c.wantErrs), c.wantErrs)
+			}
+			for i := range errs {
+				if errs[i] != c.wantErrs[i] {
+					t.Errorf("error[%d] = %q, want %q", i, errs[i], c.wantErrs[i])
+				}
+			}
+			// The text is ALSO delivered as content. Suppressing it would leave a
+			// generic OpenAI client with an empty answer and no error at all, and would
+			// empty the non-streaming path's body, which finalContent derives from the
+			// same plain-content bookkeeping.
+			if streamed != c.wantText {
+				t.Errorf("streamed = %q, want %q", streamed, c.wantText)
+			}
+			if final := p.finalContent(); final != c.wantText {
+				t.Errorf("finalContent = %q, want %q (the non-streaming body)", final, c.wantText)
+			}
+		})
+	}
+}

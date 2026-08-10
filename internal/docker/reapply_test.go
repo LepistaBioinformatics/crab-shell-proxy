@@ -202,6 +202,8 @@ func (noopDocker) Inspect(ctx context.Context, name string) (ContainerState, err
 	return ContainerState{}, nil
 }
 func (noopDocker) EnsureImage(ctx context.Context, image string) error { return nil }
+
+func (noopDocker) ImageID(ctx context.Context, image string) (string, error) { return "", nil }
 func (noopDocker) Create(ctx context.Context, spec CreateSpec) (string, error) {
 	return "", nil
 }

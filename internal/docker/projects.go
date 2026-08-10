@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -398,6 +399,35 @@ func projectBindDrift(mountDest string, list []projects.Project, actual []string
 // "recreate" on a transient read error would destroy a live conversation to fix
 // something that may not be broken. The real read, the one that matters, happens
 // in create().
+// imageDrift reports whether a container is running something other than what
+// PicoclawImage resolves to right now.
+//
+// Compares resolved IDS, not the tag. The tag is what create() was given and it
+// does not change when the image behind it is rebuilt — which is the case that
+// matters, because this stack builds its own harness image under a fixed tag
+// (deploy/picoclaw-glob). A name comparison would have reported "no drift" for the
+// exact upgrade this exists to catch.
+//
+// Answers FALSE rather than propagating whenever the desired id cannot be
+// established — the image is not present locally, or the daemon errors. Recreating
+// on "I don't know" would destroy a live conversation to install nothing: the
+// container is already running a working image, and create() calls EnsureImage,
+// which is where a genuinely missing image is pulled or fails loudly.
+func (m *Manager) imageDrift(ctx context.Context, st ContainerState) bool {
+	if st.Image == "" {
+		return false // an older daemon, or a fake in a test that does not model it
+	}
+	want, err := m.docker.ImageID(ctx, m.cfg.PicoclawImage)
+	if err != nil {
+		m.logf("image drift check skipped for %s: %v", m.cfg.PicoclawImage, err)
+		return false
+	}
+	if want == "" {
+		return false // not present locally yet; EnsureImage owns that case
+	}
+	return st.Image != want
+}
+
 func (m *Manager) projectBindDriftFor(key WorkspaceKey, actual []string) bool {
 	list, err := m.projectStore(key).List()
 	if err != nil {

@@ -41,6 +41,7 @@ type WorkspaceKey struct {
 type Docker interface {
 	Inspect(ctx context.Context, name string) (ContainerState, error)
 	EnsureImage(ctx context.Context, image string) error
+	ImageID(ctx context.Context, image string) (string, error)
 	Create(ctx context.Context, spec CreateSpec) (string, error)
 	Start(ctx context.Context, name string) error
 	Stop(ctx context.Context, name string, grace time.Duration) error
@@ -286,9 +287,16 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	// for its workspace, so its agent runs with no credentials at all. That
 	// presents as the model or the tools failing, never as a missing bind, so it
 	// has to be caught here rather than diagnosed later.
+	// The IMAGE drifts for a third reason, and it is the one that is invisible: a
+	// container reuses whatever image it was created from for as long as it exists,
+	// so rebuilding the harness image and redeploying the stack changes nothing —
+	// the agent containers are not compose's, they are this manager's, and they
+	// outlive a redeploy. That cost an afternoon on 2026-08-10, chasing a picoclaw
+	// patch that was in the image and not in the running binary.
 	case personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds) ||
-		m.projectBindDriftFor(key, st.Binds):
-		m.logf("container %s: persona or project mounts stale, recreating (identity and project changes cannot reach it otherwise)", name)
+		m.projectBindDriftFor(key, st.Binds) ||
+		m.imageDrift(ctx, st):
+		m.logf("container %s: persona/project mounts or harness image stale, recreating (identity, project and image changes cannot reach it otherwise)", name)
 		if st.Running {
 			if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
 				return Target{}, err

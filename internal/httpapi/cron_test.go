@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 )
 
 // cronServer is testServer over a temp data root, so these tests run the same
@@ -26,7 +27,7 @@ func cronServer(t *testing.T) (*Server, string) {
 // The scope goodHeaders resolves to: role "alpha" from the service-name header,
 // user from the profile's own accId.
 func cronPaths(root string) (cronFile, sessionsDir string) {
-	return config.CronFile(root, tenantT, subsX, "alpha", accAlice, config.MainWorkspace),
+	return config.CronFile(root, tenantT, subsX, "alpha", accAlice),
 		config.SessionsDir(root, tenantT, subsX, "alpha", accAlice, config.MainWorkspace)
 }
 
@@ -302,5 +303,88 @@ func TestCronRunRejectsUnknownRun(t *testing.T) {
 				t.Error("the response leaked content from outside the sessions dir")
 			}
 		})
+	}
+}
+
+// The store is ONE file for the whole container — picoclaw builds a single
+// CronService per gateway (see config.CronFile) — so a task scheduled inside a
+// project is written beside the main agent's tasks and can only be told apart by
+// the conversation it recorded. Without the filter, the global panel listed every
+// project's tasks as its own and each project's panel listed nothing, which is
+// exactly what was reported.
+func TestCronTasksScopedByProject(t *testing.T) {
+	s, root := cronServer(t)
+	cronFile, _ := cronPaths(root)
+	orch := s.Mgr.(*fakeOrch)
+	orch.projects = []projects.Project{{ID: "seedtrial"}, {ID: "my-proj"}}
+
+	const hash = "3b45242eed5c6b8169e36767ac50543a"
+	seedFile(t, cronFile, `{"version":1,"jobs":[
+		{"id":"job-global","name":"Global","enabled":true,
+		 "schedule":{"kind":"every","everyMs":300000},
+		 "payload":{"kind":"agent_turn","message":"a","channel":"pico","to":"pico:`+hash+`"},
+		 "state":{},"deleteAfterRun":false},
+		{"id":"job-seedtrial","name":"Seedtrial","enabled":true,
+		 "schedule":{"kind":"every","everyMs":300000},
+		 "payload":{"kind":"agent_turn","message":"b","channel":"pico","to":"pico:p.seedtrial.`+hash+`"},
+		 "state":{},"deleteAfterRun":false},
+		{"id":"job-myproj","name":"My proj","enabled":true,
+		 "schedule":{"kind":"every","everyMs":300000},
+		 "payload":{"kind":"agent_turn","message":"c","channel":"pico","to":"pico:p.my-proj.`+hash+`"},
+		 "state":{},"deleteAfterRun":false},
+		{"id":"job-deleted","name":"Deleted project","enabled":true,
+		 "schedule":{"kind":"every","everyMs":300000},
+		 "payload":{"kind":"agent_turn","message":"d","channel":"pico","to":"pico:p.gone.`+hash+`"},
+		 "state":{},"deleteAfterRun":false}]}`)
+
+	ids := func(t *testing.T, path string) []string {
+		t.Helper()
+		rec := do(t, s, path)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+		}
+		var got struct {
+			Tasks []struct{ ID string } `json:"tasks"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		out := make([]string, 0, len(got.Tasks))
+		for _, task := range got.Tasks {
+			out = append(out, task.ID)
+		}
+		return out
+	}
+
+	cases := []struct {
+		name string
+		path string
+		want []string
+	}{
+		// A job whose project is gone still FIRES — deleting a project removes its
+		// dispatch rule, not its schedule — so it surfaces here or nowhere, and a task
+		// the member cannot see is a task they cannot stop.
+		{"global", "/v1/cron/tasks?" + cronQuery, []string{"job-global", "job-deleted"}},
+		{"project", "/v1/cron/tasks?" + cronQuery + "&project=seedtrial", []string{"job-seedtrial"}},
+		{"project with a dash", "/v1/cron/tasks?" + cronQuery + "&project=my-proj", []string{"job-myproj"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ids(t, c.path)
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("tasks = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// An unknown project is refused before the store is read, like every other
+// project-scoped route: answering with the main workspace's tasks would present
+// another scope's schedule as this one's.
+func TestCronTasksUnknownProjectIs404(t *testing.T) {
+	s, _ := cronServer(t)
+	rec := do(t, s, "/v1/cron/tasks?"+cronQuery+"&project=nope")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }

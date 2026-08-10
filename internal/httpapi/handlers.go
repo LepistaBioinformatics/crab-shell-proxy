@@ -878,7 +878,21 @@ func (s *Server) handleSessionsResolve(w http.ResponseWriter, r *http.Request) {
 			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
 		return
 	}
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID, config.MainWorkspace)
+	// agent-projects: both halves of the answer are project-scoped, exactly as in
+	// handleSessionsHistory above. The prefixed key is what picoclaw was handed, and
+	// the file that holds it lives under the project's own workspace — resolving the
+	// main workspace returned the wrong sessionKey AND looked for it in a directory
+	// that never held it.
+	key := docker.WorkspaceKey{
+		TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
+		Role: agent.Key, UserAccID: ident.AccID,
+	}
+	segment, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	if !ok {
+		return
+	}
+	sessionKey = projectSessionID(projectID, sessionKey)
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID, segment)
 	sessionFile := history.FindSessionFile(sessionsDir, sessionKey)
 	writeJSON(w, http.StatusOK, map[string]any{"sessionKey": sessionKey, "sessionFile": sessionFile})
 }
@@ -1143,8 +1157,14 @@ func (s *Server) handleMediaPost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, project, ok := s.workspaceSegmentFor(w, r, key)
-	if !ok {
+	// agent-projects: the project arrives as a FORM FIELD here, like tenant_id and
+	// subs_acc_id above — this is the one multipart route on the media surface, so
+	// workspaceSegmentFor (query-only) cannot see it and silently answered "main
+	// workspace" for every project upload. The file then landed where the project's
+	// agent could not open it, and the turn's `[anexo: uploads/...]` reference
+	// pointed at nothing.
+	project := r.FormValue("project")
+	if !s.checkProject(w, key, project) {
 		return
 	}
 
@@ -1327,6 +1347,12 @@ func (s *Server) handleMemoryPut(w http.ResponseWriter, r *http.Request) {
 		TenantID  string `json:"tenant_id"`
 		SubsAccID string `json:"subs_acc_id"`
 		Content   string `json:"content"`
+		// agent-projects: empty means the agent's own workspace. In the BODY, like
+		// every other field of this request — the GET beside it takes the project as a
+		// query parameter because it has no body to put it in, and reading the query
+		// HERE meant a note edited inside a project silently overwrote the main
+		// workspace's document instead.
+		Project string `json:"project,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, memoryMaxBytes+(1<<10))).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body (or content exceeds the size limit)"))
@@ -1351,11 +1377,10 @@ func (s *Server) handleMemoryPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, project, ok := s.workspaceSegmentFor(w, r, key)
-	if !ok {
+	if !s.checkProject(w, key, req.Project) {
 		return
 	}
-	if err := s.Mgr.WriteMemory(key, project, req.Content); err != nil {
+	if err := s.Mgr.WriteMemory(key, req.Project, req.Content); err != nil {
 		s.logf("memory: write failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return

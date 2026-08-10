@@ -17,6 +17,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/cron"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 )
 
 // cronTask is a job from the store plus the runs discovered for it. The embedded
@@ -40,26 +41,71 @@ type cronTasksResponse struct {
 	Orphans []cronOrphanGroup `json:"orphans"`
 }
 
+// scopedJobs picks the jobs belonging to the requested scope out of the one store
+// the whole container shares (see config.CronFile for why there is only one).
+//
+// Inside a project: that project's jobs, nothing else. Outside: the jobs created
+// in the agent's own workspace, PLUS any job attributed to a project that is no
+// longer in the store. That last clause is not tidiness — deleting a project drops
+// its dispatch rule but not its scheduled jobs, so they keep firing, now answered
+// by the default agent. A job the member cannot see is a job they cannot stop, and
+// there is no project panel left to show it in.
+func scopedJobs(all []cron.Job, projectID string, known []projects.Project) []cron.Job {
+	live := make(map[string]bool, len(known))
+	for _, p := range known {
+		live[p.ID] = true
+	}
+	out := make([]cron.Job, 0, len(all))
+	for _, j := range all {
+		owner := cron.JobProject(j)
+		if projectID != "" {
+			if owner == projectID {
+				out = append(out, j)
+			}
+			continue
+		}
+		if owner == "" || !live[owner] {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 // handleCronTasks lists the caller's own scheduled tasks with their executions.
 func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 	key, ok := s.restartCallerKey(w, r, false)
 	if !ok {
 		return
 	}
-	// agent-projects: scheduled jobs live in the workspace of the agent that owns
-	// them, so a project has its own cron store.
-	segment, _, ok := s.workspaceSegmentFor(w, r, key)
+	// agent-projects: the RUNS are per-workspace (each agent writes its transcripts
+	// beside itself), but the JOB STORE is one file for the whole container — so the
+	// segment selects the transcripts and the project id filters the jobs.
+	segment, projectID, ok := s.workspaceSegmentFor(w, r, key)
 	if !ok {
 		return
 	}
 
-	jobs, err := cron.Load(config.CronFile(s.Cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment))
+	all, err := cron.Load(config.CronFile(s.Cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID))
 	if err != nil {
 		s.logf("cron: read store failed key=%+v: %v", key, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
+	// The project list is needed ONLY by the global scope, to recognise a job whose
+	// project is gone. Inside a project, workspaceSegmentFor has already established
+	// that the id exists, and reading the store a second time would let a transient
+	// failure there fail a request that does not depend on it.
+	var known []projects.Project
+	if projectID == "" {
+		known, err = s.Mgr.ListProjects(key)
+		if err != nil {
+			s.logf("cron: read projects failed key=%+v: %v", key, err)
+			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+			return
+		}
+	}
+	jobs := scopedJobs(all, projectID, known)
 	runs, err := history.CronRuns(config.SessionsDir(s.Cfg.ContainerDataRoot,
 		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment))
 	if err != nil {
@@ -111,8 +157,10 @@ func (s *Server) handleCronRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// agent-projects: scheduled jobs live in the workspace of the agent that owns
-	// them, so a project has its own cron store.
+	// agent-projects: a RUN transcript does live in the workspace of the agent that
+	// produced it — cron turns are dispatched on the chat id the job recorded, so a
+	// project's job is answered by the project's agent and writes beside it. Only the
+	// job STORE is shared (see config.CronFile).
 	segment, _, ok := s.workspaceSegmentFor(w, r, key)
 	if !ok {
 		return

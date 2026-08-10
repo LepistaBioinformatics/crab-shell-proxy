@@ -75,6 +75,28 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
+	// A failed turn, on the same extension shape as progress and for the same
+	// compatibility reason: empty delta, extra top-level field.
+	//
+	// It is what the member's interface needs to distinguish "answered nothing" from
+	// "broke". Without it, both paths are silent — picoclaw's error text is not
+	// persisted, so any client that treats it as content loses it to the next
+	// reconcile against the durable transcript, and a RunTurn error was only logged.
+	writeError := func(message string) {
+		payload := map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": nil}},
+			"x_crab_error": map[string]any{
+				"message": message,
+			},
+		}
+		b, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
 	done := func() {
 		writeChunk(map[string]any{}, "stop")
 		fmt.Fprint(w, "data: [DONE]\n\n")
@@ -123,6 +145,12 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 			}
 			writeProgress(p)
 		},
+		Error: func(message string) {
+			if clientCtx.Err() != nil {
+				return
+			}
+			writeError(message)
+		},
 		// A file the agent delivered out-of-band. picoclaw hands over a URL on its
 		// own media route plus the bearer for it; the bytes are copied into the
 		// user's uploads dir so they outlive the harness's media store and show up
@@ -147,6 +175,13 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	s.Mgr.ArmIdle(agent, key)
 	if err != nil {
 		s.logf("stream: turn failed: %v", err)
+		// picoclaw's own `error` FRAME lands here (internal/pico/turn.go), as does a
+		// transport failure. This used to be logged and nothing else: the client got a
+		// well-formed finish_reason "stop" with no content and no reason, so a broken
+		// turn was indistinguishable from one that answered nothing.
+		if clientCtx.Err() == nil {
+			writeError(err.Error())
+		}
 	}
 	// Fold the just-written turn into the durable transcript now — while the live
 	// file still holds it — so a later restart that rewrites the live file can't

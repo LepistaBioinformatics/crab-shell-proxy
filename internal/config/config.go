@@ -518,12 +518,28 @@ func SessionsDir(root, tenantID, subsAccID, role, userAccID, segment string) str
 }
 
 // CronFile is the path to a user's picoclaw scheduled-job store (used by
-// /v1/cron/tasks), under UserWorkspace/<segment>/cron/jobs.json. picoclaw owns
-// the file; the proxy only reads it. It is absent until the agent creates its
-// first task, which is a normal state, not an error.
-func CronFile(root, tenantID, subsAccID, role, userAccID, segment string) string {
+// /v1/cron/tasks), under UserWorkspace/MainWorkspace/cron/jobs.json. picoclaw
+// owns the file; the proxy only reads it. It is absent until the agent creates
+// its first task, which is a normal state, not an error.
+//
+// IT TAKES NO WORKSPACE SEGMENT, unlike SessionsDir and UploadsDir beside it, and
+// that is a fact about picoclaw rather than a simplification. picoclaw builds ONE
+// CronService per gateway and hands it cfg.WorkspacePath() — the default
+// workspace — at pkg/gateway/gateway.go:416 and :664, which composes
+// <workspace>/cron/jobs.json at :843. There is no per-agent store and no
+// per-agent override, so every agent in the container, projects included, writes
+// its jobs into this one file.
+//
+// A project's jobs are therefore separated by ATTRIBUTION, not by path: each job
+// records the conversation that created it in Payload.To, which on the pico
+// channel is "pico:" + the session id the proxy stamped (see cron.JobProject).
+// An earlier version of this function took a segment and composed
+// workspace-<id>/cron/jobs.json — a path picoclaw never writes — so a project's
+// panel read an absent file and showed nothing while the global panel showed the
+// project's tasks as its own.
+func CronFile(root, tenantID, subsAccID, role, userAccID string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
-		segment, "cron", "jobs.json")
+		MainWorkspace, "cron", "jobs.json")
 }
 
 // UploadsDir is where user-uploaded media lands, inside the agent-readable
