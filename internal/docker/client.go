@@ -25,6 +25,10 @@ type ContainerState struct {
 	// time — a stop/start never changes it — so this is the only way to tell that
 	// a running container predates a mount it should have (see personaBindDrift).
 	Binds []string
+	// The RESOLVED image id the container is running, not the tag it was created
+	// from. The id is what makes a harness upgrade detectable: a rebuild under the
+	// same tag leaves the tag identical and changes only this (see imageDrift).
+	Image string
 }
 
 // ContainerSummary is one entry from the list endpoint.
@@ -113,6 +117,7 @@ func (c *HTTPClient) Inspect(ctx context.Context, name string) (ContainerState, 
 	}
 	var out struct {
 		ID    string `json:"Id"`
+		Image string `json:"Image"`
 		State struct {
 			Running bool `json:"Running"`
 		} `json:"State"`
@@ -125,9 +130,41 @@ func (c *HTTPClient) Inspect(ctx context.Context, name string) (ContainerState, 
 		return ContainerState{}, err
 	}
 	resp.Body.Close()
+	// "Image" at the TOP level is the resolved id; Config.Image is the tag the
+	// container was created from. The id is deliberately the one carried: a rebuild
+	// under an unchanged tag is exactly the upgrade that has to be noticed.
 	return ContainerState{
-		Exists: true, Running: out.State.Running, ID: out.ID, Binds: out.HostConfig.Binds,
+		Exists: true, Running: out.State.Running, ID: out.ID,
+		Binds: out.HostConfig.Binds, Image: out.Image,
 	}, nil
+}
+
+// ImageID resolves an image reference to its local id, or "" when the image is not
+// present locally. Deliberately does NOT pull: it answers "what would a container
+// created right now run", and a reference absent locally has no answer yet.
+func (c *HTTPClient) ImageID(ctx context.Context, image string) (string, error) {
+	// Not PathEscape'd, for the reason EnsureImage records: Docker's
+	// /images/{name:.*}/json route matches slashes literally.
+	resp, err := c.do(ctx, http.MethodGet, "/images/"+image+"/json", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		drain(resp)
+		return "", nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("inspect image %s: %s: %s", image, resp.Status, drain(resp))
+	}
+	var out struct {
+		ID string `json:"Id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		resp.Body.Close()
+		return "", err
+	}
+	resp.Body.Close()
+	return out.ID, nil
 }
 
 // Create creates (but does not start) a container.

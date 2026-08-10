@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,17 +31,37 @@ type fakeDocker struct {
 	// in for a container created by an older image.
 	binds   map[string][]string
 	removeN int32
+	// The resolved image id each container is running, and what PicoclawImage
+	// currently resolves to. Modelled because a rebuild under an unchanged tag is
+	// invisible in every other field the daemon reports.
+	images       map[string]string
+	wantImageID  string
+	imageIDErr   error
+	imageIDCalls int32
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{running: map[string]bool{}, exists: map[string]bool{}, binds: map[string][]string{}}
+	return &fakeDocker{
+		running: map[string]bool{}, exists: map[string]bool{},
+		binds: map[string][]string{}, images: map[string]string{},
+	}
+}
+
+// ImageID answers what a container created right now would run. "" means the image
+// is not present locally, which imageDrift must NOT read as drift.
+func (f *fakeDocker) ImageID(context.Context, string) (string, error) {
+	atomic.AddInt32(&f.imageIDCalls, 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.wantImageID, f.imageIDErr
 }
 
 func (f *fakeDocker) Inspect(_ context.Context, name string) (ContainerState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return ContainerState{
-		Exists: f.exists[name], Running: f.running[name], ID: name, Binds: f.binds[name],
+		Exists: f.exists[name], Running: f.running[name], ID: name,
+		Binds: f.binds[name], Image: f.images[name],
 	}, nil
 }
 
@@ -464,5 +485,129 @@ func TestEnsureRunningRecreatesOnPersonaDrift(t *testing.T) {
 	if f.removeN != 1 || f.createN != 1 {
 		t.Errorf("removes=%d creates=%d after a second call: the check must converge, "+
 			"or every turn recreates the container", f.removeN, f.createN)
+	}
+}
+
+// imageDrift is what makes a harness upgrade land. The agent containers are this
+// manager's, not compose's: they outlive a stack redeploy and reuse whatever image
+// they were created from, so rebuilding the image and redeploying changes nothing
+// until something notices. On 2026-08-10 that cost an afternoon — a picoclaw patch
+// was in the image and not in the running binary, and the bug it fixed reproduced
+// identically after the deploy.
+//
+// The comparison is on resolved IDS for a reason this table pins: the tag does not
+// change when the image behind it is rebuilt, and a fixed tag is exactly how this
+// stack ships its own harness (deploy/picoclaw-glob).
+func TestImageDrift(t *testing.T) {
+	cases := []struct {
+		name      string
+		container string // resolved id the container runs
+		want      string // resolved id PicoclawImage points at now
+		wantErr   error
+		drift     bool
+		calls     int32
+	}{
+		{
+			name:      "same image",
+			container: "sha256:aaa",
+			want:      "sha256:aaa",
+			drift:     false,
+			calls:     1,
+		},
+		{
+			// The reported case: same tag, rebuilt content.
+			name:      "rebuilt under the same tag",
+			container: "sha256:old",
+			want:      "sha256:new",
+			drift:     true,
+			calls:     1,
+		},
+		{
+			// An older daemon, or a fake that does not model it. Not knowing what the
+			// container runs is not evidence that it is wrong.
+			name:      "container image unknown",
+			container: "",
+			want:      "sha256:new",
+			drift:     false,
+			calls:     0, // asked nothing: there is nothing to compare against
+		},
+		{
+			// Not present locally. create() calls EnsureImage, which is where a pull
+			// belongs; recreating here would destroy a live conversation to install
+			// nothing.
+			name:      "desired image absent locally",
+			container: "sha256:old",
+			want:      "",
+			drift:     false,
+			calls:     1,
+		},
+		{
+			name:      "daemon error",
+			container: "sha256:old",
+			want:      "",
+			wantErr:   errors.New("daemon unreachable"),
+			drift:     false,
+			calls:     1,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeDocker()
+			f.wantImageID = c.want
+			f.imageIDErr = c.wantErr
+			m, _ := testManager(t, config.ModeScaleToZero, f)
+
+			got := m.imageDrift(context.Background(), ContainerState{
+				Exists: true, Running: true, Image: c.container,
+			})
+			if got != c.drift {
+				t.Errorf("imageDrift = %v, want %v", got, c.drift)
+			}
+			if n := atomic.LoadInt32(&f.imageIDCalls); n != c.calls {
+				t.Errorf("ImageID calls = %d, want %d", n, c.calls)
+			}
+		})
+	}
+}
+
+// The wiring, not the predicate: a drift check that EnsureRunning never consults is
+// the failure mode this whole feature exists to remove. Chown-dependent like the
+// rest of the TestEnsureRunning* family (STATE.md L-001) — it passes as root.
+//
+// Also pins convergence: once rebuilt, a second request must NOT recreate again. A
+// check that never settles would recreate on every turn, which is worse than the
+// bug it fixes.
+func TestEnsureRunningRecreatesOnImageDrift(t *testing.T) {
+	f := newFakeDocker()
+	m, agent := testManager(t, config.ModeContinuous, f)
+	key := wk("h")
+	name := m.ContainerName(key)
+
+	// Running, healthy, correct mounts — and an image nobody builds any more.
+	f.exists[name] = true
+	f.running[name] = true
+	f.images[name] = "sha256:old"
+	f.wantImageID = "sha256:new"
+	for _, b := range personaBinds(m.cfg, key, m.picoclawMountDest()) {
+		f.binds[name] = append(f.binds[name], "/host:"+m.picoclawMountDest()+"/workspace/"+b.name)
+	}
+
+	if _, err := m.EnsureRunning(context.Background(), agent, key, "test@x"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if f.removeN != 1 || f.createN != 1 {
+		t.Fatalf("removes=%d creates=%d, want 1/1: a stale image must be rebuilt, not restarted",
+			f.removeN, f.createN)
+	}
+
+	// The recreate installed the new image; the next request must leave it alone.
+	f.images[name] = "sha256:new"
+	if _, err := m.EnsureRunning(context.Background(), agent, key, "test@x"); err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if f.removeN != 1 || f.createN != 1 {
+		t.Errorf("removes=%d creates=%d after convergence, want 1/1 (no recreate loop)",
+			f.removeN, f.createN)
 	}
 }
