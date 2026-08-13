@@ -377,9 +377,13 @@ func dirNames(dir string) ([]string, error) {
 
 // ListUserFiles returns the metadata (never bytes) of a user's private uploaded
 // files for the addressed agent's workspace (FR-6/FR-7). "Private files" are
-// the user's uploads dir — the content the user themselves uploaded.
+// the user's public dir — the content the user themselves uploaded.
 func (m *Manager) ListUserFiles(key WorkspaceKey, project string) ([]FileMeta, error) {
-	return listFileMeta(config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
+	dir, err := m.publicRoot(key, project)
+	if err != nil {
+		return nil, err
+	}
+	return listFileMeta(dir)
 }
 
 // DeleteUserFile removes one of a user's private uploaded files by its stored

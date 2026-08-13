@@ -1307,13 +1307,22 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
 
-// mediaRelPath turns the client-supplied "uploads/<...>" reference into the path
-// relative to the uploads dir. It must NOT collapse to the base name: the agent
-// organizes files into folders, and doing so made "uploads/reports/q1.pdf"
-// resolve to a non-existent "uploads/q1.pdf". Traversal is rejected downstream
+// mediaRelPath turns the client-supplied "public/<...>" reference into the path
+// relative to the public dir. It must NOT collapse to the base name: the agent
+// organizes files into folders, and doing so made "public/reports/q1.pdf"
+// resolve to a non-existent "public/q1.pdf". Traversal is rejected downstream
 // by safeStoredPath + resolveWithin, which is where the boundary belongs.
+//
+// BOTH prefixes are accepted, and the legacy one is not deprecation politeness —
+// it is what keeps history working. The prefix is a LABEL, not part of the path:
+// every `[anexo: uploads/...]` marker ever written sits in a picoclaw transcript
+// this proxy does not rewrite, and the webapp renders download chips straight from
+// those markers. Dropping `uploads/` would 404 every file in every past
+// conversation.
 func mediaRelPath(p string) string {
-	return strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(p)), "uploads/")
+	rel := filepath.ToSlash(strings.TrimSpace(p))
+	rel = strings.TrimPrefix(rel, config.PublicDirName+"/")
+	return strings.TrimPrefix(rel, config.LegacyPublicDirName+"/")
 }
 
 // serveMediaFile streams one uploaded file back as a download attachment.

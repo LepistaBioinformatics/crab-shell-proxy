@@ -103,7 +103,7 @@ func (m *Manager) projectStore(key WorkspaceKey) *projects.Store {
 // projectWorkspaceDirs are created empty on the host at seed time. picoclaw
 // would create the workspace root itself, but as root-owned and bare — these
 // have to exist, and be owned by the agent uid, before it writes anything.
-var projectWorkspaceDirs = []string{"sessions", MemoryDirName, "uploads"}
+var projectWorkspaceDirs = []string{"sessions", MemoryDirName, config.PublicDirName}
 
 // projectPersonaRefreshed are re-copied into every project workspace on every
 // ensure, so an admin persona change reaches project agents the same way it

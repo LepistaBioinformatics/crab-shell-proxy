@@ -546,7 +546,7 @@ func SessionsDir(root, tenantID, subsAccID, role, userAccID, segment string) str
 // owns the file; the proxy only reads it. It is absent until the agent creates
 // its first task, which is a normal state, not an error.
 //
-// IT TAKES NO WORKSPACE SEGMENT, unlike SessionsDir and UploadsDir beside it, and
+// IT TAKES NO WORKSPACE SEGMENT, unlike SessionsDir and PublicDir beside it, and
 // that is a fact about picoclaw rather than a simplification. picoclaw builds ONE
 // CronService per gateway and hands it cfg.WorkspacePath() — the default
 // workspace — at pkg/gateway/gateway.go:416 and :664, which composes
@@ -566,12 +566,30 @@ func CronFile(root, tenantID, subsAccID, role, userAccID string) string {
 		MainWorkspace, "cron", "jobs.json")
 }
 
-// UploadsDir is where user-uploaded media lands, inside the agent-readable
-// workspace (UserWorkspace/<segment>/uploads) so a vision model / reader skill
-// can open it by the returned "uploads/<file>" path.
-func UploadsDir(root, tenantID, subsAccID, role, userAccID, segment string) string {
+// PublicDirName is the member-facing directory inside a workspace: the only one
+// their interface lists, and therefore the only place a produced file can be
+// delivered from. The managed FILE_DELIVERY.md memory tells the agent the same
+// thing, and `public/attachments/` is where it is told to write.
+const PublicDirName = "public"
+
+// LegacyPublicDirName is what PublicDirName used to be called. Kept solely so the
+// one-time migration can find a workspace that predates the rename; nothing else
+// should reference it.
+const LegacyPublicDirName = "uploads"
+
+// PublicDir is where member-visible media lands, inside the agent-readable
+// workspace (UserWorkspace/<segment>/public) so a vision model / reader skill can
+// open it by the returned "public/<file>" path.
+func PublicDir(root, tenantID, subsAccID, role, userAccID, segment string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
-		segment, "uploads")
+		segment, PublicDirName)
+}
+
+// LegacyPublicDir is the pre-rename location of PublicDir. Only MigratePublicDir
+// should call it.
+func LegacyPublicDir(root, tenantID, subsAccID, role, userAccID, segment string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		segment, LegacyPublicDirName)
 }
 
 // TenantModelOverrideFile is the tenant-scope model override selection file

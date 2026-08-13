@@ -54,12 +54,12 @@ func TestTheRoutingNoteIsMountedOnlyWhenTheMemoryGraphIsOn(t *testing.T) {
 			t.Errorf("the routing note was mounted with the memory graph switched off: %q", b)
 		}
 	}
-	if len(off) != 2 {
-		t.Errorf("binds with the graph off = %d, want 2 (skill + context recovery)", len(off))
+	if len(off) != 3 {
+		t.Errorf("binds with the graph off = %d, want 3 (skill + context recovery + file delivery)", len(off))
 	}
 
-	if on := managedContentBinds("/host/managed", "/data/.picoclaw", true); len(on) != 3 {
-		t.Errorf("binds with the graph on = %d, want 3", len(on))
+	if on := managedContentBinds("/host/managed", "/data/.picoclaw", true); len(on) != 4 {
+		t.Errorf("binds with the graph on = %d, want 4 (the delivery rule is unconditional)", len(on))
 	}
 }
 

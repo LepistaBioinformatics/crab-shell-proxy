@@ -98,14 +98,17 @@ func safeStoredPath(name string) (string, error) {
 // uploads dir, keyed by the sanitized filename so re-uploading the same name
 // OVERWRITES (one file per name — no accumulating duplicates), chowned to the
 // picoclaw user. The size cap + type allowlist are enforced by the caller
-// before this is reached. Returns the "uploads/<name>" path the turn references.
+// before this is reached. Returns the "public/<name>" path the turn references.
 func (m *Manager) StoreMedia(key WorkspaceKey, project, rawName string, r io.Reader) (StoredMedia, error) {
 	name, err := sanitizeFilename(rawName)
 	if err != nil {
 		return StoredMedia{}, err
 	}
-	tree, err := openTree(config.UploadsDir(m.cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return StoredMedia{}, err
+	}
+	tree, err := openTree(root)
 	if err != nil {
 		return StoredMedia{}, err
 	}
@@ -133,11 +136,11 @@ func (m *Manager) StoreMedia(key WorkspaceKey, project, rawName string, r io.Rea
 	}
 
 	if err := chownTree(tree.path, m.cfg.PicoclawUser); err != nil {
-		return StoredMedia{}, fmt.Errorf("chown uploads: %w", err)
+		return StoredMedia{}, fmt.Errorf("chown public dir: %w", err)
 	}
 
 	return StoredMedia{
-		Path: filepath.ToSlash(filepath.Join("uploads", name)),
+		Path: filepath.ToSlash(filepath.Join(config.PublicDirName, name)),
 		Name: name,
 		Size: n,
 	}, nil
@@ -150,8 +153,11 @@ func (m *Manager) DeleteMedia(key WorkspaceKey, project, storedName string) erro
 	if err != nil {
 		return err
 	}
-	tree, err := openTreeIfExists(config.UploadsDir(m.cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return err
+	}
+	tree, err := openTreeIfExists(root)
 	if err != nil {
 		if errors.Is(err, ErrMediaNotFound) {
 			return nil // nothing uploaded yet — delete is idempotent
@@ -179,8 +185,11 @@ func (m *Manager) OpenMedia(key WorkspaceKey, project, storedName string) (io.Re
 	if err != nil {
 		return nil, "", err
 	}
-	tree, err := openTreeIfExists(config.UploadsDir(m.cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project)))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return nil, "", err
+	}
+	tree, err := openTreeIfExists(root)
 	if err != nil {
 		return nil, "", err
 	}
@@ -228,9 +237,12 @@ const maxListedMedia = 2000
 // works until a folder is empty. A member who created one saw nothing: no row, and
 // therefore no drop target to put a file into, which made creating a folder pointless.
 func (m *Manager) ListMedia(key WorkspaceKey, project string) ([]StoredMedia, error) {
-	dir := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
+	dir, err := m.publicRoot(key, project)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]StoredMedia, 0, 32)
-	err := filepath.WalkDir(dir, func(full string, e fs.DirEntry, err error) error {
+	err = filepath.WalkDir(dir, func(full string, e fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable subtree must not blank the whole listing.
 			if full == dir {
@@ -258,7 +270,7 @@ func (m *Manager) ListMedia(key WorkspaceKey, project string) ([]StoredMedia, er
 			}
 			slashRel := filepath.ToSlash(rel)
 			out = append(out, StoredMedia{
-				Path: path.Join("uploads", slashRel),
+				Path: path.Join(config.PublicDirName, slashRel),
 				// No uid-prefix stripping: that prefix is something StoreMedia adds to
 				// FILE base names, and a folder legitimately named like one would be
 				// renamed on screen.
@@ -273,7 +285,7 @@ func (m *Manager) ListMedia(key WorkspaceKey, project string) ([]StoredMedia, er
 		}
 		slashRel := filepath.ToSlash(rel)
 		out = append(out, StoredMedia{
-			Path: path.Join("uploads", slashRel),
+			Path: path.Join(config.PublicDirName, slashRel),
 			// The uid prefix is only ever added to the BASE name by StoreMedia,
 			// so strip it there and keep any folder prefix -- it is what tells
 			// two same-named files in different folders apart.
@@ -296,7 +308,7 @@ func (m *Manager) ListMedia(key WorkspaceKey, project string) ([]StoredMedia, er
 const AttachmentsSubdir = "attachments"
 
 // StoreAgentAttachment saves a file the harness delivered out-of-band into
-// uploads/attachments/<name>, which is how it reaches the user at all: the media
+// public/attachments/<name>, which is how it reaches the user at all: the media
 // list already walks nested folders and the download route already reads nested
 // paths, so the file shows up in the uploads sidebar with click-to-download and no
 // frontend work — the same way a file the user uploaded does.
@@ -311,7 +323,10 @@ func (m *Manager) StoreAgentAttachment(key WorkspaceKey, project, rawName string
 	if err != nil {
 		return StoredMedia{}, err
 	}
-	root := config.UploadsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return StoredMedia{}, err
+	}
 	dir := filepath.Join(root, AttachmentsSubdir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return StoredMedia{}, fmt.Errorf("mkdir attachments: %w", err)
@@ -335,12 +350,118 @@ func (m *Manager) StoreAgentAttachment(key WorkspaceKey, project, rawName string
 		return StoredMedia{}, closeErr
 	}
 	if err := chownTree(root, m.cfg.PicoclawUser); err != nil {
-		return StoredMedia{}, fmt.Errorf("chown uploads: %w", err)
+		return StoredMedia{}, fmt.Errorf("chown public dir: %w", err)
 	}
 
 	return StoredMedia{
-		Path: path.Join("uploads", AttachmentsSubdir, name),
+		Path: path.Join(config.PublicDirName, AttachmentsSubdir, name),
 		Name: path.Join(AttachmentsSubdir, name),
 		Size: n,
 	}, nil
+}
+
+// publicRoot returns the member's public dir, migrating a pre-rename `uploads/`
+// into place first.
+//
+// Every reader of the directory goes through here rather than calling
+// config.PublicDir directly, and that is the whole design: existing workspaces are
+// never re-provisioned, so a migration hung off seeding would only ever fix
+// accounts created after it shipped. Hooking the accessor means the first access
+// of any kind — a listing, an upload, an attachment delivery — moves the data.
+//
+// Idempotent, and the three states are handled differently on purpose:
+//
+//   - only `uploads`: renamed wholesale. One syscall, no copying.
+//   - only `public`, or neither: nothing happens. The normal case forever after.
+//   - BOTH: merged file by file, and on a same-path collision the NEWER file wins.
+//     Two directories mean an earlier partial state or a folder made by hand. mtime
+//     is the only evidence available about which copy the member meant to keep --
+//     nothing records which directory a file was "supposed" to live in.
+//
+// A failure is returned, never swallowed. Continuing would leave the member looking
+// at a directory that is missing files they can see are gone.
+func (m *Manager) publicRoot(key WorkspaceKey, project string) (string, error) {
+	segment := workspaceSegment(project)
+	dir := config.PublicDir(m.cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment)
+	legacy := config.LegacyPublicDir(m.cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment)
+
+	legacyInfo, err := os.Stat(legacy)
+	if err != nil || !legacyInfo.IsDir() {
+		// Nothing to migrate; the caller creates `dir` on demand as before.
+		return dir, nil
+	}
+
+	if _, err := os.Stat(dir); err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat public dir: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+			return "", fmt.Errorf("prepare public parent: %w", err)
+		}
+		if err := os.Rename(legacy, dir); err != nil {
+			return "", fmt.Errorf("migrate %s to %s: %w",
+				config.LegacyPublicDirName, config.PublicDirName, err)
+		}
+		return dir, nil
+	}
+
+	if err := mergeTree(legacy, dir); err != nil {
+		return "", fmt.Errorf("merge %s into %s: %w",
+			config.LegacyPublicDirName, config.PublicDirName, err)
+	}
+	// Only once every file is accounted for. Removing it earlier, or on a partial
+	// merge, would delete the member's only copy of whatever did not make it.
+	if err := os.RemoveAll(legacy); err != nil {
+		return "", fmt.Errorf("remove migrated %s: %w", config.LegacyPublicDirName, err)
+	}
+	return dir, nil
+}
+
+// mergeTree moves every file under src into dst, keeping the newer copy whenever
+// both sides hold the same relative path. Directories are created as needed; empty
+// directories in src are reproduced so a folder the member made on purpose does not
+// disappear for being empty.
+func mergeTree(src, dst string) error {
+	return filepath.WalkDir(src, func(full string, e fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, full)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+
+		if e.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+
+		existing, err := os.Stat(target)
+		if err == nil {
+			incoming, err := e.Info()
+			if err != nil {
+				return err
+			}
+			// Strictly newer: on an exact tie the destination stays, so a re-run of a
+			// merge that already happened cannot flip a file back and forth.
+			if !incoming.ModTime().After(existing.ModTime()) {
+				return nil
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		if err := os.Rename(full, target); err != nil {
+			return fmt.Errorf("move %s: %w", rel, err)
+		}
+		return nil
+	})
 }
