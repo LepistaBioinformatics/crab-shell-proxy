@@ -101,3 +101,20 @@ func (r *turnRegistry) Current(scope memgraph.Scope) (string, bool) {
 	}
 	return "", false
 }
+
+// Active reports whether a named conversation has a turn in flight on scope.
+//
+// Deliberately NOT expressed in terms of Current, and the difference is the point.
+// Current answers "which single conversation may I attribute this workspace's
+// memory write to?", and refuses when two are running, because mislabelling is
+// worse than not labelling. Active is asked BY a conversation ABOUT itself, so
+// what else runs on the workspace is irrelevant — routing it through Current
+// would tell a member with two tabs open that their turn had vanished.
+func (r *turnRegistry) Active(scope memgraph.Scope, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inFlight[scope][sessionID] > 0
+}
