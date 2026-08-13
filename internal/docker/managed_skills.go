@@ -30,6 +30,19 @@ const (
 	// `append_file` on MEMORY.md instead, then told the user it had also written to the
 	// graph. It only used the graph after an instruction naming the tools.
 	managedRoutingRel = "memory/MEMORY_ROUTING.md"
+	// managedDeliveryRel is the hard rule about WHERE a produced file goes:
+	// public/attachments/, the only directory the member's interface lists.
+	//
+	// Unconditional, unlike the routing note: it depends on no tool and no config.
+	// A file written outside public/ is invisible to the member no matter how this
+	// deployment is set up, so there is no build of it where this advice is wrong.
+	//
+	// It also carries the reason the agent must NAME the path in its own reply: the
+	// 📎 notice the proxy appends is stream-only and is never persisted, so after a
+	// reload the only account of a delivered file is whatever the model itself wrote
+	// (picoclaw's own line is "Requested output delivered via tool attachment.",
+	// which names nothing).
+	managedDeliveryRel = "memory/FILE_DELIVERY.md"
 )
 
 //go:embed managed
@@ -46,7 +59,7 @@ var managedFS embed.FS
 // CRAB_MCP_TOKEN_SECRET the agent has no mcp_memory_* tools at all, and a file
 // instructing it to prefer them would be actively wrong — worse than silent.
 func managedContentBinds(managedBase, mountDest string, memoryGraphEnabled bool) []string {
-	rels := []string{managedSkillRel, managedMemoryRel}
+	rels := []string{managedSkillRel, managedMemoryRel, managedDeliveryRel}
 	if memoryGraphEnabled {
 		rels = append(rels, managedRoutingRel)
 	}
