@@ -448,7 +448,7 @@ func TestSeedProjectWorkspaceIsIdempotentAndDerived(t *testing.T) {
 	}
 
 	root := filepath.Join(userDir, "workspace-seedtrial")
-	for _, sub := range []string{"sessions", "memory", "uploads"} {
+	for _, sub := range []string{"sessions", "memory", "public"} {
 		if info, err := os.Stat(filepath.Join(root, sub)); err != nil || !info.IsDir() {
 			t.Errorf("missing dir %s: %v", sub, err)
 		}

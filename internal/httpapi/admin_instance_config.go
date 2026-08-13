@@ -24,7 +24,7 @@ import (
 // BFF route and in members-panel.tsx all stay in force. The distinction:
 //
 //   - FR-7's subject is the set ListUserFiles enumerates, which is the UPLOADS
-//     dir alone (shared.go → config.UploadsDir). config.json is not in it.
+//     dir alone (shared.go → config.PublicDir). config.json is not in it.
 //   - FR-7 protects MEMBER-AUTHORED content. config.json is proxy-materialized
 //     provisioning state: the proxy seeds it and rewrites six of its paths
 //     (docker.ManagedConfigPaths) on every materialization.

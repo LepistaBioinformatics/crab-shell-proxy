@@ -22,7 +22,7 @@ func mediaFixture(t *testing.T) (*Manager, WorkspaceKey, string) {
 	root := t.TempDir()
 	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "alpha", UserAccID: "u"}
 	m := &Manager{cfg: &config.Config{ContainerDataRoot: root, HostDataRoot: root}}
-	uploads := config.UploadsDir(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, config.MainWorkspace)
+	uploads := config.PublicDir(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, config.MainWorkspace)
 
 	for _, rel := range []string{
 		"top.txt",
@@ -65,13 +65,13 @@ func TestListMediaListsFoldersAndFiles(t *testing.T) {
 	m, key, _ := mediaFixture(t)
 	got := listPaths(t, m, key)
 	want := []string{
-		"uploads/images",
-		"uploads/images/logo.png",
-		"uploads/reports",
-		"uploads/reports/2026",
-		"uploads/reports/2026/q2.pdf",
-		"uploads/reports/q1.pdf",
-		"uploads/top.txt",
+		"public/images",
+		"public/images/logo.png",
+		"public/reports",
+		"public/reports/2026",
+		"public/reports/2026/q2.pdf",
+		"public/reports/q1.pdf",
+		"public/top.txt",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("listing:\n got %v\nwant %v", got, want)
@@ -89,7 +89,7 @@ func TestListMediaListsAnEmptyFolder(t *testing.T) {
 		t.Fatalf("ListMedia: %v", err)
 	}
 	for _, e := range entries {
-		if e.Path == "uploads/brand-new" {
+		if e.Path == "public/brand-new" {
 			if !e.IsDir {
 				t.Error("the empty folder is listed but not marked IsDir")
 			}
@@ -129,7 +129,7 @@ func TestListMediaDoesNotStripAUidLikeFolderName(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Path == "uploads/ab12cd34-notes" {
+		if e.Path == "public/ab12cd34-notes" {
 			if e.Name != "ab12cd34-notes" {
 				t.Errorf("folder Name = %q, want it unstripped", e.Name)
 			}
@@ -272,7 +272,7 @@ func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if stored.Path != "uploads/attachments/report.pdf" {
+	if stored.Path != "public/attachments/report.pdf" {
 		t.Errorf("path = %q, want uploads/attachments/report.pdf", stored.Path)
 	}
 	if stored.Size != int64(len("%PDF-1.4 fake")) {
@@ -286,7 +286,7 @@ func TestStoreAgentAttachmentLandsWhereTheSidebarLooks(t *testing.T) {
 	}
 	var found bool
 	for _, f := range listed {
-		if f.Path == "uploads/attachments/report.pdf" {
+		if f.Path == "public/attachments/report.pdf" {
 			found = true
 		}
 	}
@@ -314,7 +314,7 @@ func TestStoreAgentAttachmentSanitizesAndOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if stored.Path != "uploads/attachments/passwd" {
+	if stored.Path != "public/attachments/passwd" {
 		t.Errorf("path = %q, want the traversal stripped to a leaf name", stored.Path)
 	}
 
@@ -327,7 +327,7 @@ func TestStoreAgentAttachmentSanitizesAndOverwrites(t *testing.T) {
 	listed, _ := m.ListMedia(key, "")
 	var n int
 	for _, f := range listed {
-		if f.Path == "uploads/attachments/report.pdf" {
+		if f.Path == "public/attachments/report.pdf" {
 			n++
 		}
 	}

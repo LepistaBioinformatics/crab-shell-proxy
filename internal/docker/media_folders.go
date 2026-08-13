@@ -37,7 +37,7 @@ var (
 	ErrMediaNotFolder = errors.New("not a folder")
 	// ErrMediaRoot means an operation targeted the uploads root, which the member does
 	// not own — deleting it would take the agent's whole working tree with it.
-	ErrMediaRoot = errors.New("cannot operate on the uploads root")
+	ErrMediaRoot = errors.New("cannot operate on the public root")
 	// ErrMediaReserved means an operation targeted a system-managed folder. See
 	// isReservedFolder.
 	ErrMediaReserved = errors.New("that folder is managed by the system")
@@ -75,15 +75,8 @@ func isInsideReserved(rel string) bool {
 	return strings.HasPrefix(clean, AttachmentsSubdir+"/")
 }
 
-// uploadsDir is the member's uploads root. The five-argument call is repeated all
-// over media.go; naming it once here keeps the three operations below readable.
-func (m *Manager) uploadsDir(key WorkspaceKey, project string) string {
-	return config.UploadsDir(m.cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegment(project))
-}
 
-
-// CreateFolder makes a folder (and any missing parents) inside the member's uploads
+// CreateFolder makes a folder (and any missing parents) inside the member's public
 // tree, chowned so the non-root agent can use it too.
 //
 // Idempotent: an existing folder is success, not a conflict. A member clicking "new
@@ -100,7 +93,11 @@ func (m *Manager) CreateFolder(key WorkspaceKey, project string, rel string) err
 	if err != nil {
 		return err
 	}
-	tree, err := openTree(m.uploadsDir(key, project))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return err
+	}
+	tree, err := openTree(root)
 	if err != nil {
 		return err
 	}
@@ -145,7 +142,11 @@ func (m *Manager) MoveMedia(key WorkspaceKey, project string, fromRel, toRel str
 	if err != nil {
 		return err
 	}
-	tree, err := openTreeIfExists(m.uploadsDir(key, project))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return err
+	}
+	tree, err := openTreeIfExists(root)
 	if err != nil {
 		return err
 	}
@@ -205,7 +206,11 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (in
 	if err != nil {
 		return 0, err
 	}
-	tree, err := openTreeIfExists(m.uploadsDir(key, project))
+	root, err := m.publicRoot(key, project)
+	if err != nil {
+		return 0, err
+	}
+	tree, err := openTreeIfExists(root)
 	if err != nil {
 		return 0, err
 	}
