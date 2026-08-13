@@ -231,6 +231,9 @@ type Orchestrator interface {
 // Turner runs one conversational turn (satisfied by *pico.Client).
 type Turner interface {
 	RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error)
+	// Cancel stops the turn running on req.SessionID, if there is one. A session
+	// with no active turn is not an error.
+	Cancel(ctx context.Context, req turn.Request) error
 }
 
 // Server holds the handler dependencies.
@@ -271,6 +274,7 @@ func (s *Server) Handler() http.Handler {
 		s.probes = newProbeLimiter()
 	}
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("POST /v1/chat/cancel", s.handleChatCancel)
 	mux.HandleFunc("POST /v1/accounts", s.handleAccounts)
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
@@ -507,50 +511,70 @@ type message struct {
 	Content json.RawMessage `json:"content"`
 }
 
-func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+// chatScope is one authorized conversation: which container answers, and which
+// picoclaw session the turn belongs to.
+//
+// It exists so running a turn and stopping one resolve their target through the
+// SAME code. picoclaw looks an abort up by the session it derives from the id it
+// was given, so a stop that computed its session id even slightly differently
+// would abort nothing and report success — the failure would look like a dead
+// button, not like a bug here.
+type chatScope struct {
+	Agent config.Agent
+	Ident identity.Identity
+	Key   docker.WorkspaceKey
+	// SessionID is the value picoclaw is addressed with: the per-account session
+	// key, prefixed when the conversation belongs to a project.
+	SessionID string
+}
+
+// resolveChatScope decodes a chat request, authorizes it and resolves its
+// target. It writes the error response itself and reports false when the caller
+// must stop.
+//
+// It owns the decode so that WHO is asking is settled before WHAT they sent:
+// an unknown agent must answer 404 rather than complaining about the body of a
+// request it was never going to serve.
+func (s *Server) resolveChatScope(w http.ResponseWriter, r *http.Request) (chatScope, chatRequest, bool) {
 	agent, status, msg := s.resolveAgent(r)
 	if status != 0 {
 		writeJSON(w, status, errBody(msg))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized,
 			errBody("missing or invalid "+identity.ProfileHeader+" header"))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
-		return
-	}
-	if len(req.Messages) == 0 {
-		writeJSON(w, http.StatusBadRequest, errBody(`"messages" is required`))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	sessionKey := identity.SessionKey(ident.AccID, req.SessionID)
 	if sessionKey == "" {
 		writeJSON(w, http.StatusBadRequest,
 			errBody(`"session_id" is required to isolate conversations for this account`))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	tenantID, err := uuid.Parse(req.TenantID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" is required and must be a UUID`))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	subsAccID, err := uuid.Parse(req.SubsAccID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" is required and must be a UUID`))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	// Account-switching guard: a caller acting AS the subscription (not as an
 	// individual member) has no per-user identity to isolate on.
 	if ident.Profile.AccID == subsAccID {
 		writeJSON(w, http.StatusForbidden,
 			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	// The profile filtering chain is the only authorization gate: the caller
 	// must hold write access on this tenant, for a role named exactly like the
@@ -567,7 +591,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			agent.Key, tenantID, subsAccID, ident.AccID, err)
 		writeJSON(w, http.StatusForbidden,
 			errBody("not licensed to use this subscription for this agent"))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	// Ensure the subscription root exists, creating it on demand. The filter
 	// chain above already proved the caller is licensed for this
@@ -578,7 +602,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.Mgr.ScaffoldSubscription(tenantID.String(), subsAccID.String()); err != nil {
 		s.logf("chat: scaffold subscription failed tenant=%s subs=%s: %v", tenantID, subsAccID, err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 
 	key := docker.WorkspaceKey{
@@ -597,11 +621,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// workspace; the user would meet that days later as missing history, not now
 	// as an error.
 	if ok := s.checkProject(w, key, req.Project); !ok {
-		return
+		return chatScope{}, chatRequest{}, false
 	}
 	sessionKey = projectSessionID(req.Project, sessionKey)
-	s.logf("chat: authorized svc=%s tenant=%s subs=%s user=%s project=%q stream=%t",
-		agent.Key, tenantID, subsAccID, ident.AccID, req.Project, req.Stream)
+	s.logf("chat: authorized svc=%s tenant=%s subs=%s user=%s project=%q",
+		agent.Key, tenantID, subsAccID, ident.AccID, req.Project)
+	return chatScope{Agent: agent, Ident: ident, Key: key, SessionID: sessionKey}, req, true
+}
+
+func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	scope, req, ok := s.resolveChatScope(w, r)
+	if !ok {
+		return
+	}
+	if len(req.Messages) == 0 {
+		writeJSON(w, http.StatusBadRequest, errBody(`"messages" is required`))
+		return
+	}
+	agent, ident, key, sessionKey := scope.Agent, scope.Ident, scope.Key, scope.SessionID
 	// Memory-graph provenance: mark this workspace as mid-turn on this conversation,
 	// so an MCP write during the turn can be attributed to it. Placed here — after
 	// authorization, before either the streaming or the synchronous branch — so one
@@ -673,6 +710,50 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Appended AFTER the answer: unlike the stream, the order here is ours to pick,
 	// and a file notice reads as a footnote to the reply rather than an interruption.
 	writeJSON(w, http.StatusOK, completionResponse(id, model, content+strings.Join(notices, "")))
+}
+
+// cancelTimeout bounds a stop request. It is short on purpose: a stop that has
+// to wait is useless to the member who pressed it, and there is nothing here
+// that legitimately takes long — one WebSocket dial, one frame out, one back.
+const cancelTimeout = 20 * time.Second
+
+// handleChatCancel stops the turn running on a conversation.
+//
+// It reuses resolveChatScope, so the session it addresses is the one the turn
+// was started with. The request body is a chatRequest like the completions call,
+// minus "messages": stopping a turn needs the same scope, not its content.
+//
+// Answers 204 whether or not a turn was actually running. The turn finishing
+// while the member clicks is an ordinary race, and picoclaw reports "nothing to
+// stop" in prose the caller cannot act on differently — reporting it as failure
+// would only make a working Stop look broken.
+func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
+	scope, req, ok := s.resolveChatScope(w, r)
+	if !ok {
+		return
+	}
+
+	// Not decoupled from the request context, unlike a turn: nothing here writes
+	// a transcript, so a caller that walks away has nothing to leave truncated.
+	ctx, cancel := context.WithTimeout(r.Context(), cancelTimeout)
+	defer cancel()
+	tgt, err := s.Mgr.EnsureRunning(ctx, scope.Agent, scope.Key, scope.Ident.Email)
+	if err != nil {
+		s.logf("cancel: ensure running failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	if err := s.Pico.Cancel(ctx, turn.Request{
+		Endpoint:  tgt.Endpoint,
+		AuthToken: tgt.AuthToken,
+		SessionID: scope.SessionID,
+	}); err != nil {
+		s.logf("cancel: stop failed svc=%s user=%s: %v", scope.Agent.Key, scope.Ident.AccID, err)
+		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
+		return
+	}
+	s.logf("cancel: stop sent svc=%s user=%s project=%q", scope.Agent.Key, scope.Ident.AccID, req.Project)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // accountWebhook is the two-field subset of the mycelium Account object the

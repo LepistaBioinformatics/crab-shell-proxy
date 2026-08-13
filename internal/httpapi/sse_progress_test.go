@@ -20,6 +20,8 @@ type progressTurner struct {
 	content  []string
 }
 
+func (p *progressTurner) Cancel(_ context.Context, _ turn.Request) error { return nil }
+
 func (p *progressTurner) RunTurn(_ context.Context, _ turn.Request, sink turn.Sink) (string, error) {
 	for _, ev := range p.progress {
 		sink.EmitProgress(ev)
