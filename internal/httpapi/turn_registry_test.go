@@ -181,3 +181,85 @@ func TestConcurrentBeginEndIsRaceFree(t *testing.T) {
 		t.Error("attribution survived every turn ending")
 	}
 }
+
+// Active answers a different question from Current, and the difference is the
+// reason it exists.
+//
+// Current is for MCP attribution: it refuses to answer when two conversations are
+// in flight on one workspace, because guessing which one a memory write came from
+// is worse than not labelling it. Active is asked BY a named conversation ABOUT
+// itself -- "am I still running?" -- so concurrency on the workspace is irrelevant
+// and answering false there would tell a member their turn had vanished.
+func TestActiveReportsThisConversationOnly(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	sc := regScope("u1")
+
+	if r.Active(sc, "conv-a") {
+		t.Error("Active on an idle workspace must be false")
+	}
+
+	end := r.Begin(sc, "conv-a")
+	if !r.Active(sc, "conv-a") {
+		t.Error("the running conversation reports itself inactive")
+	}
+	if r.Active(sc, "conv-b") {
+		t.Error("a conversation that is NOT running reported itself active")
+	}
+
+	end()
+	if r.Active(sc, "conv-a") {
+		t.Error("still active after the turn ended")
+	}
+}
+
+// The case Current deliberately gets "wrong": two tabs, two conversations, one
+// workspace. Current returns false for both; Active must return true for both, or
+// a reload during either one would report the turn lost.
+func TestActiveSurvivesConcurrentConversations(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	sc := regScope("u1")
+	endA := r.Begin(sc, "conv-a")
+	endB := r.Begin(sc, "conv-b")
+	defer endA()
+	defer endB()
+
+	if _, ok := r.Current(sc); ok {
+		t.Error("precondition: Current should decline to attribute with two in flight")
+	}
+	for _, id := range []string{"conv-a", "conv-b"} {
+		if !r.Active(sc, id) {
+			t.Errorf("Active(%q) = false; both concurrent conversations are running", id)
+		}
+	}
+}
+
+// Overlapping requests on ONE conversation (a retry alongside a turn) decrement to
+// zero rather than dropping out on the first end.
+func TestActiveHonoursTheCount(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	sc := regScope("u1")
+	end1 := r.Begin(sc, "conv-a")
+	end2 := r.Begin(sc, "conv-a")
+
+	end1()
+	if !r.Active(sc, "conv-a") {
+		t.Error("one of two overlapping requests ended and the conversation went inactive")
+	}
+	end2()
+	if r.Active(sc, "conv-a") {
+		t.Error("both ended and it is still active")
+	}
+}
+
+func TestActiveIsScopedToTheWorkspace(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	end := r.Begin(regScope("u1"), "conv-a")
+	defer end()
+	if r.Active(regScope("u2"), "conv-a") {
+		t.Error("another member's workspace reported this conversation active")
+	}
+}

@@ -279,6 +279,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/sessions/history", s.handleSessionsHistory)
+	// resume-turn-after-reload: lets a client that lost its stream (a page reload)
+	// find out whether the turn is still running, instead of guessing from silence.
+	mux.HandleFunc("GET /v1/turns/active", s.handleTurnsActive)
 	mux.HandleFunc("GET /v1/sessions/resolve", s.handleSessionsResolve)
 	// user-owned-models: a member's own model, and which one they run. Under
 	// /v1/models/ rather than /v1/secrets/ because it is a model, not a
@@ -1543,4 +1546,67 @@ func extractText(raw json.RawMessage) string {
 		return sb.String()
 	}
 	return ""
+}
+
+// handleTurnsActive answers whether one conversation has a turn in flight.
+//
+// It exists because a page reload loses the stream but not the turn: the proxy
+// runs turns on a background context precisely so a disconnect cannot cut them,
+// and picoclaw persists the reply either way. Without this the client cannot tell
+// "still working" from "finished while I was away" and has to guess from silence.
+//
+// Two details are load-bearing and both differ from handleSessionsHistory, which
+// is the handler this most resembles and therefore the one most likely to be
+// copied from:
+//
+//   - The RAW session id is what matches. handleChatCompletions registers
+//     `req.SessionID` verbatim ("it is what the webapp navigates by"), NOT the
+//     identity.SessionKey hash the history reader works from. Hashing here would
+//     compare a hash against a raw id, match nothing, and leave an endpoint that
+//     answers 200/false forever.
+//   - No `project` is read, and that is deliberate rather than an omission. The
+//     registry is keyed by scopeOf(key), which carries tenant/subs/role/user and
+//     NOT the workspace segment, so a project chat registers under exactly the
+//     same scope as a main one and is told apart by its session id alone. Adding
+//     the parameter would be dead weight that reads like a guarantee.
+func (s *Server) handleTurnsActive(w http.ResponseWriter, r *http.Request) {
+	agent, status, msg := s.resolveAgent(r)
+	if status != 0 {
+		writeJSON(w, status, errBody(msg))
+		return
+	}
+	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized,
+			errBody("missing or invalid "+identity.ProfileHeader+" header"))
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"session_id" query parameter is required`))
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	// Same account-switching guard as every other member-scoped read.
+	if ident.Profile.AccID == subsAccID {
+		writeJSON(w, http.StatusForbidden,
+			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
+		return
+	}
+
+	key := docker.WorkspaceKey{
+		TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
+		Role: agent.Key, UserAccID: ident.AccID,
+	}
+	active := s.turns != nil && s.turns.Active(scopeOf(key), sessionID)
+	writeJSON(w, http.StatusOK, map[string]any{"active": active})
 }

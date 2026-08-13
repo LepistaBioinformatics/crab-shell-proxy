@@ -15,6 +15,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
@@ -1339,4 +1340,119 @@ func (f *fakeOrch) HasProject(_ docker.WorkspaceKey, id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/turns/active — resume-turn-after-reload
+// ---------------------------------------------------------------------------
+
+func turnsActiveReq(t *testing.T, query string, headers map[string]string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/v1/turns/active?"+query, nil)
+	for k, v := range headers {
+		r.Header.Set(k, v)
+	}
+	return r
+}
+
+// The point of the endpoint: a reload asks whether the turn it lost sight of is
+// still running, and the answer has to be true while it is.
+func TestTurnsActiveReportsARunningTurn(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	// Handler() is what constructs the registry, so build it before Begin.
+	h := s.Handler()
+	q := "session_id=conv-a&tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, turnsActiveReq(t, q, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"active":false`) {
+		t.Errorf("idle workspace should report inactive, got %s", w.Body.String())
+	}
+
+	// Register a turn the way handleChatCompletions does: the RAW session id,
+	// against the project-independent scope.
+	end := s.turns.Begin(memgraph.Scope{
+		TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: accAlice,
+	}, "conv-a")
+	defer end()
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, turnsActiveReq(t, q, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"active":true`) {
+		t.Errorf("a running turn reported inactive: %s", w.Body.String())
+	}
+}
+
+// FR-2: Begin records the RAW session id, not identity.SessionKey's hash. A
+// handler that copied handleSessionsHistory's `sessionKey := identity.SessionKey(...)`
+// line would compare the hash against the raw id and never match -- an endpoint
+// that returns 200 forever and always says false.
+func TestTurnsActiveMatchesTheRawSessionID(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := s.Handler()
+	scope := memgraph.Scope{TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: accAlice}
+	end := s.turns.Begin(scope, "conv-a")
+	defer end()
+
+	// The hashed form must NOT be what the endpoint looks up.
+	hashed := identity.SessionKey(accAlice, "conv-a")
+	if hashed == "conv-a" {
+		t.Skip("SessionKey is identity here; the confusion this guards is impossible")
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, turnsActiveReq(t,
+		"session_id=conv-a&tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if !strings.Contains(w.Body.String(), `"active":true`) {
+		t.Errorf("raw session id did not match what Begin recorded: %s", w.Body.String())
+	}
+}
+
+func TestTurnsActiveRequiresTenantAndSubs(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	for _, q := range []string{
+		"tenant_id=" + tenantT + "&subs_acc_id=" + subsX, // missing session_id
+		"session_id=s&subs_acc_id=" + subsX,              // missing tenant_id
+		"session_id=s&tenant_id=" + tenantT,              // missing subs_acc_id
+	} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, turnsActiveReq(t, q, goodHeaders(t)))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("query %q: status = %d, want 400", q, w.Code)
+		}
+	}
+}
+
+func TestTurnsActiveAccountSwitchGuard(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := headersFor(t, licensedProfile(subsX, tenantT, subsX, "alpha", "write", true))
+	q := "session_id=s&tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, turnsActiveReq(t, q, h))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+// Another member's workspace must never report this conversation active, even
+// with the same session id.
+func TestTurnsActiveIsScopedToTheCaller(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := s.Handler()
+	end := s.turns.Begin(memgraph.Scope{
+		TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: "someone-else",
+	}, "conv-a")
+	defer end()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, turnsActiveReq(t,
+		"session_id=conv-a&tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if !strings.Contains(w.Body.String(), `"active":false`) {
+		t.Errorf("another member's turn leaked into this caller's answer: %s", w.Body.String())
+	}
 }
