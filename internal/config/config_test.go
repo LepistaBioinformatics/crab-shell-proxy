@@ -22,7 +22,7 @@ listen: ":9000"
 hostDataRoot: "/host/data"
 network: "net"
 startupDeadline: 30s
-turnTimeout: 90s
+turnIdleTimeout: 90s
 agents:
   alpha:
     serviceName: "picoclaw-alpha"
@@ -645,4 +645,39 @@ func TestMCPBaseURLDefaultAndOverrides(t *testing.T) {
 			t.Errorf("MCPBaseURL = %q, want the env value to win", cfg.MCPBaseURL)
 		}
 	})
+}
+
+// TestLoadRejectsLegacyTurnTimeoutKey guards the rename of turnTimeout ->
+// turnIdleTimeout.
+//
+// The two keys do NOT mean the same thing: turnTimeout capped a turn's total
+// duration, turnIdleTimeout caps how long picoclaw may stay silent. yaml.Unmarshal
+// ignores unknown keys, so a deployment left on the old key would silently get the
+// default instead of the value its operator wrote -- the same class of failure the
+// harness rename was made to fail loudly on.
+func TestLoadRejectsLegacyTurnTimeoutKey(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	body := strings.Replace(sample, "turnIdleTimeout: 90s", "turnTimeout: 90s", 1)
+
+	_, err := Load(writeConfig(t, body))
+	if err == nil {
+		t.Fatal("Load accepted the legacy turnTimeout key; it must fail loudly")
+	}
+	// The message has to say what to do, not just that something is wrong.
+	for _, want := range []string{"turnTimeout", "turnIdleTimeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestLoadParsesTurnIdleTimeout(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	cfg, err := Load(writeConfig(t, sample))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.TurnIdleTimeout.Std(); got != 90*time.Second {
+		t.Errorf("TurnIdleTimeout = %v, want 90s", got)
+	}
 }

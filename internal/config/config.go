@@ -203,7 +203,16 @@ type Config struct {
 	// path is aligned to it. Must be a dir the PicoclawUser can write.
 	PicoclawHome    string   `yaml:"picoclawHome"`
 	StartupDeadline Duration `yaml:"startupDeadline"`
-	TurnTimeout     Duration `yaml:"turnTimeout"`
+	// TurnIdleTimeout is how long the harness may stay SILENT before its turn is
+	// declared dead. It is not a cap on how long a turn may take: an agentic turn
+	// legitimately runs for many minutes while narrating its work, and the total
+	// bound belongs to the HTTP layer (httpapi's turnCtx), which has one.
+	//
+	// It was `turnTimeout` and it did cap total duration, which cut long turns
+	// mid-work while picoclaw carried on and persisted the answer -- the "it froze
+	// but the reply is there after a reload" bug. Load rejects the old key rather
+	// than ignoring it, because the two are not interchangeable.
+	TurnIdleTimeout Duration `yaml:"turnIdleTimeout"`
 	// ContainerPrefix prefixes every managed container name (default "crabshell").
 	// Harness-agnostic: a container's harness is recorded in its labels/config,
 	// not its name (the name is <prefix>-<role>-<hash>).
@@ -249,6 +258,21 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// yaml.Unmarshal ignores unknown keys, so a config still carrying the
+	// pre-rename `turnTimeout` would load clean and silently run on the DEFAULT
+	// idle window instead of the value written here. The two keys do not mean the
+	// same thing (total cap vs. tolerated silence), so this refuses rather than
+	// guesses.
+	var legacy struct {
+		TurnTimeout *Duration `yaml:"turnTimeout"`
+	}
+	if err := yaml.Unmarshal(raw, &legacy); err == nil && legacy.TurnTimeout != nil {
+		return nil, fmt.Errorf(
+			"config uses removed key `turnTimeout`: it capped a turn's TOTAL duration and cut long "+
+				"turns mid-work. Rename it to `turnIdleTimeout` (%s), which bounds how long the harness "+
+				"may stay silent instead", legacy.TurnTimeout.Std())
+	}
+
 	var cfg Config
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -355,8 +379,8 @@ func (c *Config) applyDefaults() {
 	if c.StartupDeadline == 0 {
 		c.StartupDeadline = Duration(35 * time.Second)
 	}
-	if c.TurnTimeout == 0 {
-		c.TurnTimeout = Duration(120 * time.Second)
+	if c.TurnIdleTimeout == 0 {
+		c.TurnIdleTimeout = Duration(120 * time.Second)
 	}
 	if c.ContainerPrefix == "" {
 		c.ContainerPrefix = "crabshell"
