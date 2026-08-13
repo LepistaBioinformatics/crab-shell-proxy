@@ -19,6 +19,8 @@ type errorTurner struct {
 	runErr   error  // returned by RunTurn
 }
 
+func (e *errorTurner) Cancel(_ context.Context, _ turn.Request) error { return nil }
+
 func (e *errorTurner) RunTurn(_ context.Context, _ turn.Request, sink turn.Sink) (string, error) {
 	for _, c := range e.content {
 		sink.EmitContent(c)

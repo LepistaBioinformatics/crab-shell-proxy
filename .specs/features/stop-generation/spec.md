@@ -1,7 +1,42 @@
 # Feature — Stop the generation for real
 
-**Status:** specified, not started
-**Scope:** Large — three repos (picoclaw patch overlay, crab-shell-proxy, crab-exoskeleton-webapp)
+**Status:** implemented (2026-08-13) — two repos, not three
+**Scope:** Medium — crab-shell-proxy, crab-exoskeleton-webapp
+
+> **Correction, read this before F3/R1 below.**
+>
+> This spec was written believing the Pico Protocol had no way to ask for a
+> cancel, and planned a picoclaw patch overlay to add one. **That was wrong.**
+> picoclaw v0.3.1 — the tag `deploy/picoclaw-glob/Dockerfile` already pins —
+> ships a `/stop` command that reaches the very `HardAbort` F2 identified:
+>
+> `pkg/agent/agent.go:191` → `tryHandleStopCommand` → `pkg/agent/agent_stop.go`
+> `stopActiveTurnForSession` → `AgentLoop.HardAbort(sessionKey)`.
+>
+> It is dispatched from an ordinary `message.send`, and it resolves its session
+> key through `resolveSteeringTarget` → `allocateRouteSession` — the *same* call
+> the normal message path makes (`agent_message.go:154`). So a stop and a turn on
+> one conversation always agree on the key, with nothing for this stack to
+> compute or keep in sync.
+>
+> **F3 and R1 are therefore void**: no protocol change, no `SetAbortFunc`, no
+> third patch file, and R1.4's open question does not arise. R2 and R3 stand, and
+> are what was built. F1 and F2 were re-read at v0.3.1 and hold.
+>
+> Two details F2 did not record, both load-bearing:
+>
+> - `HardAbort` refuses a turn still in setup (`turnID` prefixed `pending-`).
+>   `tryHandleStopCommand` covers that case by arming a pending stop, which is
+>   another reason to go through the command rather than call `HardAbort` under
+>   a transport of our own.
+> - The rollback deletes the member's own message, confirmed rather than
+>   suspected: `initialHistoryLength` is captured in `newTurnState`
+>   (`turn_state.go:280`), and the user message is appended afterwards
+>   (`pipeline_setup.go:124`). This settles **R-1** — see the resolution there.
+>
+> Neither the `/stop` nor picoclaw's reply to it is written to session history:
+> the command path returns before `runAgentLoop`, and `PublishResponseIfNeeded`
+> only publishes outbound. So a stopped turn leaves no residue on reload.
 
 ## Problem
 
@@ -47,7 +82,12 @@ concern directly. This is a clean abort, not a severed pipe.
 Nothing outside `pkg/agent` calls `HardAbort`. It is a finished capability with no
 transport in front of it.
 
-### F3 — The Pico Protocol has no client→server cancel, and the patch to add one is small
+### F3 — VOID. The Pico Protocol has no client→server cancel, and the patch to add one is small
+
+*Kept for the record; superseded by the correction at the top. The protocol
+observation is accurate — `message.send`, `media.send`, `ping` is the whole
+client→server vocabulary at v0.3.1 — but the conclusion drawn from it is not:
+`/stop` travels inside `message.send`, so no new frame type was ever needed.*
 
 `pkg/channels/pico/protocol.go:9-23` — the client may send exactly `message.send`,
 `media.send`, `ping`. (An earlier `strings` grep of the shipped binary suggested the
@@ -64,17 +104,19 @@ So the patch is transport-only, in three small pieces, with no new abort logic.
 ## Design
 
 ```
-webapp                 crab-shell-proxy            picoclaw (patched)
-──────                 ────────────────            ──────────────────
+webapp                 crab-shell-proxy            picoclaw v0.3.1 (STOCK)
+──────                 ────────────────            ──────────────────────
 [ ■ Stop ]
    │ POST /api/chat/<agent>/cancel
    ▼
  BFF route ─────────►  POST /v1/chat/cancel
-                          │ resolves agent + session key
-                          │ opens the pico WS (same auth)
+                          │ resolveChatScope: same agent, authz and
+                          │ session id as the turn
+                          │ opens a SECOND pico WS (same auth)
                           ▼
-                       {"type":"message.cancel",
-                        "session_id":"<key>"}  ──────►  handleMessageCancel
+                       {"type":"message.send",
+                        "session_id":"<id>",
+                        "payload":{"content":"/stop"}} ──►  tryHandleStopCommand
                                                           │
                                                           ▼
                                                      AgentLoop.HardAbort(sessionKey)
@@ -83,29 +125,16 @@ webapp                 crab-shell-proxy            picoclaw (patched)
                                                           └─ roll history back
 ```
 
-### R1 — picoclaw patch (new overlay, alongside `deploy/picoclaw-glob/`)
+The reply travels back over **both** connections: picoclaw's `broadcastToSession`
+writes to every connection registered for the session, so the running turn's
+stream sees the stop and finalizes on its own rather than waiting out the idle
+timeout.
 
-**R1.1** `pkg/channels/pico/protocol.go`: add `TypeMessageCancel = "message.cancel"`
-to the client→server block.
+### R1 — VOID (picoclaw patch)
 
-**R1.2** `pkg/channels/pico/pico.go`: route it in the WS read loop to a
-`handleMessageCancel` that resolves the session id exactly as `handleMessageSend`
-does (`msg.SessionID`, falling back to `pc.sessionID`) and calls the injected abort
-func. Answer `error`/`no_active_turn` on the existing error frame shape rather than
-silently succeeding — the webapp needs to distinguish "stopped" from "already done".
-
-**R1.3** Wiring: a `SetAbortFunc(func(sessionKey string) error)` on `PicoChannel`,
-set where the gateway already wires `SetReloadFunc`, from `agentLoop.HardAbort`.
-Follow that existing pattern rather than inventing a second one.
-
-**R1.4** Ship as a build overlay, **not** an upstream PR dependency — same reasoning
-and structure as `deploy/picoclaw-glob/`: pinned `PICOCLAW_TAG`, `git apply --verbose`
-with no fuzz, tests run inside the builder stage. Written to be upstreamable as-is.
-
-**Open question for the build:** whether this becomes a second patch file in the
-existing `picoclaw-glob` overlay or its own directory. One image cannot apply two
-overlays, so if both patches are needed simultaneously they must live in one
-directory. Resolve before writing the Dockerfile.
+*No patch is needed; see the correction at the top. `deploy/picoclaw-glob/` is
+untouched by this feature, and R1.4's "one image, one overlay directory" question
+never arises.*
 
 ### R2 — crab-shell-proxy
 
@@ -118,9 +147,23 @@ will abort nothing.
 the frame. It does **not** reuse the turn's connection: that one is owned by an
 in-flight `RunTurn` and is not safe to write from another goroutine.
 
-**R2.3** Distinguish outcomes for the caller: aborted, no active turn, agent
-unreachable. "No active turn" is a normal race (the turn finished while the member
-was clicking), not an error.
+**R2.3** ~~Distinguish outcomes for the caller: aborted, no active turn, agent
+unreachable.~~ **Amended.** Only two outcomes are reported: reached (204) and
+unreachable (502). picoclaw tells "stopped" and "nothing to stop" apart in
+English prose only (`commands.FormatStopReply`), with no flag on the wire — and
+the webapp acts identically either way, because it decides whether it was
+mid-turn from its OWN state, not from this answer. Parsing upstream prose to
+produce a distinction nobody consumes would be a coupling with no payer.
+
+"No active turn" therefore answers 204, as R2.3 intended: it is a normal race,
+not an error.
+
+**As built:** `internal/pico/cancel.go`, and `resolveChatScope` in
+`internal/httpapi/handlers.go` — extracted from `handleChatCompletions` so both
+paths resolve the target through one piece of code rather than two that must be
+kept in agreement. `Cancel` reads one frame before closing: the write alone only
+reaches picoclaw's socket buffer, and closing on top of it can drop the command
+before the read loop takes it, which would make Stop succeed and do nothing.
 
 ### R3 — crab-exoskeleton-webapp
 
@@ -138,19 +181,43 @@ turn, and the bands must not be replaced by nothing mid-animation.
 **R3.4** Copy in `en` + `pt` (`parity.test.ts` gate). The label is "Stop" / "Parar" —
 with F2's rollback this is now honest, unlike the UI-only option that was rejected.
 
+**R3.5** The stopped message goes back into the composer (R-1's resolution). The
+rollback deletes it on picoclaw's side, so leaving it out would mean Stop silently
+destroys what the member typed.
+
+**R3.6** Once Stop is pressed, the rest of that turn's stream is ignored. picoclaw
+answers the `/stop` with "Task stopped. …" on the same connection the turn is
+streaming over, and rendering that as the assistant's reply would show a message
+that the next history reload cannot produce.
+
 ## Risks
 
-- **R-1 — The rollback is a real deletion.** The member's own message is rolled back
-  with the turn. Whether that is right (clean slate) or wrong (they lose what they
-  typed) is a product call worth confirming before R3 is written. The webapp could
-  restore the text into the composer.
-- **R-2 — Two patched-picoclaw features now exist.** agent-projects already needs a
-  patched image. See the open question in R1.4.
+- **R-1 — The rollback is a real deletion. RESOLVED: restore the text.** Confirmed
+  in source, not suspected: `initialHistoryLength` is captured in `newTurnState`
+  before `pipeline_setup.go` appends the user message, so the member's own message
+  goes with the turn. Product decision (2026-08-13): the webapp puts the text back
+  into the composer, so stopping costs nothing that was typed. See R3.5.
+- **R-2 — VOID.** No second patched-picoclaw feature exists; this one needs no
+  patch at all. agent-projects remains the only overlay.
 - **R-3 — Version pin.** `v0.3.1` is what `deploy/picoclaw-glob/Dockerfile` pins.
-  `HardAbort` and its rollback were read at that tag; a bump re-checks both patches.
+  `HardAbort`, `tryHandleStopCommand` and the rollback were read at that tag. A
+  bump re-checks them — and now also re-checks that `/stop` still exists, since it
+  is this feature's whole transport. It is an upstream command with no compile-time
+  tie to this repo: if it were renamed, the proxy would keep answering 204 while
+  stopping nothing. That is the failure to watch for on a picoclaw upgrade.
 
 ## Verification
 
-Unit tests per repo. The one that matters is end-to-end and manual: start a long
-turn, press Stop, confirm generation actually stops, then **reload the conversation**
-and confirm the aborted turn is not there. F1 is exactly the failure this catches.
+Unit tests per repo:
+
+- proxy — `internal/pico/cancel_test.go` asserts the frame ON THE WIRE (type,
+  session id, `/stop`), because a stop carrying the wrong session id aborts
+  nothing while returning success; `internal/httpapi/chat_cancel_test.go` asserts
+  the cancel addresses the same session the turn ran on, in the main workspace and
+  inside a project, plus the authorization cases.
+- webapp — see R3.
+
+The one that matters is end-to-end and manual, and is NOT covered by any of the
+above: start a long turn, press Stop, confirm generation actually stops, then
+**reload the conversation** and confirm the aborted turn is not there. F1 is
+exactly the failure this catches. It needs the live stack.

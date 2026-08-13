@@ -510,13 +510,24 @@ type fakeTurner struct {
 	content string
 	err     error
 	deltas  []string
+	// ran and cancelled record the session id each call was given, so a test can
+	// assert the stop addressed the same conversation the turn ran on.
+	ran       []string
+	cancelled []string
+	cancelErr error
 }
 
-func (f *fakeTurner) RunTurn(_ context.Context, _ turn.Request, sink turn.Sink) (string, error) {
+func (f *fakeTurner) RunTurn(_ context.Context, req turn.Request, sink turn.Sink) (string, error) {
+	f.ran = append(f.ran, req.SessionID)
 	for _, d := range f.deltas {
 		sink.EmitContent(d)
 	}
 	return f.content, f.err
+}
+
+func (f *fakeTurner) Cancel(_ context.Context, req turn.Request) error {
+	f.cancelled = append(f.cancelled, req.SessionID)
+	return f.cancelErr
 }
 
 func encodeProfile(t *testing.T, body string) string {
