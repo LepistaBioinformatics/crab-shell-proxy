@@ -1,11 +1,16 @@
 package pico
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
+	"github.com/coder/websocket"
 )
 
 // drive replays a frame sequence through the processor, tracking the resulting
@@ -381,5 +386,179 @@ func TestProcessingErrorIsReportedAsWellAsStreamed(t *testing.T) {
 				t.Errorf("finalContent = %q, want %q (the non-streaming body)", final, c.wantText)
 			}
 		})
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Transport-level tests.
+//
+// Everything above drives the processor directly. These drive RunTurn against a
+// real Pico Protocol server, because the bug they cover lives in the transport's
+// timer handling and is invisible to the state machine.
+// ----------------------------------------------------------------------------
+
+const testToken = "test-token"
+
+// picoServer starts a WebSocket server that speaks enough of the Pico Protocol
+// to drive one turn: it waits for the client's message.send, then hands the
+// connection to script, which writes the frames the test wants to exercise.
+func picoServer(t *testing.T, script func(ctx context.Context, conn *websocket.Conn)) string {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			Subprotocols: []string{"token." + testToken},
+		})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+
+		ctx := r.Context()
+		// The turn does not start until the client has asked for it.
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		script(ctx, conn)
+
+		// Hold the connection open until the client hangs up, the way picoclaw
+		// does. Closing as soon as the script runs out of frames would race the
+		// client's grace window and surface as a spurious EOF.
+		//
+		// Blocking on a read rather than on ctx.Done(): this connection is
+		// hijacked, so the request context is not reliably cancelled when the peer
+		// goes away, and a handler parked on it would outlive the test.
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	return "ws://" + strings.TrimPrefix(srv.URL, "http://")
+}
+
+func writeFrame(ctx context.Context, conn *websocket.Conn, f Frame) error {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, b)
+}
+
+// TestLongTurnSurvivesWhileFramesKeepArriving is the regression test for the
+// "long tasks freeze, then the answer shows up on reload" bug.
+//
+// The turn runs LONGER than the client's timeout while never going quiet for
+// more than a fraction of it — a long tool-using turn narrating its work. That
+// must complete, because the timeout is meant to catch a DEAD connection, not to
+// cap how long legitimate work may take. The outer bound belongs to the caller
+// (httpapi's turnCtx), which is where it already is.
+func TestLongTurnSurvivesWhileFramesKeepArriving(t *testing.T) {
+	const (
+		idle    = 200 * time.Millisecond
+		spacing = 60 * time.Millisecond
+		frames  = 8 // 480ms of activity: well past idle, never idle for long
+	)
+
+	endpoint := picoServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		if err := writeFrame(ctx, conn, Frame{Type: "typing.start"}); err != nil {
+			return
+		}
+		// Thought frames: they keep the connection busy without finalizing, which
+		// is exactly the shape of a turn that is working rather than answering.
+		for i := 0; i < frames; i++ {
+			time.Sleep(spacing)
+			if err := writeFrame(ctx, conn, msg("m1", "working", "thought", false)); err != nil {
+				return
+			}
+		}
+		if err := writeFrame(ctx, conn, msg("m2", "Done at last", "", false)); err != nil {
+			return
+		}
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+	})
+
+	c := &Client{IdleTimeout: idle}
+	got, err := c.RunTurn(context.Background(), turn.Request{
+		Endpoint:  endpoint,
+		AuthToken: testToken,
+		SessionID: "s1",
+		Content:   "go",
+	}, turn.Sink{})
+	if err != nil {
+		t.Fatalf("RunTurn failed on a turn that never went idle: %v", err)
+	}
+	if got != "Done at last" {
+		t.Errorf("final = %q, want %q", got, "Done at last")
+	}
+}
+
+// TestSilentConnectionTimesOut is the other half: the timeout must still fire
+// when picoclaw genuinely stops talking, or a wedged turn would hold the request
+// open until the caller's own (much longer) bound expires.
+func TestSilentConnectionTimesOut(t *testing.T) {
+	const idle = 150 * time.Millisecond
+
+	endpoint := picoServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.start"})
+		// ...and then never speak again. picoServer holds the connection open.
+	})
+
+	c := &Client{IdleTimeout: idle}
+	start := time.Now()
+	_, err := c.RunTurn(context.Background(), turn.Request{
+		Endpoint:  endpoint,
+		AuthToken: testToken,
+		SessionID: "s1",
+		Content:   "go",
+	}, turn.Sink{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("RunTurn returned nil error on a connection that went silent")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %v, want it to mention a timeout", err)
+	}
+	// It must fire on the IDLE window, not on some longer bound.
+	if elapsed > 2*time.Second {
+		t.Errorf("took %v to give up, want ~%v", elapsed, idle)
+	}
+}
+
+// TestIdleTimeoutIsNotATotalCap states the distinction directly: a turn that is
+// silent for less than the window, repeatedly, for a total far exceeding it,
+// must not be cut off.
+func TestIdleTimeoutIsNotATotalCap(t *testing.T) {
+	const idle = 120 * time.Millisecond
+
+	endpoint := picoServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.start"})
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			time.Sleep(40 * time.Millisecond)
+			if err := writeFrame(ctx, conn, msg("m1", "still working", "thought", false)); err != nil {
+				return
+			}
+		}
+		_ = writeFrame(ctx, conn, msg("m2", "ok", "", false))
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+	})
+
+	c := &Client{IdleTimeout: idle}
+	got, err := c.RunTurn(context.Background(), turn.Request{
+		Endpoint:  endpoint,
+		AuthToken: testToken,
+		SessionID: "s1",
+		Content:   "go",
+	}, turn.Sink{})
+	if err != nil {
+		t.Fatalf("RunTurn failed after %v of steady activity with a %v idle window: %v",
+			500*time.Millisecond, idle, err)
+	}
+	if got != "ok" {
+		t.Errorf("final = %q, want %q", got, "ok")
 	}
 }

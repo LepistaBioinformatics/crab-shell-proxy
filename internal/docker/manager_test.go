@@ -141,7 +141,7 @@ func testManager(t *testing.T, mode config.Mode, dkr Docker) (*Manager, config.A
 	cfg := &config.Config{
 		HostDataRoot: "/host/data", ContainerDataRoot: root, Network: "zombie_net",
 		PicoclawImage: "img", PicoclawPort: 18790, StartupDeadline: config.Duration(time.Second),
-		TurnTimeout: config.Duration(time.Second), ContainerPrefix: "picoclaw",
+		TurnIdleTimeout: config.Duration(time.Second), ContainerPrefix: "picoclaw",
 		PicoclawUser: "1000:1000", PicoclawHome: "/data",
 		Agents: map[string]config.Agent{"alpha": agent},
 	}

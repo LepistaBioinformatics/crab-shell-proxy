@@ -288,8 +288,20 @@ func mediaBaseFrom(endpoint string) string {
 
 // Client runs turns against picoclaw Pico Protocol endpoints.
 type Client struct {
-	// TurnTimeout is the hard cap on a single turn.
-	TurnTimeout time.Duration
+	// IdleTimeout is the longest SILENCE tolerated before the turn is declared
+	// dead -- not a cap on how long the turn may take.
+	//
+	// It used to be a cap on total duration, and that was the "long tasks freeze,
+	// then the answer appears on reload" bug: an agentic turn legitimately runs
+	// for many minutes while narrating constantly, and the cap cut the WebSocket
+	// mid-work. picoclaw is a separate process and kept going, so the answer was
+	// written and only surfaced on the next history read -- the turn had not
+	// failed, only the client's view of it.
+	//
+	// The bound on TOTAL duration belongs to the caller, which already has one
+	// (httpapi's turnCtx). This one exists for a different failure: a connection
+	// that has gone quiet and is never coming back.
+	IdleTimeout time.Duration
 }
 
 // RunTurn opens a Pico Protocol WebSocket to req.Endpoint (e.g.
@@ -299,12 +311,10 @@ type Client struct {
 // typing) that would otherwise be invisible during the wait. req.SessionKey/Model
 // are unused (picoclaw is pinned server-side).
 func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error) {
-	timeout := c.TurnTimeout
-	if timeout <= 0 {
-		timeout = 120 * time.Second
+	idleTimeout := c.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 120 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	u, err := url.Parse(req.Endpoint)
 	if err != nil {
@@ -314,7 +324,17 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 	q.Set("session_id", req.SessionID)
 	u.RawQuery = q.Encode()
 
-	conn, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{
+	// The handshake and the opening message get their own bound: before the turn
+	// has been asked for there is no activity to measure, so the idle window is
+	// the natural budget for getting connected.
+	//
+	// Cancelling this does not touch the returned conn -- coder/websocket derives
+	// its own context for the handshake and cancels it before returning (see
+	// dial.go's `defer cancel()`), so the conn never depends on it.
+	dialCtx, dialCancel := context.WithTimeout(ctx, idleTimeout)
+	defer dialCancel()
+
+	conn, _, err := websocket.Dial(dialCtx, u.String(), &websocket.DialOptions{
 		// Pico Protocol authenticates via the token.<token> subprotocol.
 		Subprotocols: []string{"token." + req.AuthToken},
 	})
@@ -336,15 +356,24 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 	if err != nil {
 		return "", err
 	}
-	if err := conn.Write(ctx, websocket.MessageText, send); err != nil {
+	if err := conn.Write(dialCtx, websocket.MessageText, send); err != nil {
 		return "", fmt.Errorf("failed to send message to picoclaw: %w", err)
 	}
+
+	// The reader's own context, cancelled the moment RunTurn returns.
+	//
+	// It can be parked on `frames <- f` with nobody left to drain it, and it only
+	// unparks on this context. Tying it to the caller's would leave one goroutine
+	// (and its connection) parked for the caller's whole budget -- minutes -- on
+	// every turn that gives up.
+	readCtx, readCancel := context.WithCancel(ctx)
+	defer readCancel()
 
 	frames := make(chan Frame)
 	readErr := make(chan error, 1)
 	go func() {
 		for {
-			_, data, err := conn.Read(ctx)
+			_, data, err := conn.Read(readCtx)
 			if err != nil {
 				readErr <- err
 				return
@@ -355,7 +384,7 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 			}
 			select {
 			case frames <- f:
-			case <-ctx.Done():
+			case <-readCtx.Done():
 				return
 			}
 		}
@@ -367,10 +396,20 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 		<-grace.C
 	}
 
+	// Silence budget. Reset by EVERY inbound frame, so a turn that keeps
+	// narrating its work is never cut off no matter how long it runs; only one
+	// that stops talking is.
+	idle := time.NewTimer(idleTimeout)
+	defer stopTimer(idle)
+
 	for {
 		select {
 		case <-ctx.Done():
-			return "", errors.New("timed out waiting for picoclaw response")
+			// The CALLER's bound, not ours: its total-duration budget expired, or
+			// it gave up on the turn.
+			return "", fmt.Errorf("picoclaw turn abandoned by caller: %w", ctx.Err())
+		case <-idle.C:
+			return "", fmt.Errorf("timed out waiting for picoclaw: no frame for %s", idleTimeout)
 		case err := <-readErr:
 			// Connection closed/failed before we finalized.
 			return "", fmt.Errorf("picoclaw connection closed before response: %w", err)
@@ -378,6 +417,7 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 			// Grace elapsed with no new activity — the turn is done.
 			return proc.finalContent(), nil
 		case f := <-frames:
+			stopTimer(idle)
 			sig := proc.handle(f)
 			if sig.errMsg != "" {
 				return "", errors.New(sig.errMsg)
@@ -386,7 +426,13 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 				stopTimer(grace)
 			}
 			if sig.arm {
+				// The answer is complete and grace owns the wait from here. The
+				// silence that follows is the turn ENDING, so the idle timer stays
+				// stopped -- leaving it running would race graceWindow and report a
+				// dead connection for a turn that just finished.
 				grace.Reset(graceWindow)
+			} else {
+				idle.Reset(idleTimeout)
 			}
 		}
 	}

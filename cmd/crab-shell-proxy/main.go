@@ -54,7 +54,7 @@ func main() {
 		Cfg:      cfg,
 		Resolver: identity.NewSDKResolver(),
 		Mgr:      mgr,
-		Pico:     &pico.Client{TurnTimeout: cfg.TurnTimeout.Std()},
+		Pico:     &pico.Client{IdleTimeout: cfg.TurnIdleTimeout.Std()},
 		Logf:     logger.Printf,
 		Reg:      reg,
 		// The knowledge-graph memory. Rooted at the CONTAINER data root because this
