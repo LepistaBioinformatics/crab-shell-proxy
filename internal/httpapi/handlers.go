@@ -282,6 +282,10 @@ func (s *Server) Handler() http.Handler {
 	// resume-turn-after-reload: lets a client that lost its stream (a page reload)
 	// find out whether the turn is still running, instead of guessing from silence.
 	mux.HandleFunc("GET /v1/turns/active", s.handleTurnsActive)
+	// background-turn-dock: the same question without a session id. `active` can confirm
+	// a conversation the client still remembers; only this one can discover the ones a
+	// page reload made it forget.
+	mux.HandleFunc("GET /v1/turns/running", s.handleTurnsRunning)
 	mux.HandleFunc("GET /v1/sessions/resolve", s.handleSessionsResolve)
 	// user-owned-models: a member's own model, and which one they run. Under
 	// /v1/models/ rather than /v1/secrets/ because it is a model, not a
@@ -1618,4 +1622,67 @@ func (s *Server) handleTurnsActive(w http.ResponseWriter, r *http.Request) {
 	}
 	active := s.turns != nil && s.turns.Active(scopeOf(key), sessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"active": active})
+}
+
+// handleTurnsRunning lists every conversation with a turn in flight for the caller.
+//
+// It is handleTurnsActive's sibling, and the difference is the whole reason it exists:
+// `active` takes one session_id, so a client can confirm a conversation it still knows
+// about but cannot discover the ones it forgot. A page reload forgets all of them, and
+// background-turn-dock has to put them back on screen.
+//
+// Every guard above is reproduced deliberately rather than shared: two sibling reads
+// where one enforces less than the other is how an authorization hole gets introduced by
+// a later edit to only one of them. The three traps handleTurnsActive documents apply
+// here unchanged — RAW session ids, no `project`, and no hashing.
+//
+// It also has NO container side effects, and that is load-bearing rather than incidental:
+// a dock restore fans this out across every workspace the member has, so a read that
+// provisioned would turn one page reload into a fleet start.
+func (s *Server) handleTurnsRunning(w http.ResponseWriter, r *http.Request) {
+	agent, status, msg := s.resolveAgent(r)
+	if status != 0 {
+		writeJSON(w, status, errBody(msg))
+		return
+	}
+	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized,
+			errBody("missing or invalid "+identity.ProfileHeader+" header"))
+		return
+	}
+	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
+		return
+	}
+	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
+		return
+	}
+	// Same account-switching guard as every other member-scoped read.
+	if ident.Profile.AccID == subsAccID {
+		writeJSON(w, http.StatusForbidden,
+			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
+		return
+	}
+
+	key := docker.WorkspaceKey{
+		TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
+		Role: agent.Key, UserAccID: ident.AccID,
+	}
+
+	// Initialised, never nil: a nil slice marshals to `null`, and a client that has to
+	// branch on null before it can iterate is a client that will forget to.
+	out := []map[string]any{}
+	if s.turns != nil {
+		for _, rec := range s.turns.List(scopeOf(key)) {
+			out = append(out, map[string]any{
+				"session_id": rec.SessionID,
+				"since":      rec.Since.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"turns": out})
 }
