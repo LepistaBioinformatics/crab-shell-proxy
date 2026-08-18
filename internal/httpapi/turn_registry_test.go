@@ -3,6 +3,7 @@ package httpapi
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
 )
@@ -261,5 +262,139 @@ func TestActiveIsScopedToTheWorkspace(t *testing.T) {
 	defer end()
 	if r.Active(regScope("u2"), "conv-a") {
 		t.Error("another member's workspace reported this conversation active")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// background-turn-dock: List, and the first-seen timestamp it reports
+// ---------------------------------------------------------------------------
+
+// The reason List cannot be built on Current. Current refuses when two turns are in
+// flight, because mislabelling a memory write is worse than not labelling it. The dock
+// is asked exactly in that case — the member left two conversations running — so a List
+// routed through Current would answer "nothing is running" precisely when something is.
+func TestListReportsEveryConcurrentConversation(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	sc := regScope("u1")
+	endA := r.Begin(sc, "conv-a")
+	defer endA()
+	endB := r.Begin(sc, "conv-b")
+	defer endB()
+
+	if _, ok := r.Current(sc); ok {
+		t.Fatal("Current attributed a workspace with two turns; this test's premise is gone")
+	}
+
+	got := r.List(sc)
+	if len(got) != 2 {
+		t.Fatalf("List returned %d entries; want both concurrent conversations", len(got))
+	}
+	seen := map[string]bool{}
+	for _, e := range got {
+		seen[e.SessionID] = true
+	}
+	for _, id := range []string{"conv-a", "conv-b"} {
+		if !seen[id] {
+			t.Errorf("List omitted %q", id)
+		}
+	}
+}
+
+func TestListOnAnIdleScopeIsEmpty(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	if got := r.List(regScope("u1")); len(got) != 0 {
+		t.Errorf("List on an idle workspace returned %d entries; want none", len(got))
+	}
+}
+
+func TestListIsScopedToTheWorkspace(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	end := r.Begin(regScope("u1"), "conv-a")
+	defer end()
+	if got := r.List(regScope("u2")); len(got) != 0 {
+		t.Errorf("another member's workspace listed %d entries", len(got))
+	}
+}
+
+// Oldest first, so the dock's segments do not reshuffle between a probe and a store
+// update, and the conversation most at risk of being forgotten is the one that survives
+// the segment cap.
+func TestListIsSortedOldestFirst(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	base := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	tick := base
+	r.now = func() time.Time { return tick }
+	sc := regScope("u1")
+
+	tick = base.Add(2 * time.Minute)
+	endLate := r.Begin(sc, "conv-late")
+	defer endLate()
+	tick = base
+	endEarly := r.Begin(sc, "conv-early")
+	defer endEarly()
+
+	got := r.List(sc)
+	if len(got) != 2 {
+		t.Fatalf("List returned %d entries; want 2", len(got))
+	}
+	if got[0].SessionID != "conv-early" || got[1].SessionID != "conv-late" {
+		t.Errorf("List order = %q, %q; want conv-early first", got[0].SessionID, got[1].SessionID)
+	}
+}
+
+// FIRST-seen, not last-seen. Begin is re-entrant by design (a retry, or a resolve
+// alongside a turn, increments the same key), so resetting on the second Begin would
+// report a nine-minute turn as fresh — the exact lie the timestamp exists to remove.
+func TestListSinceIsFirstSeenAndDoesNotReset(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	start := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	tick := start
+	r.now = func() time.Time { return tick }
+	sc := regScope("u1")
+
+	end1 := r.Begin(sc, "conv-a")
+	defer end1()
+	tick = start.Add(9 * time.Minute)
+	end2 := r.Begin(sc, "conv-a")
+	defer end2()
+
+	got := r.List(sc)
+	if len(got) != 1 {
+		t.Fatalf("List returned %d entries; two overlapping requests are ONE conversation", len(got))
+	}
+	if !got[0].Since.Equal(start) {
+		t.Errorf("Since = %v; want %v — the second Begin moved the clock forward", got[0].Since, start)
+	}
+}
+
+// The timestamp goes when the entry goes: a later turn on the same conversation is a
+// new turn, and must not inherit the previous one's age.
+func TestListSinceIsDroppedWithTheEntry(t *testing.T) {
+	t.Parallel()
+	r := newTurnRegistry()
+	start := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	tick := start
+	r.now = func() time.Time { return tick }
+	sc := regScope("u1")
+
+	r.Begin(sc, "conv-a")()
+	if got := r.List(sc); len(got) != 0 {
+		t.Fatalf("List returned %d entries after the turn ended", len(got))
+	}
+
+	tick = start.Add(time.Hour)
+	end := r.Begin(sc, "conv-a")
+	defer end()
+	got := r.List(sc)
+	if len(got) != 1 {
+		t.Fatalf("List returned %d entries; want the new turn", len(got))
+	}
+	if !got[0].Since.Equal(tick) {
+		t.Errorf("Since = %v; want %v — the new turn inherited the old entry's age", got[0].Since, tick)
 	}
 }
