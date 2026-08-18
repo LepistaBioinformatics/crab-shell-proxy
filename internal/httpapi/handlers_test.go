@@ -1456,3 +1456,155 @@ func TestTurnsActiveIsScopedToTheCaller(t *testing.T) {
 		t.Errorf("another member's turn leaked into this caller's answer: %s", w.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GET /v1/turns/running — background-turn-dock
+// ---------------------------------------------------------------------------
+
+func turnsRunningReq(t *testing.T, query string, headers map[string]string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/v1/turns/running?"+query, nil)
+	for k, v := range headers {
+		r.Header.Set(k, v)
+	}
+	return r
+}
+
+// The reason the route exists at all: /v1/turns/active takes ONE session_id, so it can
+// confirm a conversation the client already knows about but cannot discover the ones a
+// page reload made it forget.
+func TestTurnsRunningListsEveryInFlightConversation(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := s.Handler()
+	q := "tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, turnsRunningReq(t, q, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	// An initialised slice, never null: a client that has to branch on null before it
+	// can iterate is a client that will forget to.
+	if !strings.Contains(w.Body.String(), `"turns":[]`) {
+		t.Errorf("idle workspace should answer an empty array, got %s", w.Body.String())
+	}
+
+	scope := memgraph.Scope{TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: accAlice}
+	endA := s.turns.Begin(scope, "conv-a")
+	defer endA()
+	endB := s.turns.Begin(scope, "conv-b")
+	defer endB()
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, turnsRunningReq(t, q, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Turns []struct {
+			SessionID string    `json:"session_id"`
+			Since     time.Time `json:"since"`
+		} `json:"turns"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body.String())
+	}
+	if len(got.Turns) != 2 {
+		t.Fatalf("listed %d turns, want 2: %s", len(got.Turns), w.Body.String())
+	}
+	for _, e := range got.Turns {
+		if e.Since.IsZero() {
+			t.Errorf("%q carries no `since`; a restored chip has no other clock", e.SessionID)
+		}
+	}
+}
+
+// The same trap handleTurnsActive documents: Begin records the RAW session id, not
+// identity.SessionKey's hash. A listing that hashed would return ids the webapp cannot
+// navigate to — worse than an empty answer, because it looks like it worked.
+func TestTurnsRunningReturnsRawSessionIDs(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := s.Handler()
+	scope := memgraph.Scope{TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: accAlice}
+	end := s.turns.Begin(scope, "conv-a")
+	defer end()
+
+	if identity.SessionKey(accAlice, "conv-a") == "conv-a" {
+		t.Skip("SessionKey is identity here; the confusion this guards is impossible")
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if !strings.Contains(w.Body.String(), `"session_id":"conv-a"`) {
+		t.Errorf("raw session id absent from the listing: %s", w.Body.String())
+	}
+}
+
+// No session_id — that is the whole difference from /v1/turns/active, and requiring it
+// here by reflex would make the route useless.
+func TestTurnsRunningRequiresTenantAndSubsOnly(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	for _, q := range []string{
+		"subs_acc_id=" + subsX, // missing tenant_id
+		"tenant_id=" + tenantT, // missing subs_acc_id
+		"tenant_id=nope&subs_acc_id=" + subsX,
+	} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, turnsRunningReq(t, q, goodHeaders(t)))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("query %q: status = %d, want 400", q, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Errorf("no session_id is the point of this route; status = %d, want 200", w.Code)
+	}
+}
+
+func TestTurnsRunningAccountSwitchGuard(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := headersFor(t, licensedProfile(subsX, tenantT, subsX, "alpha", "write", true))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, h))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestTurnsRunningRejectsAMissingProfile(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := goodHeaders(t)
+	delete(h, identity.ProfileHeader)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, h))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestTurnsRunningRejectsAMissingServiceName(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := goodHeaders(t)
+	delete(h, identity.ServiceNameHeader)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, h))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+// Another member's turns must never appear in this caller's listing.
+func TestTurnsRunningIsScopedToTheCaller(t *testing.T) {
+	s := testServer(scaffoldedOrch(), &fakeTurner{})
+	h := s.Handler()
+	end := s.turns.Begin(memgraph.Scope{
+		TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: "someone-else",
+	}, "conv-a")
+	defer end()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if !strings.Contains(w.Body.String(), `"turns":[]`) {
+		t.Errorf("another member's turns leaked into this caller's listing: %s", w.Body.String())
+	}
+}
