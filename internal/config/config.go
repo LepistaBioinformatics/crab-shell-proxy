@@ -239,10 +239,12 @@ type Config struct {
 	// it is reachable by on the container network, so this is configuration.
 	MCPBaseURL string `yaml:"mcpBaseURL"`
 
-	// Media upload caps (media-upload feature). MediaMaxBytes bounds an
-	// uploaded file; MediaAllowedExts is the lowercase extension allowlist.
-	MediaMaxBytes    int64    `yaml:"mediaMaxBytes"`
-	MediaAllowedExts []string `yaml:"mediaAllowedExts"`
+	// MediaMaxBytes bounds an uploaded file (media-upload feature). It is the
+	// only thing an upload is checked against: the extension allowlist that used
+	// to sit beside it was removed, because a member's file format is not
+	// something this proxy has any way to be right about — see
+	// .specs/quick/002-drop-media-ext-allowlist.
+	MediaMaxBytes int64 `yaml:"mediaMaxBytes"`
 
 	// ResolvedWebhookSecret is filled by Load from WebhookSecret.
 	ResolvedWebhookSecret string `yaml:"-"`
@@ -392,20 +394,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MediaMaxBytes == 0 {
 		c.MediaMaxBytes = 10 << 20 // 10 MiB
-	}
-	if len(c.MediaAllowedExts) == 0 {
-		c.MediaAllowedExts = []string{
-			// images
-			"png", "jpg", "jpeg", "webp", "gif",
-			// documents (incl. MS Word + OpenDocument)
-			"pdf", "txt", "md", "csv", "doc", "docx", "odt",
-			// spreadsheets (MS Excel + OpenDocument)
-			"xls", "xlsx", "ods",
-			// presentations (MS PowerPoint + OpenDocument)
-			"ppt", "pptx", "odp",
-			// archives
-			"zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar",
-		}
 	}
 }
 

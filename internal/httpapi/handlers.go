@@ -1235,12 +1235,6 @@ func (s *Server) handleMediaPost(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	if !s.mediaExtAllowed(header.Filename) {
-		writeJSON(w, http.StatusBadRequest,
-			errBody("file type not allowed (allowed: "+strings.Join(s.Cfg.MediaAllowedExts, ", ")+")"))
-		return
-	}
-
 	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
 	if !ok {
 		return
@@ -1485,18 +1479,6 @@ func (s *Server) handleMemoryPut(w http.ResponseWriter, r *http.Request) {
 	s.logf("memory: wrote svc=%s tenant=%s subs=%s user=%s bytes=%d",
 		agent.Key, tenantID, subsAccID, ident.AccID, len(req.Content))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-}
-
-// mediaExtAllowed reports whether a filename's (lowercased) extension is in the
-// configured upload allowlist.
-func (s *Server) mediaExtAllowed(name string) bool {
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
-	for _, allowed := range s.Cfg.MediaAllowedExts {
-		if allowed == ext {
-			return true
-		}
-	}
-	return false
 }
 
 // handleHealthz is unauthenticated (mycelium's health dispatcher issues a plain

@@ -218,6 +218,25 @@ func TestChatUnknownProjectIs404(t *testing.T) {
 // string to put it in, which is how it came to be dropped.
 func mediaUploadReq(t *testing.T, project string) *http.Request {
 	t.Helper()
+	return mediaUploadReqNamed(t, project, "analysis.zip")
+}
+
+// mediaUploadReqNamed is mediaUploadReq with the filename left to the caller —
+// what the file is CALLED is the whole subject of the upload-type tests.
+func mediaUploadReqNamed(t *testing.T, project, filename string) *http.Request {
+	t.Helper()
+	return mediaUploadReqSizedProject(t, project, filename, 0)
+}
+
+// mediaUploadReqSized posts `size` bytes under `filename`, for the tests that are
+// about the size cap. A zero size keeps the original short payload.
+func mediaUploadReqSized(t *testing.T, filename string, size int) *http.Request {
+	t.Helper()
+	return mediaUploadReqSizedProject(t, "", filename, size)
+}
+
+func mediaUploadReqSizedProject(t *testing.T, project, filename string, size int) *http.Request {
+	t.Helper()
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	for k, v := range map[string]string{"tenant_id": tenantT, "subs_acc_id": subsX} {
@@ -230,11 +249,15 @@ func mediaUploadReq(t *testing.T, project string) *http.Request {
 			t.Fatal(err)
 		}
 	}
-	part, err := form.CreateFormFile("file", "analysis.zip")
+	part, err := form.CreateFormFile("file", filename)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write([]byte("PK\x03\x04zipbytes")); err != nil {
+	payload := []byte("PK\x03\x04zipbytes")
+	if size > 0 {
+		payload = bytes.Repeat([]byte("x"), size)
+	}
+	if _, err := part.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 	if err := form.Close(); err != nil {
@@ -249,11 +272,10 @@ func mediaUploadReq(t *testing.T, project string) *http.Request {
 	return r
 }
 
-// uploadServer is testServer with the media allowlist and size cap the upload
-// handler checks before it ever looks at the project.
+// uploadServer is testServer with the size cap the upload handler checks before
+// it ever looks at the project. The cap is the only gate left on an upload.
 func uploadServer(orch *fakeOrch) *Server {
 	s := testServer(orch, &fakeTurner{})
-	s.Cfg.MediaAllowedExts = []string{"zip"}
 	s.Cfg.MediaMaxBytes = 1 << 20
 	return s
 }
