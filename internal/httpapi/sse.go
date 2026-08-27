@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
@@ -17,6 +18,22 @@ import (
 // request. It must be generous enough for a long tool-using turn, but stops a
 // stuck turn from running forever after the client has gone.
 const turnTimeout = 10 * time.Minute
+
+// heartbeatInterval is how often an in-flight turn writes a keep-alive comment.
+//
+// picoclaw does not stream: it answers in one terminal frame, and a measured
+// tool-free turn emitted NOTHING for 51 seconds (chat-responsiveness OQ-1). Between
+// its frames this stream is genuinely idle, and an idle connection can be reclaimed
+// by any hop between here and the browser -- Traefik, the BFF, mycelium, or the
+// member's own carrier/NAT/VPN, which is the hop we can neither see nor configure.
+//
+// Ten seconds is chosen against the TIGHTEST plausible hop, not against mycelium's
+// gatewayTimeout (60s). That 60 is the loosest bound in the chain and the only one
+// written down; mobile NAT and edge idle timeouts sit well below it.
+//
+// NOT configurable on purpose: a knob here cannot be set correctly without knowing
+// the member's carrier.
+const heartbeatInterval = 10 * time.Second
 
 // streamTurn serves a streaming (SSE) chat completion.
 //
@@ -39,7 +56,25 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	w.WriteHeader(http.StatusOK)
 
 	created := time.Now().Unix()
-	writeChunk := func(delta map[string]any, finish any) {
+
+	// Every write to `w` goes through writeMu.
+	//
+	// Until the heartbeat below existed there was exactly ONE writer -- streamTurn
+	// runs on the request goroutine and RunTurn calls the sinks inline -- so this
+	// file needed no lock and had none. The heartbeat is a second goroutine writing
+	// the same http.ResponseWriter, which is a data race, and an interleaved write
+	// would corrupt a frame the client is mid-parse on.
+	//
+	// The lock is function-local: it protects ONE response, and two concurrent turns
+	// share nothing.
+	//
+	// Go mutexes are not reentrant, so the emit* closures below are the UNLOCKED
+	// bodies and the write* closures are the locking wrappers. `done` needs the
+	// unlocked one: it writes two frames (the finish_reason chunk and [DONE]) and
+	// must hold the lock across BOTH, or a heartbeat could land between them.
+	var writeMu sync.Mutex
+
+	emitChunk := func(delta map[string]any, finish any) {
 		payload := map[string]any{
 			"id":      id,
 			"object":  "chat.completion.chunk",
@@ -57,7 +92,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	// skips the frame: the extension is ignored, never a parse error. A named
 	// SSE event (`event: progress`) would instead be dropped wholesale by
 	// data:-only parsers, so this shape is the compatible one.
-	writeProgress := func(p turn.Progress) {
+	emitProgress := func(p turn.Progress) {
 		payload := map[string]any{
 			"id":      id,
 			"object":  "chat.completion.chunk",
@@ -82,7 +117,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	// "broke". Without it, both paths are silent — picoclaw's error text is not
 	// persisted, so any client that treats it as content loses it to the next
 	// reconcile against the durable transcript, and a RunTurn error was only logged.
-	writeError := func(message string) {
+	emitError := func(message string) {
 		payload := map[string]any{
 			"id":      id,
 			"object":  "chat.completion.chunk",
@@ -97,8 +132,30 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
+	// The locking wrappers. Everything outside this block calls these, never the
+	// emit* bodies above.
+	writeChunk := func(delta map[string]any, finish any) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		emitChunk(delta, finish)
+	}
+	writeProgress := func(p turn.Progress) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		emitProgress(p)
+	}
+	writeError := func(message string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		emitError(message)
+	}
 	done := func() {
-		writeChunk(map[string]any{}, "stop")
+		// One critical section for both frames, deliberately: they are the turn's
+		// terminal signal and the client treats "no marker" as a cut, so nothing may
+		// be written between them.
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		emitChunk(map[string]any{}, "stop")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}
@@ -116,9 +173,64 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	defer cancel()
 	clientCtx := r.Context()
 
+	// Keep the connection carrying bytes for as long as the turn runs.
+	//
+	// The frame is an SSE COMMENT, and that is load-bearing rather than cosmetic. The
+	// webapp derives its "quiet for" readout and its background-turn dock chips from
+	// the timestamp of the last EVENT (background-turn-dock DEC-12: "a chip and the
+	// band it corresponds to can never disagree"). A heartbeat shaped as an
+	// empty-delta x_crab_progress chunk -- the obvious shape, since that extension
+	// already exists -- would stamp that timestamp every ten seconds and pin the
+	// readout at zero forever, silently deleting long-turn-resilience FR-11/FR-12.
+	//
+	// A comment cannot: the client's consumeStream skips every line that does not
+	// start with "data:" BEFORE any bookkeeping runs. So this needs no webapp change
+	// at all, and that property is worth preserving.
+	//
+	// stopHeartbeat WAITS for the goroutine to exit. Cancelling without waiting would
+	// let a ping be written after streamTurn returns, i.e. to a ResponseWriter that is
+	// no longer valid.
+	hbCtx, cancelHeartbeat := context.WithCancel(turnCtx)
+	hbDone := make(chan struct{})
+	var hbOnce sync.Once
+	stopHeartbeat := func() {
+		hbOnce.Do(func() {
+			cancelHeartbeat()
+			<-hbDone
+		})
+	}
+	defer stopHeartbeat()
+	every := s.heartbeatEvery
+	if every <= 0 {
+		every = heartbeatInterval
+	}
+	go func() {
+		defer close(hbDone)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				// Same guard as every sink: the client being gone stops us WRITING,
+				// never the turn. Keep ticking rather than returning -- the turn is
+				// still draining and nothing here decides its lifetime.
+				if clientCtx.Err() != nil {
+					continue
+				}
+				writeMu.Lock()
+				fmt.Fprint(w, ": ping\n\n")
+				flusher.Flush()
+				writeMu.Unlock()
+			}
+		}
+	}()
+
 	tgt, err := s.Mgr.EnsureRunning(turnCtx, agent, key, ownerEmail)
 	if err != nil {
 		s.logf("stream: ensure running failed: %v", err)
+		stopHeartbeat()
 		if clientCtx.Err() == nil {
 			done()
 		}
@@ -190,6 +302,11 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
 		s.logf("stream: sync durable history failed: %v", syncErr)
 	}
+	// Before done(), not merely at function exit: a ping interleaved between the
+	// finish_reason chunk and [DONE] would be harmless to parse but is exactly the
+	// sort of thing a later reader of a packet capture spends an hour on. done()
+	// holding writeMu across both frames closes the window; this closes it earlier.
+	stopHeartbeat()
 	if clientCtx.Err() == nil {
 		done()
 	}

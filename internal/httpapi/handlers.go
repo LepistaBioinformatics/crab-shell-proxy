@@ -260,6 +260,15 @@ type Server struct {
 	// probes throttles the connectivity test in user_models.go. Per account, so
 	// one member cannot spend the instance's outbound budget while another waits.
 	probes *probeLimiter
+
+	// heartbeatEvery overrides the SSE keep-alive cadence. Zero means
+	// heartbeatInterval, which is what production always uses -- this exists ONLY so
+	// a test can shorten a ten-second wait, and it is a FIELD rather than a package
+	// var for the same reason turnRegistry.now is: the tests run t.Parallel().
+	//
+	// It is deliberately unexported: this is a test seam, not configuration. See
+	// heartbeatInterval for why the cadence is not a knob.
+	heartbeatEvery time.Duration
 }
 
 // Handler returns the routed http.Handler.
