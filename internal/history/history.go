@@ -92,6 +92,17 @@ type jsonlEntry struct {
 // at the top level) never mistakes it for one of its sessions. picoclaw rewrites
 // its live file from its in-memory session and loses earlier turns on a restart;
 // this file only ever grows, so the conversation history survives restarts.
+//
+// CORRECTION (2026-08-28): the restart claim above describes picoclaw's OLD
+// in-memory session.SessionManager. v0.3.1 runs the JSONL store by default
+// (agent/instance.go initSessionStore), and JSONLStore.GetHistory re-reads the
+// session file on every call (pkg/memory/jsonl.go) — so a restart no longer
+// costs the agent its history. The fold-forward is kept anyway: it is what makes
+// the transcript this package SERVES independent of picoclaw's own file
+// lifecycle, and the migration path back to a rewriting store is not ours to
+// control. Established while tracing
+// .specs/features/project-chat-context-loss/investigation.md; that document is
+// where the evidence lives.
 const durableDir = "durable"
 
 // Read returns the plain user/assistant turns for the conversation whose
