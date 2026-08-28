@@ -57,6 +57,14 @@ var ManagedConfigPaths = []string{
 	"agents.defaults.model_name",
 	"agents.defaults.model_fallbacks",
 	"agents.defaults.workspace",
+	// Which context manager assembles a turn's history. Pinned (materialize.go,
+	// PinnedContextManager) rather than left editable, because this key decides
+	// WHERE a conversation's context lives, and the two implementations do not
+	// share a store: switching it does not migrate anything, it silently starts
+	// every conversation over. It is also the key the picoclaw routed-agent patch
+	// is written against — see zombie-crab-project
+	// .specs/features/project-chat-context-loss/investigation.md, AD-019.
+	"agents.defaults.context_manager",
 	"channel_list.pico.enabled",
 	// The native memory-graph MCP server (applyMCPServer, mcp_config.go). Only the
 	// proxy's own "memory" entry is listed: a sibling server an operator added by

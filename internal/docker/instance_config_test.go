@@ -346,6 +346,67 @@ func TestWriteInstanceConfigReapplyRestoresManagedPaths(t *testing.T) {
 	}
 }
 
+// An admin who sets agents.defaults.context_manager gets it taken back.
+//
+// This is not a variation on the test above -- it is the one managed path that
+// exists to stop an EDIT rather than to keep a materialization authoritative.
+// Switching context managers migrates nothing (the two keep separate stores), so
+// an admin flipping it on someone else's workspace silently starts every
+// conversation in it over, with no error and nothing for the member to see but an
+// agent that has forgotten them.
+func TestWriteInstanceConfigPinsContextManager(t *testing.T) {
+	m, reg, key, path := instanceConfigFixture(t, validConfigBody)
+	userDir := filepath.Dir(path)
+	sec := "channel_list:\n  pico:\n    settings:\n      token: pico-seed\n"
+	if err := os.WriteFile(filepath.Join(userDir, ".security.yml"), []byte(sec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.CreateModel(registry.Model{
+		ModelName: "main", Provider: "openai", Model: "gpt-5.4",
+		APIBase: "https://api.openai.com/v1", APIKey: "sk-main", Status: registry.StatusActive,
+	}); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	if err := reg.SetScopeDefault(registry.ScopeSel{Level: registry.LevelGlobal}, "main"); err != nil {
+		t.Fatalf("SetScopeDefault: %v", err)
+	}
+
+	tampered := strings.Replace(validConfigBody,
+		`"model_name": "main"`,
+		`"model_name": "main",
+      "context_manager": "seahorse"`, 1)
+	got, reapplied, err := m.WriteInstanceConfig(key, tampered, "")
+	if err != nil {
+		t.Fatalf("WriteInstanceConfig: %v", err)
+	}
+	if !reapplied.OK {
+		t.Fatalf("reapply failed: %s", reapplied.Detail)
+	}
+	if strings.Contains(got.Raw, "seahorse") {
+		t.Errorf("an admin's context_manager survived the write:\n%s", got.Raw)
+	}
+	if !strings.Contains(got.Raw, `"context_manager": "`+PinnedContextManager+`"`) {
+		t.Errorf("context_manager was not pinned to %q:\n%s", PinnedContextManager, got.Raw)
+	}
+}
+
+// The bulk editor refuses the key outright rather than letting the admin fan an
+// edit out and discover afterwards that it did not stick. Both halves are
+// checked: the histogram an admin reads BEFORE deciding, and the apply.
+func TestScopeConfigKeyRefusesContextManager(t *testing.T) {
+	m, _, _, _ := instanceConfigFixture(t, validConfigBody)
+	scope := Scope{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1", AgentKey: "alpha"}
+
+	if _, err := m.InspectScopeConfigKey(scope, "agents.defaults.context_manager"); !errors.Is(err, ErrManagedConfigPath) {
+		t.Errorf("InspectScopeConfigKey err = %v, want ErrManagedConfigPath", err)
+	}
+	if _, err := m.ApplyScopeConfigKey(scope, ScopeConfigChange{
+		Key: "agents.defaults.context_manager", Value: json.RawMessage(`"seahorse"`),
+	}); !errors.Is(err, ErrManagedConfigPath) {
+		t.Errorf("ApplyScopeConfigKey err = %v, want ErrManagedConfigPath", err)
+	}
+}
+
 // TestManagedConfigPathsMatchWriters is the anti-drift gate. It works
 // behaviourally rather than by reading source: seed a config whose every managed
 // path holds a sentinel, run BOTH writers, and assert that exactly the listed
@@ -359,7 +420,7 @@ func TestManagedConfigPathsMatchWriters(t *testing.T) {
 	seed := map[string]any{
 		"version":      3,
 		"model_list":   []any{map[string]any{"model_name": "sentinel"}},
-		"agents":       map[string]any{"defaults": map[string]any{"provider": "sentinel", "model_name": "sentinel", "model_fallbacks": []any{"sentinel"}, "workspace": "/sentinel", "max_tokens": 1234}},
+		"agents":       map[string]any{"defaults": map[string]any{"provider": "sentinel", "model_name": "sentinel", "model_fallbacks": []any{"sentinel"}, "workspace": "/sentinel", "context_manager": "sentinel", "max_tokens": 1234}},
 		"channel_list": map[string]any{"pico": map[string]any{"enabled": false}},
 		// tools.mcp with an (empty) servers container, which is the shape a real
 		// picoclaw config.json always has — the bundled template ships

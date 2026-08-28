@@ -19,9 +19,42 @@ type projectList struct {
 	Projects []projects.Project
 }
 
+// PinnedContextManager is the value agents.defaults.context_manager is held at
+// in every workspace.
+//
+// WHY IT IS PINNED AT ALL. That key selects which ContextManager assembles a
+// turn's history, and picoclaw activates exactly one per process. The
+// implementations do NOT share a store: "legacy" reads the agent's session
+// JSONL, "seahorse" reads its own SQLite. Switching therefore migrates nothing —
+// it silently starts every conversation over, and switching back strands
+// whatever accumulated in between. There is no error, no warning, and no way for
+// a member to tell it from the agent having forgotten them. That is not a knob
+// an admin should be able to turn from a config editor on someone else's
+// workspace.
+//
+// WHY "legacy" SPECIFICALLY. It is what picoclaw already defaults to when the key
+// is absent (pkg/agent/turn_coord.go resolveContextManager), so pinning it
+// changes no behaviour anywhere — it only removes the ability to change it. It is
+// also the manager the routed-agent patch this stack carries is written against;
+// seahorse has the same default-agent binding unfixed, in its DB path and its
+// summarization provider. See zombie-crab-project
+// .specs/features/project-chat-context-loss/investigation.md §5B, and AD-019.
+//
+// THE ESCAPE HATCH IS THIS CONSTANT, deliberately. Pinning here means the value
+// is re-imposed on every materialization, so a template edit or a hand edit in
+// the volume is overwritten too, not just an admin's. Adopting seahorse is a
+// reviewed change to this line plus a plan for the transcripts it will orphan —
+// which is the weight that decision deserves.
+const PinnedContextManager = "legacy"
+
 // materializeModels writes a resolved model set into one workspace. It replaces
 // applyModel's model handling and is the ONLY writer of a workspace's model
 // configuration.
+//
+// It also pins agents.defaults.context_manager (PinnedContextManager). That is
+// not model configuration, and it lives here for the reason projectAgents does:
+// this function rewrites config.json wholesale on every materialization, so a
+// value written anywhere else would survive exactly until the next one.
 //
 // config.json gets full model_list entries WITHOUT api_key: picoclaw removed
 // api_key (singular) from config.json in schema V2+ and ignores it, and the
@@ -68,6 +101,7 @@ func materializeModels(configPath, secPath string, res registry.Resolution, proj
 	// this whole feature removes. An operator who edited agents.defaults out of a
 	// template gets it back, not a mystery.
 	defaults := childMap(childMap(cfg, "agents"), "defaults")
+	defaults["context_manager"] = PinnedContextManager
 	defaults["provider"] = res.Primary.Provider
 	defaults["model_name"] = res.Primary.ModelName
 	if names := res.ChainNames(); len(names) > 0 {
