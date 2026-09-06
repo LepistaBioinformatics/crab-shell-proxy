@@ -28,6 +28,28 @@ import (
 // declaring the turn finished (matches server.js's 500ms).
 const graceWindow = 500 * time.Millisecond
 
+// deliverySettleWindow is how long a turn that has delivered a FILE and no plain
+// message may stay silent before it is declared finished.
+//
+// picoclaw ends a tool-delivered turn without publishing anything: the handled-tool
+// branch (upstream pkg/agent/pipeline_execute.go) writes "Requested output delivered
+// via tool attachment." into the session and calls setFinalContent(""). The Pico
+// Protocol has no "turn over" frame, so silence after a delivery is the only signal
+// there is -- and without this the turn sat until IdleTimeout (600s in this
+// deployment) and was then reported as a failure. See
+// .specs/features/delivery-turn-never-finalizes/investigation.md.
+//
+// The value is a compromise between two real turns: one that is over (finalize fast)
+// and one that delivers a file mid-work and answers after another LLM round-trip
+// (never cut it). Twenty seconds clears a slow round-trip on this deployment -- a
+// measured turn with a provider retry took 23s end to end, of which the model call
+// was the bulk -- and is two orders of magnitude below the idle budget it replaces.
+//
+// It must stay far below httpapi's turnTimeout as well as IdleTimeout: the loop has
+// two exits, and only the idle one knows a settled delivery is a success. Let them
+// converge and a settled turn starts failing again through the caller's deadline.
+const deliverySettleWindow = 20 * time.Second
+
 // Frame is one Pico Protocol message.
 type Frame struct {
 	Type    string  `json:"type"`
@@ -85,8 +107,12 @@ type processor struct {
 	lastPlainID     string
 	hasPlainContent bool
 	isTyping        bool
-	sink            turn.Sink
-	lastProgress    turn.Progress
+	// hasDelivery records that the agent handed over a FILE on this turn. It is
+	// never part of the answer (A-02), but it is evidence the turn produced its
+	// output -- which is what a delivery-only turn has instead of a message.
+	hasDelivery  bool
+	sink         turn.Sink
+	lastProgress turn.Progress
 	// mediaBase is the harness origin ("http://name:18790") that an attachment's
 	// relative URL hangs off, and mediaToken the bearer it needs. They live here
 	// rather than in httpapi because resolving them means knowing that the
@@ -192,12 +218,19 @@ func (p *processor) handle(f Frame) signal {
 		// is handled before the plain-content branch on purpose. That branch would
 		// set lastPlainID to this frame's id, and picoclaw sends these with an
 		// empty caption -- so finalContent() would return "" and ERASE the answer
-		// on a non-streaming request. It must not arm the finalize grace either: the
-		// frame arrives inside picoclaw's own typing pair, and letting a delivery
-		// end a turn would cut the reply that follows it.
+		// on a non-streaming request. It still does not arm the finalize grace:
+		// letting a delivery end a turn on the spot would cut the reply that follows
+		// it, and a reply here is not always preceded by a fresh typing.start that
+		// would cancel the timer.
+		//
+		// What it does do is record that the turn produced its output, so that
+		// SILENCE after it means "over" rather than "wedged" -- see settling() and
+		// deliverySettleWindow. That is the difference between ending a turn early
+		// and ending one that has already finished.
 		//
 		// A non-empty caption is still the agent talking, so it goes out as content.
 		if len(pl.Attachments) > 0 {
+			p.hasDelivery = true
 			for _, a := range pl.Attachments {
 				p.sink.EmitAttachment(p.resolveAttachment(a))
 			}
@@ -261,6 +294,21 @@ func (p *processor) maybeArmGrace() signal {
 	return signal{arm: true}
 }
 
+// settling reports that the only thing this turn has produced is a file. The
+// completion machine has nothing to arm grace with -- no plain message will ever
+// arrive -- so silence is the turn's ending rather than a stalled connection.
+//
+// It stops being true the moment the agent speaks: from there the ordinary rules
+// (content + typing.stop + graceWindow) own the ending again. It is also false
+// while typing is live -- the harness saying a message is on its way, which is
+// the same condition maybeArmGrace refuses to finalize on, and the reason the
+// settle window can be short enough to be useful: a delivery is preceded by a
+// typing.stop (upstream preSendMedia stops typing before handing a file over), so
+// an agent that resumes work announces it and keeps the full idle budget.
+func (p *processor) settling() bool {
+	return p.hasDelivery && !p.hasPlainContent && !p.isTyping
+}
+
 // finalContent is the assistant answer to return once the turn finishes.
 func (p *processor) finalContent() string {
 	if p.lastPlainID == "" {
@@ -302,6 +350,29 @@ type Client struct {
 	// (httpapi's turnCtx). This one exists for a different failure: a connection
 	// that has gone quiet and is never coming back.
 	IdleTimeout time.Duration
+
+	// DeliverySettle is the silence tolerated AFTER the agent has delivered a file
+	// and before any plain assistant message -- see deliverySettleWindow, whose
+	// value it overrides (tests only; nothing configures it).
+	DeliverySettle time.Duration
+}
+
+// silenceBudget is how long the turn may stay quiet before the loop acts on it:
+// the idle window normally, the (much shorter) settle window once a delivery is
+// the turn's whole output. Never longer than the idle window, so this can only
+// make the wait shorter than it is today.
+func (c *Client) silenceBudget(p *processor, idleTimeout time.Duration) time.Duration {
+	if !p.settling() {
+		return idleTimeout
+	}
+	settle := c.DeliverySettle
+	if settle <= 0 {
+		settle = deliverySettleWindow
+	}
+	if settle > idleTimeout {
+		return idleTimeout
+	}
+	return settle
 }
 
 // RunTurn opens a Pico Protocol WebSocket to req.Endpoint (e.g.
@@ -409,6 +480,12 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 			// it gave up on the turn.
 			return "", fmt.Errorf("picoclaw turn abandoned by caller: %w", ctx.Err())
 		case <-idle.C:
+			// A turn whose only output was a file has now gone quiet for the settle
+			// window: that is it ENDING, not a dead connection. Reporting it as a
+			// failure is what made a delivered file look like a broken turn.
+			if proc.settling() {
+				return proc.finalContent(), nil
+			}
 			return "", fmt.Errorf("timed out waiting for picoclaw: no frame for %s", idleTimeout)
 		case err := <-readErr:
 			// Connection closed/failed before we finalized.
@@ -432,7 +509,7 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 				// dead connection for a turn that just finished.
 				grace.Reset(graceWindow)
 			} else {
-				idle.Reset(idleTimeout)
+				idle.Reset(c.silenceBudget(proc, idleTimeout))
 			}
 		}
 	}
