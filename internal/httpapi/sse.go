@@ -43,7 +43,7 @@ const heartbeatInterval = 10 * time.Second
 // on Docker. Once headers are sent the HTTP status can no longer change, so a
 // cold-start or turn failure is surfaced by closing the stream cleanly (a
 // [DONE] with no content) and logging — same as server.js.
-func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, ownerEmail, sessionKey, userContent, model, id, project string) {
+func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, ownerEmail, sessionKey, userContent, model, id, project string, steering bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, errBody("streaming unsupported"))
@@ -132,6 +132,29 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
+	// This request's message was folded into a turn that was already running, so the
+	// frames that follow belong to that turn and no separate answer is coming. Same
+	// shape as progress and error, for the same compatibility reason: an ordinary
+	// chunk with an empty delta plus one extra top-level field.
+	//
+	// An ANNOUNCEMENT, not a refusal. The turn it was folded into is the member's
+	// own conversation and its output is what they want to see; what they cannot
+	// know without this is why their message got no reply of its own.
+	emitSteering := func() {
+		payload := map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": nil}},
+			"x_crab_steering": map[string]any{
+				"folded": true,
+			},
+		}
+		b, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
 	// The locking wrappers. Everything outside this block calls these, never the
 	// emit* bodies above.
 	writeChunk := func(delta map[string]any, finish any) {
@@ -162,6 +185,14 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 
 	// Open the stream immediately so the connection survives the cold start.
 	writeChunk(map[string]any{"role": "assistant", "content": ""}, nil)
+	// Immediately after the opening chunk, before any wait: this is the one thing
+	// the member can act on (wait, or stop the running turn), and it is known
+	// before the harness is even contacted.
+	if steering {
+		writeMu.Lock()
+		emitSteering()
+		writeMu.Unlock()
+	}
 
 	// The turn must complete even if the client disconnects (page reload /
 	// navigation). Tying it to r.Context() would cancel the picoclaw WebSocket

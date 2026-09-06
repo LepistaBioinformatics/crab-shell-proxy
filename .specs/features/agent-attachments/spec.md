@@ -48,6 +48,11 @@ no amount of frontend work alone can fix it.
 - **A-03** An attachment frame must not arm the finalize grace timer by itself. It
   arrives inside picoclaw's own typing.start/stop pair, so the existing rules keep
   driving completion; an attachment must never end a turn early.
+  **Amended 2026-09-05 — see `delivery-turn-never-finalizes/investigation.md`.** The
+  premise that "the existing rules keep driving completion" does not hold when the
+  delivery is the turn's ONLY output: picoclaw publishes no plain message on that path,
+  so nothing ever arms grace and the turn hung for ten minutes. A delivery still does not
+  end a turn early; it now makes prolonged SILENCE after it mean "finished".
 - **A-04** `turn.Sink` gains an `Attachment` callback, as a struct field like
   `Progress` — so every harness runner has to acknowledge it at compile time rather
   than silently ignoring a new signal.

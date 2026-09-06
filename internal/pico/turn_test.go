@@ -562,3 +562,133 @@ func TestIdleTimeoutIsNotATotalCap(t *testing.T) {
 		t.Errorf("final = %q, want %q", got, "ok")
 	}
 }
+
+// TestDeliveryOnlyTurnFinalizes is the regression test for the ten-minute
+// spinner: picoclaw ends a tool-delivered turn WITHOUT publishing any plain
+// assistant message (upstream pipeline_execute.go's handled-tool branch writes
+// "Requested output delivered via tool attachment." to the session and calls
+// setFinalContent("")), so the completion machine's only trigger -- plain content
+// -- never fires. The turn used to sit here until turnIdleTimeout, which this
+// deployment sets to 600s, and was then reported as a FAILURE for work that had
+// succeeded.
+//
+// See .specs/features/delivery-turn-never-finalizes/investigation.md.
+func TestDeliveryOnlyTurnFinalizes(t *testing.T) {
+	const (
+		idle   = 10 * time.Second
+		settle = 200 * time.Millisecond
+	)
+
+	endpoint := picoServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.start"})
+		// The whole shape of the observed turn: typing stops BEFORE any content,
+		// the file goes out with an empty caption, and nothing follows.
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+		_ = writeFrame(ctx, conn, Frame{Type: "message.create", Payload: Payload{
+			MessageID: "m1", Content: "",
+			Attachments: []Attachment{{Type: "file", URL: "/pico/media/abc", Filename: "report.pdf"}},
+		}})
+	})
+
+	var files []turn.Attachment
+	c := &Client{IdleTimeout: idle, DeliverySettle: settle}
+	start := time.Now()
+	got, err := c.RunTurn(context.Background(), turn.Request{
+		Endpoint:  endpoint,
+		AuthToken: testToken,
+		SessionID: "s1",
+		Content:   "me manda o arquivo",
+	}, turn.Sink{Attachment: func(a turn.Attachment) { files = append(files, a) }})
+	elapsed := time.Since(start)
+
+	// A completion, not an error: the turn did everything it was asked to.
+	if err != nil {
+		t.Fatalf("RunTurn failed on a delivery-only turn: %v", err)
+	}
+	if got != "" {
+		t.Errorf("final content = %q, want empty: the delivery is not the answer", got)
+	}
+	if len(files) != 1 || files[0].Filename != "report.pdf" {
+		t.Errorf("delivered files = %+v, want exactly report.pdf", files)
+	}
+	// The point of the fix: the settle window, not the idle budget.
+	if elapsed > idle/2 {
+		t.Errorf("took %v to finalize with a %v settle window: the turn burned the idle budget",
+			elapsed, settle)
+	}
+}
+
+// TestAnswerAfterADeliveryIsNotCut guards the trade-off the settle window makes.
+// A delivery may only end a turn that has gone QUIET; a turn that keeps talking
+// still owns its ending, and its answer must survive. This is the property
+// agent-attachments A-03 was written to protect, kept.
+func TestAnswerAfterADeliveryIsNotCut(t *testing.T) {
+	const settle = 200 * time.Millisecond
+
+	endpoint := picoServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.start"})
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+		_ = writeFrame(ctx, conn, Frame{Type: "message.create", Payload: Payload{
+			MessageID: "m1", Content: "",
+			Attachments: []Attachment{{Type: "file", URL: "/pico/media/abc", Filename: "report.pdf"}},
+		}})
+		// The agent keeps working and answers inside the window.
+		time.Sleep(settle / 2)
+		_ = writeFrame(ctx, conn, msg("m2", "Salvei em public/attachments/report.pdf", "", false))
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+	})
+
+	c := &Client{IdleTimeout: 10 * time.Second, DeliverySettle: settle}
+	got, err := c.RunTurn(context.Background(), turn.Request{
+		Endpoint:  endpoint,
+		AuthToken: testToken,
+		SessionID: "s1",
+		Content:   "me manda o arquivo",
+	}, turn.Sink{})
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if got != "Salvei em public/attachments/report.pdf" {
+		t.Errorf("final = %q, want the answer that followed the delivery", got)
+	}
+}
+
+// TestDeliveryFollowedByTypingWaitsForTheAnswer covers the one shape where
+// silence after a delivery is NOT the turn ending: the agent went back to work
+// and said so. typing.start is the harness telling us a message is coming, and an
+// LLM round-trip is longer than any settle window worth having -- so while typing
+// is live the full idle budget applies, exactly as maybeArmGrace already requires
+// for the ordinary path.
+func TestDeliveryFollowedByTypingWaitsForTheAnswer(t *testing.T) {
+	const settle = 200 * time.Millisecond
+
+	endpoint := picoServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.start"})
+		// preSendMedia stops typing before handing the file over (upstream
+		// pkg/channels/manager.go), which is what makes the delivery look settled.
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+		_ = writeFrame(ctx, conn, Frame{Type: "message.create", Payload: Payload{
+			MessageID: "m1", Content: "",
+			Attachments: []Attachment{{Type: "file", URL: "/pico/media/abc", Filename: "report.pdf"}},
+		}})
+		// ...and then it resumes, taking longer than the settle window to answer.
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.start"})
+		time.Sleep(3 * settle)
+		_ = writeFrame(ctx, conn, msg("m2", "Pronto, o relatório está no anexo.", "", false))
+		_ = writeFrame(ctx, conn, Frame{Type: "typing.stop"})
+	})
+
+	c := &Client{IdleTimeout: 10 * time.Second, DeliverySettle: settle}
+	got, err := c.RunTurn(context.Background(), turn.Request{
+		Endpoint:  endpoint,
+		AuthToken: testToken,
+		SessionID: "s1",
+		Content:   "me manda o arquivo",
+	}, turn.Sink{})
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if got != "Pronto, o relatório está no anexo." {
+		t.Errorf("final = %q, want the answer the agent typed after the delivery", got)
+	}
+}
