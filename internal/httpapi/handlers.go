@@ -662,7 +662,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// lose attribution, it mis-attributes every later write for this workspace to a
 	// conversation that already ended. The RAW session id is recorded, not the
 	// sessionKey hash, because it is what the webapp navigates by.
+	//
+	// `folded` is read BEFORE Begin, and the order is the whole point: Begin
+	// counts this request in, so asking afterwards would report every turn as
+	// steering. A conversation that is ALREADY in flight means picoclaw will not
+	// run this message as a turn of its own — it claims the session key and folds
+	// the message into the running turn (`enqueueSteeringMessage`, upstream
+	// pkg/agent/agent.go), silently. This stream then carries the OTHER turn's
+	// frames, because the pico channel broadcasts to every connection on the
+	// session, and the member reads minutes of someone else's turn as their own
+	// message being slow. Naming it is the least this layer can do; it is the only
+	// one that knows. See the project repo's
+	// .specs/features/steering-messages/investigation.md §6-§7.
+	var folded bool
 	if s.turns != nil {
+		folded = s.turns.Active(scopeOf(key), req.SessionID)
 		defer s.turns.Begin(scopeOf(key), req.SessionID)()
 	}
 	userContent := lastUserContent(req.Messages)
@@ -673,8 +687,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	id := "chatcmpl-" + randomHex(12)
 
 	if req.Stream {
-		s.streamTurn(w, r, agent, key, ident.Email, sessionKey, userContent, model, id, req.Project)
+		s.streamTurn(w, r, agent, key, ident.Email, sessionKey, userContent, model, id, req.Project, folded)
 		return
+	}
+	// The synchronous path gets a log line and nothing else. Its response shape is
+	// an OpenAI completion with no room for an extension field, and the webapp —
+	// the only caller that could act on one — always streams.
+	if folded {
+		s.logf("chat: message folded into the turn already running on session %s", req.SessionID)
 	}
 
 	// Decoupled from r.Context() so a client disconnect can't cut the picoclaw

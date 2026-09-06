@@ -93,7 +93,7 @@ func streamInto(t *testing.T, s *Server, rec *recorder, req *http.Request) strin
 	s.streamTurn(rec, req,
 		config.Agent{Key: "alpha", Harness: config.HarnessPicoclaw},
 		docker.WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "alpha", UserAccID: "u"},
-		"owner@example.com", "sess", "hello", "picoclaw", "chatcmpl-test", "")
+		"owner@example.com", "sess", "hello", "picoclaw", "chatcmpl-test", "", false)
 	return rec.String()
 }
 
