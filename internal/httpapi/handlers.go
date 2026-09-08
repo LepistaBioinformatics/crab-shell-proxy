@@ -36,6 +36,10 @@ import (
 type Orchestrator interface {
 	EnsureRunning(ctx context.Context, agent config.Agent, key docker.WorkspaceKey, ownerEmail string) (docker.Target, error)
 	ArmIdle(agent config.Agent, key docker.WorkspaceKey)
+	// Instances returns every managed workspace for the telemetry inventory.
+	// READ-ONLY: it must not create, start, stop or remove anything. See
+	// docker.Manager.Instances.
+	Instances(ctx context.Context) ([]docker.Instance, error)
 	// ScaffoldSubscription idempotently creates the subscription root and
 	// reports whether it was created now (true) or already existed (false).
 	ScaffoldSubscription(tenantID, subsAccID string) (bool, error)
@@ -416,6 +420,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/model-assignments", s.handleAdminModelAssignmentList)
 	mux.HandleFunc("POST /v1/admin/model-assignments", s.handleAdminModelAssignmentSet)
 	mux.HandleFunc("DELETE /v1/admin/model-assignments", s.handleAdminModelAssignmentClear)
+	// harness-sphere-integration: the workspace inventory a telemetry watcher
+	// reads to attribute a container to its tenant/subscription/user, which it
+	// cannot do alone (the container name hashes the tuple one way).
+	//
+	// Registered ONLY when the token is configured. Absent, not 401 — this route
+	// discloses the deployment's whole tenant topology, so a deployment that has
+	// not opted in must grow no new surface at all. Mirrors /v1/mcp.
+	if s.Cfg.ResolvedTelemetryToken != "" {
+		mux.HandleFunc("GET /v1/instances", s.handleInstances)
+	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
 	// directly from the service host via openapiPath, not through the gateway).
