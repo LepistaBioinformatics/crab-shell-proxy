@@ -40,6 +40,10 @@ type fakeOrch struct {
 	scaffolded map[string]bool
 	keys       []docker.WorkspaceKey
 
+	// harness-sphere-integration: canned inventory + failure injection.
+	instances    []docker.Instance
+	instancesErr error
+
 	writeErr   error
 	deleteErr  error
 	writes     []secretWrite
@@ -495,6 +499,13 @@ func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.W
 	return docker.Target{Name: "picoclaw-alpha-h", Endpoint: "ws://x:1/pico/ws", AuthToken: "t"}, nil
 }
 func (f *fakeOrch) ArmIdle(config.Agent, docker.WorkspaceKey) { f.armed++ }
+
+func (f *fakeOrch) Instances(context.Context) ([]docker.Instance, error) {
+	if f.instancesErr != nil {
+		return nil, f.instancesErr
+	}
+	return f.instances, nil
+}
 func (f *fakeOrch) ScaffoldSubscription(tenantID, subsAccID string) (bool, error) {
 	k := skey(tenantID, subsAccID)
 	if f.scaffolded[k] {

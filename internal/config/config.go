@@ -239,6 +239,22 @@ type Config struct {
 	// it is reachable by on the container network, so this is configuration.
 	MCPBaseURL string `yaml:"mcpBaseURL"`
 
+	// TelemetryToken authorizes GET /v1/instances, and nothing else. It exists
+	// because that route is the first one here that is neither a member's nor an
+	// agent's: a watcher asks it which workspaces exist, across every agent.
+	//
+	// It is NOT an agent token, deliberately. resolveAgent's bearer check is what
+	// stops a caller who reached this proxy directly on the container network from
+	// asserting whatever accId it likes — the mycelium profile header is decoded,
+	// never verified (identity.SDKResolver.Resolve). So an agent token is the gate
+	// on chatting AS ANY MEMBER, and a telemetry component must not hold one.
+	//
+	// Unset is not fatal and follows mcpTokenSecret's rule: an empty value means
+	// the route is NOT REGISTERED. Not registered-and-401 — absent. A deployment
+	// that has not opted in grows no new surface, and a misconfiguration cannot
+	// leave the deployment's whole tenant topology readable without a credential.
+	TelemetryToken secret `yaml:"telemetryToken"`
+
 	// MediaMaxBytes bounds an uploaded file (media-upload feature). It is the
 	// only thing an upload is checked against: the extension allowlist that used
 	// to sit beside it was removed, because a member's file format is not
@@ -252,6 +268,10 @@ type Config struct {
 	// ResolvedMCPTokenSecret is filled by Load from MCPTokenSecret. Empty means the
 	// memory graph is disabled; see MCPTokenSecret.
 	ResolvedMCPTokenSecret string `yaml:"-"`
+
+	// ResolvedTelemetryToken is filled by Load from TelemetryToken. Empty means
+	// GET /v1/instances is not registered; see TelemetryToken.
+	ResolvedTelemetryToken string `yaml:"-"`
 }
 
 // Load reads, validates, and env-resolves the config at path.
@@ -319,6 +339,11 @@ func Load(path string) (*Config, error) {
 	// care (the /v1/mcp registration and the config writer) both key off empty.
 	if mcpSec, mcpErr := cfg.MCPTokenSecret.resolve(); mcpErr == nil {
 		cfg.ResolvedMCPTokenSecret = mcpSec
+	}
+	// Same rule, same reason: unset is "not configured", which here means the
+	// instances route is never registered. See TelemetryToken.
+	if telSec, telErr := cfg.TelemetryToken.resolve(); telErr == nil {
+		cfg.ResolvedTelemetryToken = telSec
 	}
 	return &cfg, nil
 }
