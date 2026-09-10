@@ -241,12 +241,20 @@ func TestGanglionBindDrift(t *testing.T) {
 	// always carries it and one created before this feature always drifts --
 	// exactly once, which is how it gets the mount at all.
 	configBind := "/srv/data/u/" + ganglionConfigFile + ":" + ganglionConfigDest + ":ro"
+	// D-1's shared skills root, also unconditional and also read-only.
+	skillsBind := "/srv/data/effective-skills/t/s/a:" + ganglionSkillsDest + ":ro"
 
-	if ganglionBindDrift(plain, []string{workspaceBind, configBind, "/srv/persona/AGENT.md:" + persona + ":ro"}) {
+	if ganglionBindDrift(plain, []string{workspaceBind, configBind, skillsBind,
+		"/srv/persona/AGENT.md:" + persona + ":ro"}) {
 		t.Error("a correctly narrowed container was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind}) {
+	if !ganglionBindDrift(plain, []string{workspaceBind, skillsBind}) {
 		t.Error("a container with no model registry bound was not detected: an admin's model change can never reach it")
+	}
+	// An index that names skill files the container has no mount for would tell
+	// the model a capability exists and then fail to open it.
+	if !ganglionBindDrift(plain, []string{workspaceBind, configBind}) {
+		t.Error("a container with no shared skills bound was not detected")
 	}
 	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest}) {
 		t.Error("the old wide bind was not detected: the agent keeps reading proxy state")
@@ -254,13 +262,13 @@ func TestGanglionBindDrift(t *testing.T) {
 	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest + ":rw"}) {
 		t.Error("the old wide bind with explicit options was not detected")
 	}
-	if !ganglionBindDrift(encrypted, []string{workspaceBind}) {
+	if !ganglionBindDrift(encrypted, []string{workspaceBind, configBind, skillsBind}) {
 		t.Error("switching encryption on did not drift a container with no key file bound")
 	}
-	if ganglionBindDrift(encrypted, []string{workspaceBind, configBind, keyBind}) {
+	if ganglionBindDrift(encrypted, []string{workspaceBind, configBind, skillsBind, keyBind}) {
 		t.Error("a container that already has the key file was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind, configBind, keyBind}) {
+	if !ganglionBindDrift(plain, []string{workspaceBind, configBind, skillsBind, keyBind}) {
 		t.Error("switching encryption off left a stale key file bound")
 	}
 }
