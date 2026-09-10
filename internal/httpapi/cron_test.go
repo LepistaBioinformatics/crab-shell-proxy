@@ -388,3 +388,45 @@ func TestCronTasksUnknownProjectIs404(t *testing.T) {
 		t.Errorf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }
+
+// A scale-to-zero agent LISTS its tasks and is told they will not fire.
+//
+// The first cut of this refused the request with 501. That was wrong twice
+// over: the routes are read-only and need no running container, and this file
+// already argued that "a job the member cannot see is a job they cannot
+// stop". Hiding an inert schedule is worse than showing it and saying so.
+func TestCronTasks_ReportsWhetherSchedulesFire(t *testing.T) {
+	for _, tc := range []struct {
+		mode      config.Mode
+		wantFires bool
+	}{
+		{config.ModeContinuous, true},
+		{config.ModeScaleToZero, false},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			s, root := cronServer(t)
+			cronFile, _ := cronPaths(root)
+			seedFile(t, cronFile, `{"version":1,"jobs":[{"id":"job-1","name":"diario"}]}`)
+
+			agent := s.Cfg.Agents["alpha"]
+			agent.Mode = tc.mode
+			s.Cfg.Agents["alpha"] = agent
+
+			rec := do(t, s, "/v1/cron/tasks?"+cronQuery)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 in either mode: %s", rec.Code, rec.Body)
+			}
+			var got cronTasksResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.Fires != tc.wantFires {
+				t.Errorf("fires = %v, want %v", got.Fires, tc.wantFires)
+			}
+			// Listed either way. That is the point of not refusing.
+			if len(got.Tasks) != 1 {
+				t.Errorf("got %d tasks; a job the member cannot see is a job they cannot stop", len(got.Tasks))
+			}
+		})
+	}
+}

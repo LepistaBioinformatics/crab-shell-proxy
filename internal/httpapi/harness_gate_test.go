@@ -91,63 +91,18 @@ func TestRequireHarnessFeature_UnknownHarnessIsRefusedByDefault(t *testing.T) {
 	}
 }
 
-// SZ-2. Scheduled tasks are gated by MODE, not by harness: a schedule lives in
-// in-process timers, so a stopped container fires nothing whatever runtime is
-// inside it.
-func TestRequireContinuousMode(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		agent   config.Agent
-		allowed bool
-	}{
-		{
-			name:    "continuous picoclaw serves cron",
-			agent:   config.Agent{Key: "alpha", Harness: config.HarnessPicoclaw, Mode: config.ModeContinuous},
-			allowed: true,
-		},
-		{
-			name:    "continuous ganglion serves cron too -- it is not a harness property",
-			agent:   config.Agent{Key: "gamma", Harness: config.HarnessGanglion, Mode: config.ModeContinuous},
-			allowed: true,
-		},
-		{
-			name:    "scale-to-zero ganglion does not",
-			agent:   config.Agent{Key: "gamma", Harness: config.HarnessGanglion, Mode: config.ModeScaleToZero},
-			allowed: false,
-		},
-		{
-			name:    "scale-to-zero PICOCLAW does not either -- same trap, no deployment has one yet",
-			agent:   config.Agent{Key: "alpha", Harness: config.HarnessPicoclaw, Mode: config.ModeScaleToZero},
-			allowed: false,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			got := requireContinuousMode(rec, tc.agent, featureCron)
-			if got != tc.allowed {
-				t.Fatalf("allowed = %v, want %v", got, tc.allowed)
-			}
-			if tc.allowed {
-				return
-			}
-			if rec.Code != 501 {
-				t.Errorf("code = %d, want 501", rec.Code)
-			}
-			// The refusal must name the MODE, or an operator reads "not
-			// implemented" and goes looking for missing code.
-			body := strings.ToLower(rec.Body.String())
-			if !strings.Contains(body, "continuous") {
-				t.Errorf("the refusal does not name the required mode: %s", rec.Body)
-			}
-		})
-	}
-}
-
-// Cron must NOT be in the harness allowlist -- it would refuse a continuous
-// ganglion agent, which can serve it perfectly well.
+// SZ-2, as originally written, refused the cron routes on a scale-to-zero
+// agent. That was wrong and the gate is gone: the routes are read-only, need
+// no container, and cron.go already recorded that "a task the member cannot
+// see is a task they cannot stop". What the mode actually breaks is the
+// firing, which cronTasksResponse.Fires reports.
+//
+// This test remains to pin the part that survived: cron must NOT be
+// harness-gated either, or a continuous ganglion agent -- which can serve it
+// perfectly well -- would be refused.
 func TestCronIsNotHarnessGated(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if !requireHarnessFeature(rec, config.Agent{Key: "gamma", Harness: config.HarnessGanglion}, featureCron) {
-		t.Error("cron is harness-gated; it must be mode-gated (SZ-2)")
+		t.Error("cron is harness-gated; it is neither harness- nor mode-gated")
 	}
 }
