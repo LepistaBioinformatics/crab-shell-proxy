@@ -11,6 +11,7 @@ package httpapi
 // write here could silently disagree with the timers actually running.
 
 import (
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"net/http"
 	"sort"
 
@@ -72,8 +73,25 @@ func scopedJobs(all []cron.Job, projectID string, known []projects.Project) []cr
 }
 
 // handleCronTasks lists the caller's own scheduled tasks with their executions.
+// cronCallerKey is restartCallerKey plus the mode gate (SZ-2).
+//
+// Separate from restartCallerKey rather than a flag on it: that resolver is
+// shared with /v1/restart, which is meaningful in either mode, and gating there
+// would refuse a restart for the wrong reason.
+func (s *Server) cronCallerKey(w http.ResponseWriter, r *http.Request) (docker.WorkspaceKey, bool) {
+	agent, status, msg := s.resolveAgent(r)
+	if status != 0 {
+		writeJSON(w, status, errBody(msg))
+		return docker.WorkspaceKey{}, false
+	}
+	if !requireContinuousMode(w, agent, featureCron) {
+		return docker.WorkspaceKey{}, false
+	}
+	return s.restartCallerKey(w, r, false)
+}
+
 func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
-	key, ok := s.restartCallerKey(w, r, false)
+	key, ok := s.cronCallerKey(w, r)
 	if !ok {
 		return
 	}
@@ -153,7 +171,7 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 // discovered in the CALLER'S OWN sessions dir. Traversal and cross-workspace reads
 // are impossible by construction rather than by sanitising the input.
 func (s *Server) handleCronRun(w http.ResponseWriter, r *http.Request) {
-	key, ok := s.restartCallerKey(w, r, false)
+	key, ok := s.cronCallerKey(w, r)
 	if !ok {
 		return
 	}
