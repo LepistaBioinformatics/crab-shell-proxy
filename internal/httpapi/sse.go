@@ -35,6 +35,26 @@ const turnTimeout = 10 * time.Minute
 // the member's carrier.
 const heartbeatInterval = 10 * time.Second
 
+// streamingModeHeader tells a client how content arrives on the SSE stream.
+const streamingModeHeader = "X-Crab-Streaming"
+
+const (
+	// streamingNative: content arrives as incremental deltas, as the model
+	// produces them.
+	streamingNative = "native"
+	// streamingTerminal: the whole answer arrives in one frame at the end.
+	// picoclaw, measured: typing.start, 51 seconds of silence, then the reply.
+	streamingTerminal = "terminal"
+)
+
+// streamingModeFor reports how this agent's harness delivers content.
+func streamingModeFor(agent config.Agent) string {
+	if agent.Harness == config.HarnessGanglion {
+		return streamingNative
+	}
+	return streamingTerminal
+}
+
 // streamTurn serves a streaming (SSE) chat completion.
 //
 // Ordering matters (design D9 / advisor note): the 200 headers and the initial
@@ -53,6 +73,22 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// How content arrives on this stream, so a client does not have to guess.
+	//
+	// It states a FACT, not an instruction: "narrate" or "simulate" would bake
+	// one client's UI decision into a transport header, and the next consumer
+	// may want the same fact for something else -- buffering, an indicator, a
+	// test assertion.
+	//
+	// The webapp needs it because its reveal driver exists solely because
+	// picoclaw does not stream ("the only thing that makes a reply appear
+	// progressively", turn-store.ts). Run over a harness that DOES stream, two
+	// mechanisms paint the same text and the reply visibly rewrites itself.
+	//
+	// Read from the AGENT, not from docker.Target: headers are flushed here,
+	// deliberately before EnsureRunning, so the target does not exist yet. The
+	// agent's config carries the same fact and carries it earlier.
+	w.Header().Set(streamingModeHeader, streamingModeFor(agent))
 	w.WriteHeader(http.StatusOK)
 
 	created := time.Now().Unix()

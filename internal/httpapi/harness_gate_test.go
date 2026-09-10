@@ -106,3 +106,37 @@ func TestCronIsNotHarnessGated(t *testing.T) {
 		t.Error("cron is harness-gated; it is neither harness- nor mode-gated")
 	}
 }
+
+// A client cannot tell whether a harness streams by looking at the frames --
+// a slow terminal answer and a fast native one look alike for the first
+// second. The header states it.
+//
+// The webapp's reveal driver depends on this: it exists only because picoclaw
+// does not stream, and run over a harness that does, two mechanisms paint the
+// same text and the reply visibly rewrites itself.
+func TestStreamingModeFor(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent config.Agent
+		want  string
+	}{
+		{"picoclaw answers in one frame", config.Agent{Harness: config.HarnessPicoclaw}, streamingTerminal},
+		{"an empty harness is picoclaw", config.Agent{}, streamingTerminal},
+		{"ganglion streams deltas", config.Agent{Harness: config.HarnessGanglion}, streamingNative},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := streamingModeFor(tc.agent); got != tc.want {
+				t.Errorf("streamingModeFor = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The default must be the SAFE one: a harness nobody taught this function
+// about is assumed not to stream, so a client keeps simulating rather than
+// showing a reply that never animates.
+func TestStreamingModeFor_UnknownHarnessIsTerminal(t *testing.T) {
+	if got := streamingModeFor(config.Agent{Harness: "something-new"}); got != streamingTerminal {
+		t.Errorf("streamingModeFor = %q, want the safe %q", got, streamingTerminal)
+	}
+}
