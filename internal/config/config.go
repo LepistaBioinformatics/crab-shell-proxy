@@ -161,7 +161,7 @@ func ganglionUnprovisioned(c Config, a Agent) string {
 			"set it to an immutable reference, not a moving tag"
 	}
 	if a.Model != nil && a.Model.APIKeyEnv != "" && a.Model.APIKey == "" {
-		return fmt.Sprintf("%s is unset", a.Model.APIKeyEnv)
+		return "required model API key environment variable is unset"
 	}
 	return ""
 }
