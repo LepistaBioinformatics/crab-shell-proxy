@@ -356,13 +356,30 @@ func Load(path string) (*Config, error) {
 	}
 	// Resolve secrets and stamp the map key onto each agent.
 	for key, agent := range cfg.Agents {
-		tok, err := agent.Token.resolve()
-		if err != nil {
-			return nil, fmt.Errorf("agent %q token: %w", key, err)
-		}
 		agent.Key = key
 		if agent.Harness == "" {
 			agent.Harness = HarnessPicoclaw
+		}
+		tok, err := agent.Token.resolve()
+		if err != nil {
+			// For picoclaw this stays fatal: every deployment that exists today
+			// declares picoclaw agents it is provisioned for, and silently
+			// dropping one would remove a member's access with no boot-time
+			// signal beyond a log line nobody reads until they are locked out.
+			if agent.Harness != HarnessGanglion {
+				return nil, fmt.Errorf("agent %q token: %w", key, err)
+			}
+			// For ganglion it disables, like a missing image or provider key.
+			// This is the THIRD env var whose absence used to take the whole
+			// proxy down for one unprovisioned agent; the first two were fixed
+			// one at a time, which is how the third survived. All of them now
+			// funnel into DisabledAgents.
+			cfg.DisabledAgents = append(cfg.DisabledAgents, DisabledAgent{
+				Key:    key,
+				Reason: err.Error(),
+			})
+			delete(cfg.Agents, key)
+			continue
 		}
 		agent.ResolvedToken = tok
 		if agent.Model != nil && agent.Model.APIKeyEnv != "" {

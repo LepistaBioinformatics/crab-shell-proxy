@@ -828,3 +828,41 @@ func TestLoadDoesNotDisableAPicoclawAgentWhoseKeyIsUnset(t *testing.T) {
 		t.Error("a picoclaw agent was disabled for an unset key; that is a behaviour change")
 	}
 }
+
+// The third env var whose absence used to be fatal, after the image and the
+// provider key. Fixing them one at a time is how this one survived two
+// rounds, so it gets the same test as the others.
+func TestLoadDisablesAGanglionAgentWhoseTokenIsUnset(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("TOK_BETA", "") // declared, not provisioned here
+
+	body := strings.Replace(harnessSample, "harness: picoclaw", "harness: ganglion", 1)
+	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("a missing ganglion token must not fail the load: %v", err)
+	}
+	if len(cfg.Agents) == 0 {
+		t.Fatal("every agent was dropped")
+	}
+	if len(cfg.DisabledAgents) == 0 {
+		t.Error("the unprovisioned agent was dropped without being reported")
+	}
+}
+
+// Picoclaw's token stays FATAL, and that is deliberate rather than an
+// oversight: every deployment today declares picoclaw agents it is
+// provisioned for, and silently dropping one would remove a member's access
+// with no signal beyond a log line nobody reads until they are locked out.
+func TestLoadStillFailsOnAMissingPicoclawToken(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "")
+
+	_, err := Load(writeConfig(t, sample))
+	if err == nil {
+		t.Fatal("a missing picoclaw token must still fail the load")
+	}
+	if !strings.Contains(err.Error(), "token") {
+		t.Errorf("error does not name the problem: %v", err)
+	}
+}
