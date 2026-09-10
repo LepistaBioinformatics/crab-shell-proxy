@@ -118,6 +118,14 @@ func ganglionConfigDoc(res registry.Resolution, web map[string]string) ([]byte, 
 				entry["extra_body"] = eb
 			}
 		}
+		// Omitted rather than written empty, matching this file's rule for
+		// model_fallbacks: an absent key and an empty one mean the same thing
+		// to a reader and only one of them is honest. For the harness the two
+		// differ in more than style -- an empty level means "never send a depth
+		// field", and writing it explicitly would say the operator chose that.
+		if m.ThinkingLevel != "" {
+			entry["thinking_level"] = m.ThinkingLevel
+		}
 		// NO api_keys. The key travels in the environment; see the file header.
 		list = append(list, entry)
 	}

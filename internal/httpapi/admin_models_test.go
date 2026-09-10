@@ -349,3 +349,33 @@ func doAdmin(t *testing.T, s *Server, profile, method, path, body string) *httpt
 	s.Handler().ServeHTTP(rec, req)
 	return rec
 }
+
+// The field an admin sets has to survive the round trip, or the editor UI is a
+// text box that forgets. And a value neither harness parses is refused at the
+// boundary rather than materialized into a file that looks configured.
+func TestAdminModelThinkingLevelRoundTripsAndIsValidated(t *testing.T) {
+	s, admin, _ := newTestServer(t)
+
+	body := `{"model_name":"reasoner","provider":"deepseek","model":"deepseek-reasoner",
+	  "api_base":"https://api.deepseek.com/v1","api_key":"sk-1","thinking_level":"high"}`
+	if rec := doAdmin(t, s, admin, "POST", "/v1/admin/models", body); rec.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec := doAdmin(t, s, admin, "GET", "/v1/admin/models", "")
+	var listed struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed.Models[0]["thinking_level"] != "high" {
+		t.Errorf("thinking_level = %v, want high", listed.Models[0]["thinking_level"])
+	}
+
+	bad := `{"model_name":"nope","provider":"deepseek","model":"m",
+	  "api_base":"https://api.deepseek.com/v1","api_key":"sk-1","thinking_level":"ultra"}`
+	if rec := doAdmin(t, s, admin, "POST", "/v1/admin/models", bad); rec.Code == http.StatusOK {
+		t.Fatalf("an unknown thinking_level was accepted: %s", rec.Body.String())
+	}
+}

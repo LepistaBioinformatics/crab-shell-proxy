@@ -27,8 +27,12 @@ type modelRequest struct {
 	APIKey     *string         `json:"api_key"`
 	AuthMethod string          `json:"auth_method"`
 	ExtraBody  json.RawMessage `json:"extra_body"`
-	Fallbacks  []string        `json:"fallbacks"`
-	Version    uint64          `json:"version"`
+	// ThinkingLevel is picoclaw's own key. Validated by the registry, not here,
+	// so the inventory and the personal-model path reject the same values with
+	// the same words.
+	ThinkingLevel string   `json:"thinking_level"`
+	Fallbacks     []string `json:"fallbacks"`
+	Version       uint64   `json:"version"`
 }
 
 // registryErrStatus maps a registry error to an HTTP status and a body. An in-use
@@ -108,7 +112,8 @@ func (s *Server) handleAdminModelCreate(w http.ResponseWriter, r *http.Request) 
 	m := registry.Model{
 		ModelName: req.ModelName, Provider: req.Provider, Model: req.Model,
 		APIBase: req.APIBase, AuthMethod: req.AuthMethod, ExtraBody: req.ExtraBody,
-		Fallbacks: req.Fallbacks, Status: registry.StatusActive,
+		ThinkingLevel: req.ThinkingLevel,
+		Fallbacks:     req.Fallbacks, Status: registry.StatusActive,
 	}
 	if req.APIKey != nil {
 		m.APIKey = *req.APIKey
@@ -138,6 +143,7 @@ func (s *Server) handleAdminModelUpdate(w http.ResponseWriter, r *http.Request) 
 		cur.APIBase = req.APIBase
 		cur.AuthMethod = req.AuthMethod
 		cur.ExtraBody = req.ExtraBody
+		cur.ThinkingLevel = req.ThinkingLevel
 		cur.Fallbacks = req.Fallbacks
 		// Absent api_key keeps the stored one; an explicit "" clears it.
 		if req.APIKey != nil {
