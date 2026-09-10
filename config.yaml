@@ -112,6 +112,31 @@ agents:
       name: "deepseek-chat"
       apiKeyEnv: "PICOCLAW_ALPHA_API_KEY"
 
+  # TESTE LOCAL — o segundo harness. Entrada NOVA, nao um flip do alpha (D-5):
+  # trocar o harness do unico agente em producao seria cutover, nao coexistencia.
+  # Mesmo provider/modelo do alpha, para isolar o harness como variavel.
+  gamma:
+    serviceName: "gamma"
+    harness: "ganglion"
+    token: { env: "MYC_GANGLION_TOKEN" }
+    template: "alpha"
+    # scale-to-zero, que e o ponto do ganglion. O picoclaw fica continuous por
+    # causa das tarefas agendadas (timers em memoria); este agente nao as
+    # oferece -- /v1/cron/* responde 501 nomeando o modo.
+    mode: "scale-to-zero"
+    # 120s, nao os 15m do picoclaw. Aqueles existem porque o cold start dele era
+    # caro; o do ganglion foi medido em 0,2s. Dois minutos e curto o bastante
+    # para o scale-to-zero valer e longo o bastante para nao recriar container
+    # entre duas mensagens da mesma conversa.
+    idleTimeout: 15s
+    model:
+      provider: "deepseek"
+      name: "deepseek-chat"
+      apiKeyEnv: "GANGLION_API_KEY"
+      # Obrigatorio para o ganglion: nao existe registry de provider->endpoint,
+      # e um baseUrl vazio falha como 404 do provedor, nao como erro de config.
+      baseUrl: "https://api.deepseek.com/v1"
+
   beta:
     serviceName: "beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }

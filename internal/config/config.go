@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
@@ -42,13 +43,16 @@ const (
 	ModeContinuous Mode = "continuous"
 )
 
-// Harness kinds select the agent runtime an agent orchestrates. Picoclaw is
-// currently the only one; the discriminator is kept because it is a published
-// admin-API field and clients branch on it.
+// Harness kinds select the agent runtime an agent orchestrates.
 const (
 	// HarnessPicoclaw is the default: a picoclaw container spoken to over the
 	// Pico Protocol WebSocket.
 	HarnessPicoclaw = "picoclaw"
+	// HarnessGanglion is crab-ganglion-harness: this project's own runtime,
+	// spoken to over native HTTP with SSE. It is an ALTERNATIVE to picoclaw,
+	// not a replacement -- picoclaw stays the default until the exit criteria
+	// in .specs/features/crab-ganglion-harness/spec.md are met.
+	HarnessGanglion = "ganglion"
 )
 
 // secret is a value sourced either inline or from an environment variable
@@ -143,6 +147,34 @@ type Agent struct {
 	ResolvedToken string `yaml:"-"`
 }
 
+// ganglionUnprovisioned reports why this environment cannot run the agent, or
+// "" when it can. Only ganglion agents are subject to it: a picoclaw agent's
+// key is written into a per-user .security.yml at provisioning time and an
+// empty one surfaces as an auth error on the first model call, which is the
+// behaviour every existing deployment already depends on.
+func ganglionUnprovisioned(c Config, a Agent) string {
+	if a.Harness != HarnessGanglion {
+		return ""
+	}
+	if c.GanglionImage == "" {
+		return "ganglionImage (or CRAB_GANGLION_IMAGE) is unset; it has no default on purpose -- " +
+			"set it to an immutable reference, not a moving tag"
+	}
+	if a.Model != nil && a.Model.APIKeyEnv != "" && a.Model.APIKey == "" {
+		return "required model API key environment variable is unset"
+	}
+	return ""
+}
+
+// DisabledAgent records an agent that was declared but removed at load, and
+// why. Reported rather than silently dropped: "that agent does not exist" is a
+// legible failure only if something, somewhere, says it was disabled and names
+// the missing setting.
+type DisabledAgent struct {
+	Key    string
+	Reason string
+}
+
 // modelKey identifies a ModelConfig by its selectable identity.
 type modelKey struct{ Provider, Name string }
 
@@ -201,8 +233,31 @@ type Config struct {
 	// PicoclawHome is the in-container HOME for spawned picoclaw; the per-user
 	// data dir is mounted at <PicoclawHome>/.picoclaw and the config's workspace
 	// path is aligned to it. Must be a dir the PicoclawUser can write.
-	PicoclawHome    string   `yaml:"picoclawHome"`
-	StartupDeadline Duration `yaml:"startupDeadline"`
+	PicoclawHome string `yaml:"picoclawHome"`
+
+	// GanglionImage is the crab-ganglion-harness image for agents whose harness
+	// is HarnessGanglion.
+	//
+	// It has NO default, and that is deliberate. picoclawImage defaults to a
+	// moving tag, and a moving tag is exactly what left the Dokploy host running
+	// a three-week-old binary with two of four patches missing, silently: the
+	// harness image is not a compose service, so a redeploy never pulls it, and
+	// EnsureImage only pulls what is absent. FR-19 requires an immutable
+	// reference, so this must be set explicitly -- ideally to a digest or a
+	// per-commit tag.
+	GanglionImage string `yaml:"ganglionImage"`
+	// GanglionPort is where the harness serves HTTP+SSE inside its container.
+	GanglionPort int `yaml:"ganglionPort"`
+
+	// DisabledAgents lists agents removed at Load because this environment
+
+	// GanglionOTLPEndpoint is the collector a ganglion container exports to
+	// (FR-10). Empty disables export inside the harness rather than making it
+	// log a failed request per turn.
+	GanglionOTLPEndpoint string `yaml:"ganglionOtlpEndpoint"`
+	// cannot provision them, in key order. Filled by Load, never by YAML.
+	DisabledAgents  []DisabledAgent `yaml:"-"`
+	StartupDeadline Duration        `yaml:"startupDeadline"`
 	// TurnIdleTimeout is how long the harness may stay SILENT before its turn is
 	// declared dead. It is not a cap on how long a turn may take: an agentic turn
 	// legitimately runs for many minutes while narrating its work, and the total
@@ -306,13 +361,30 @@ func Load(path string) (*Config, error) {
 	}
 	// Resolve secrets and stamp the map key onto each agent.
 	for key, agent := range cfg.Agents {
-		tok, err := agent.Token.resolve()
-		if err != nil {
-			return nil, fmt.Errorf("agent %q token: %w", key, err)
-		}
 		agent.Key = key
 		if agent.Harness == "" {
 			agent.Harness = HarnessPicoclaw
+		}
+		tok, err := agent.Token.resolve()
+		if err != nil {
+			// For picoclaw this stays fatal: every deployment that exists today
+			// declares picoclaw agents it is provisioned for, and silently
+			// dropping one would remove a member's access with no boot-time
+			// signal beyond a log line nobody reads until they are locked out.
+			if agent.Harness != HarnessGanglion {
+				return nil, fmt.Errorf("agent %q token: %w", key, err)
+			}
+			// For ganglion it disables, like a missing image or provider key.
+			// This is the THIRD env var whose absence used to take the whole
+			// proxy down for one unprovisioned agent; the first two were fixed
+			// one at a time, which is how the third survived. All of them now
+			// funnel into DisabledAgents.
+			cfg.DisabledAgents = append(cfg.DisabledAgents, DisabledAgent{
+				Key:    key,
+				Reason: err.Error(),
+			})
+			delete(cfg.Agents, key)
+			continue
 		}
 		agent.ResolvedToken = tok
 		if agent.Model != nil && agent.Model.APIKeyEnv != "" {
@@ -325,8 +397,32 @@ func Load(path string) (*Config, error) {
 				mc.APIKey = os.Getenv(mc.APIKeyEnv)
 			}
 		}
+		// FR-18. A ganglion agent whose provider key is not provisioned in THIS
+		// environment removes itself instead of taking the proxy down with it.
+		//
+		// The mechanism existed for the withdrawn Hermes harness and died with
+		// it; multi-harness-support/implementation-notes.md §10 recommends
+		// bringing it back, and a second harness is when it starts mattering
+		// again. The value is that one config can describe several deployments:
+		// a shared config declaring a ganglion agent reaches a host with no key
+		// for it and degrades to "that agent does not exist" -- a 404 on that
+		// agent's routes -- instead of "the proxy will not boot", which takes
+		// every other agent down too.
+		//
+		// Picoclaw agents are deliberately NOT subject to this: their key is
+		// written into a per-user .security.yml at provisioning time and an
+		// empty one surfaces as an auth error on the first model call, which is
+		// the behaviour every existing deployment already depends on.
+		if reason := ganglionUnprovisioned(cfg, agent); reason != "" {
+			cfg.DisabledAgents = append(cfg.DisabledAgents, DisabledAgent{Key: key, Reason: reason})
+			delete(cfg.Agents, key)
+			continue
+		}
 		cfg.Agents[key] = agent
 	}
+	sort.Slice(cfg.DisabledAgents, func(i, j int) bool {
+		return cfg.DisabledAgents[i].Key < cfg.DisabledAgents[j].Key
+	})
 	sec, err := cfg.WebhookSecret.resolve()
 	if err != nil {
 		return nil, fmt.Errorf("webhookSecret: %w", err)
@@ -383,6 +479,12 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("CRAB_MCP_BASE_URL"); v != "" {
 		c.MCPBaseURL = v
 	}
+	if v := os.Getenv("CRAB_GANGLION_IMAGE"); v != "" {
+		c.GanglionImage = v
+	}
+	if v := os.Getenv("GANGLION_OTLP_ENDPOINT"); v != "" {
+		c.GanglionOTLPEndpoint = v
+	}
 }
 
 func (c *Config) applyDefaults() {
@@ -402,6 +504,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.PicoclawPort == 0 {
 		c.PicoclawPort = 18790
+	}
+	if c.GanglionPort == 0 {
+		c.GanglionPort = 18800
 	}
 	if c.StartupDeadline == 0 {
 		c.StartupDeadline = Duration(35 * time.Second)
@@ -444,9 +549,27 @@ func (c *Config) validate() error {
 		// user a picoclaw container under a role provisioned for something else.
 		switch agent.Harness {
 		case "", HarnessPicoclaw:
+		case HarnessGanglion:
+			// A missing image does NOT fail the load. It disables the agent, the
+			// same way a missing provider key does -- see the DisabledAgents
+			// block below.
+			//
+			// This was a hard error until it was tried on a real deployment: one
+			// test agent with no image put the proxy in a crash loop and took
+			// alpha and beta down with it. FR-19's intent is to fail LOUDLY, not
+			// to fail FATALLY, and "agent gamma disabled: CRAB_GANGLION_IMAGE is
+			// unset" in the boot log is loud. Refusing to serve every other agent
+			// is not a louder version of that -- it is a different, worse
+			// failure, and it is exactly what FR-18 exists to prevent.
+			//
+			// Nothing is silently downgraded: the agent's routes answer 404 and
+			// the reason names the variable. The one thing this must never do is
+			// invent a default image, because a moving tag left this stack
+			// running a three-week-old binary once already.
+
 		default:
-			return fmt.Errorf("agent %q: harness must be %q (or omitted), got %q",
-				key, HarnessPicoclaw, agent.Harness)
+			return fmt.Errorf("agent %q: harness must be %q or %q (or omitted), got %q",
+				key, HarnessPicoclaw, HarnessGanglion, agent.Harness)
 		}
 		switch agent.Mode {
 		case ModeScaleToZero, ModeContinuous:

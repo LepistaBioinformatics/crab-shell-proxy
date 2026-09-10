@@ -3,11 +3,11 @@
 package history
 
 import (
-	"io/fs"
 	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -123,6 +123,18 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	if existsIn(r, durableDir+"/"+sessionKey+".jsonl") {
 		return readMessages(r, durableDir, sessionKey)
 	}
+	// crab-ganglion-harness names its transcript after the session key
+	// directly, and writes no *.meta.json -- it has no reason to, because it
+	// is not reconstructing a mapping the proxy already owns. So the marker
+	// scan below, which is how picoclaw's hashed filenames are found, would
+	// never match it. Try the direct name first; it costs one stat.
+	if existsIn(r, sessionKey+".jsonl") {
+		msgs, err := readMessages(r, "", sessionKey)
+		if err != nil {
+			return nil, err
+		}
+		return append(msgs, livePartial(r, sessionKey, msgs)...), nil
+	}
 	basename := findSessionFile(r, sessionKey)
 	if basename == "" {
 		return []Message{}, nil
@@ -236,6 +248,58 @@ func dedupKey(line string) string {
 // maxLineBytes caps how long a single transcript line may be before it is
 // skipped. picoclaw inlines whole tool results, so one line can be enormous.
 const maxLineBytes = 8 * 1024 * 1024
+
+// partialFile is the ganglion's in-flight answer, written beside the
+// transcript while a turn streams.
+type partialFile struct {
+	AnswersAt time.Time `json:"answers_at"`
+	Content   string    `json:"content"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// livePartial returns the interrupted answer as a one-element slice, or
+// nothing.
+//
+// This is a READ. The proxy never writes into a harness's directory -- one
+// writer is the invariant the whole arrangement rests on. The harness folds
+// the partial into the transcript properly on its next start; this exists so
+// a member who reloads after a crash sees what they lost NOW, instead of when
+// they next send a message.
+//
+// A partial is live only while the transcript holds no assistant message at or
+// after the instant it answers. That covers the crash window between the real
+// append and the sidecar's removal, where both exist and showing the partial
+// would repeat the answer.
+func livePartial(r *os.Root, sessionKey string, msgs []Message) []Message {
+	rel := sessionKey + ".partial.json"
+	if !existsIn(r, rel) {
+		return nil
+	}
+	f, err := r.Open(rel)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var p partialFile
+	if json.NewDecoder(f).Decode(&p) != nil || strings.TrimSpace(p.Content) == "" {
+		return nil
+	}
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		at, perr := time.Parse(time.RFC3339Nano, m.CreatedAt)
+		if perr == nil && !at.Before(p.AnswersAt) {
+			return nil // the turn finished; the sidecar is stale
+		}
+	}
+	return []Message{{
+		Role:      "assistant",
+		Content:   p.Content,
+		CreatedAt: p.UpdatedAt.Format(time.RFC3339Nano),
+	}}
+}
 
 // eachLine calls fn for every non-empty, trimmed line of path. A line longer
 // than maxLineBytes is SKIPPED, and the rest of the file is still read — which is

@@ -53,6 +53,12 @@ func (s *Server) resolveProjectCaller(
 	if !ok {
 		return docker.WorkspaceKey{}, false
 	}
+	// One chokepoint for all four project routes. A project is a picoclaw
+	// agents.list entry plus a dispatch rule; a harness that reads neither
+	// would store one and change nothing.
+	if !requireHarnessFeature(w, agent, featureProjects) {
+		return docker.WorkspaceKey{}, false
+	}
 	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))

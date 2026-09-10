@@ -149,7 +149,23 @@ func (m *Manager) ContainerName(key WorkspaceKey) string {
 
 // harnessPort is the health/API port for an agent's harness.
 func (m *Manager) harnessPort(agent config.Agent) int {
+	if agent.Harness == config.HarnessGanglion {
+		return m.cfg.GanglionPort
+	}
 	return m.cfg.PicoclawPort
+}
+
+// harnessImage is the image a container of this agent runs.
+//
+// ganglionImage has no default on purpose (see config.Config): a moving tag is
+// what left the Dokploy host on a three-week-old picoclaw with two of four
+// patches missing, silently, because the harness image is not a compose service
+// and EnsureImage only pulls what is absent.
+func (m *Manager) harnessImage(agent config.Agent) string {
+	if agent.Harness == config.HarnessGanglion {
+		return m.cfg.GanglionImage
+	}
+	return m.cfg.PicoclawImage
 }
 
 // startupDeadline is how long to wait for an agent's container to become
@@ -162,7 +178,14 @@ func (m *Manager) startupDeadline(agent config.Agent) time.Duration {
 }
 
 // endpoint is the address a turner dials for a running container of this agent.
+//
+// The scheme is the harness's, not a constant: ganglion serves HTTP natively,
+// which is the point of it -- there is no Pico Protocol and no WebSocket to
+// translate.
 func (m *Manager) endpoint(agent config.Agent, name string) string {
+	if agent.Harness == config.HarnessGanglion {
+		return fmt.Sprintf("http://%s:%d", name, m.cfg.GanglionPort)
+	}
 	return fmt.Sprintf("ws://%s:%d/pico/ws", name, m.cfg.PicoclawPort)
 }
 
@@ -218,8 +241,15 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	// first. Left inside provision (where it used to live), a first-ever
 	// provision resolved the cascade against a template that did not exist yet
 	// and produced a workspace with no identity files at all.
-	if tErr := ensurePicoclawTemplate(templateDir, m.cfg.PicoclawUser); tErr != nil {
-		return Target{}, tErr
+	//
+	// Skipped for ganglion: the template is a picoclaw config.json plus a
+	// .security.yml, and seeding one into a ganglion workspace would leave two
+	// files nothing reads. The persona cascade below still runs — AGENT.md is
+	// what GANGLION_SYSTEM_FILE points at.
+	if agent.Harness != config.HarnessGanglion {
+		if tErr := ensurePicoclawTemplate(templateDir, m.cfg.PicoclawUser); tErr != nil {
+			return Target{}, tErr
+		}
 	}
 	// Same discipline as the secrets above, and for two reasons: this is the
 	// bind-mount source for the read-only identity files, and seedWorkspace
@@ -230,6 +260,15 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	}
 	personaDir := config.EffectivePersonaDir(
 		m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role)
+	if agent.Harness == config.HarnessGanglion {
+		// Idempotent: a returning user gets the token already on disk, so a
+		// recreate does not invalidate their session.
+		authToken, err = provisionGanglion(userDir, m.cfg.PicoclawUser)
+		if err != nil {
+			return Target{}, err
+		}
+		return m.ensureGanglionRunning(ctx, agent, key, name, authToken)
+	}
 	authToken, err = provision(userDir, templateDir, personaDir,
 		config.SubscriptionAgentConfigOverlay(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role),
 		m.cfg.PicoclawHome, m.cfg.PicoclawUser, key, ownerEmail)
@@ -295,7 +334,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	// patch that was in the image and not in the running binary.
 	case personaBindDrift(m.cfg, key, m.picoclawMountDest(), st.Binds) ||
 		m.projectBindDriftFor(key, st.Binds) ||
-		m.imageDrift(ctx, st):
+		m.imageDrift(ctx, agent, st):
 		m.logf("container %s: persona/project mounts or harness image stale, recreating (identity, project and image changes cannot reach it otherwise)", name)
 		if st.Running {
 			if err := m.docker.Stop(ctx, name, 10*time.Second); err != nil {
@@ -362,6 +401,12 @@ func (m *Manager) picoclawMountDest() string {
 }
 
 func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceKey, name string) error {
+	// Dispatched before anything picoclaw-shaped runs: the two harnesses share
+	// no container layout, and keeping them apart is what stops a change for the
+	// new one from reaching the one production runs. See ganglion.go.
+	if agent.Harness == config.HarnessGanglion {
+		return m.createGanglion(ctx, agent, key, name)
+	}
 	hostDir := config.UserWorkspace(m.cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 	// picoclaw keeps its config/workspace under $HOME/.picoclaw; mount the
 	// per-user dir there and set HOME so it works for a non-root user too (the

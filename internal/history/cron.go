@@ -19,9 +19,9 @@ package history
 // exists to fail if someone tries.
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
-	"encoding/json"
 	"os"
 	"sort"
 	"strings"

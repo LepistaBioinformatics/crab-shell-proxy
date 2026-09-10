@@ -51,6 +51,11 @@ func (s *Server) resolveUserModelCaller(
 	if !ok {
 		return docker.WorkspaceKey{}, false
 	}
+	// A personal model is written into picoclaw's model_list and agents.defaults.
+	// A harness that reads neither would report a selection that never took.
+	if !requireHarnessFeature(w, agent, featurePersonalModel) {
+		return docker.WorkspaceKey{}, false
+	}
 	tenantID, subsAccID, ok := workspaceParams(w, r)
 	if !ok {
 		return docker.WorkspaceKey{}, false

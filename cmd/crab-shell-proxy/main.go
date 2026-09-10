@@ -16,6 +16,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/ganglion"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
@@ -48,6 +49,14 @@ func main() {
 	}
 	defer func() { _ = reg.Close() }()
 
+	// An agent that removed itself at load must SAY so. A route answering 404
+	// for an agent the operator wrote into the config, with nothing anywhere
+	// naming the missing variable, is the failure FR-18's reporting prevents --
+	// the degradation is the feature, the silence would not be.
+	for _, d := range cfg.DisabledAgents {
+		logger.Printf("agent %q disabled: %s — its routes will answer 404", d.Key, d.Reason)
+	}
+
 	mgr := docker.NewManager(cfg, dkr, nil, reg, logger.Printf)
 
 	srv := &httpapi.Server{
@@ -55,6 +64,10 @@ func main() {
 		Resolver: identity.NewSDKResolver(),
 		Mgr:      mgr,
 		Pico:     &pico.Client{IdleTimeout: cfg.TurnIdleTimeout.Std()},
+		// The second harness. Constructed unconditionally -- it is inert unless
+		// an agent declares harness: ganglion, and config.Load rejects such an
+		// agent when no image is configured.
+		Ganglion: ganglion.New(nil),
 		Logf:     logger.Printf,
 		Reg:      reg,
 		// The knowledge-graph memory. Rooted at the CONTAINER data root because this

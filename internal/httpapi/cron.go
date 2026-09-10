@@ -11,6 +11,7 @@ package httpapi
 // write here could silently disagree with the timers actually running.
 
 import (
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"net/http"
 	"sort"
 
@@ -39,6 +40,15 @@ type cronOrphanGroup struct {
 type cronTasksResponse struct {
 	Tasks   []cronTask        `json:"tasks"`
 	Orphans []cronOrphanGroup `json:"orphans"`
+	// Fires reports whether these schedules can actually run.
+	//
+	// A schedule lives in in-process timers, so a stopped container fires
+	// nothing. On a scale-to-zero agent the tasks below are real, listed, and
+	// inert -- which the member has to be told, because the alternative they
+	// would otherwise assume is that their task ran.
+	//
+	// Reported rather than refused: see cronCallerKey.
+	Fires bool `json:"fires"`
 }
 
 // scopedJobs picks the jobs belonging to the requested scope out of the one store
@@ -71,9 +81,34 @@ func scopedJobs(all []cron.Job, projectID string, known []projects.Project) []cr
 	return out
 }
 
-// handleCronTasks lists the caller's own scheduled tasks with their executions.
-func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
+// cronCallerKey resolves the caller for the read-only cron routes.
+//
+// It does NOT refuse a scale-to-zero agent, and that is a correction: refusing
+// the LIST was aimed at the wrong surface.
+//
+// Two facts settle it. The proxy has no way to CREATE a task -- the agent makes
+// them from inside a conversation and the proxy only reads jobs.json off the
+// volume, which needs no running container. And this file already recorded the
+// reason visibility matters: "a task the member cannot see is a task they
+// cannot stop." Hiding a schedule that will not fire is strictly worse than
+// showing it and saying so.
+//
+// What scale-to-zero actually breaks is the FIRING, and no response code at
+// this endpoint fixes that. cronTasksResponse.Fires reports it instead.
+func (s *Server) cronCallerKey(w http.ResponseWriter, r *http.Request) (docker.WorkspaceKey, config.Agent, bool) {
+	agent, status, msg := s.resolveAgent(r)
+	if status != 0 {
+		writeJSON(w, status, errBody(msg))
+		return docker.WorkspaceKey{}, config.Agent{}, false
+	}
 	key, ok := s.restartCallerKey(w, r, false)
+	return key, agent, ok
+}
+
+// handleCronTasks lists the caller's own scheduled tasks with their executions.
+
+func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
+	key, agent, ok := s.cronCallerKey(w, r)
 	if !ok {
 		return
 	}
@@ -144,7 +179,7 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 		return a.JobID < b.JobID
 	})
 
-	writeJSON(w, http.StatusOK, cronTasksResponse{Tasks: tasks, Orphans: orphans})
+	writeJSON(w, http.StatusOK, cronTasksResponse{Tasks: tasks, Orphans: orphans, Fires: agent.Mode == config.ModeContinuous})
 }
 
 // handleCronRun serves one execution's whole transcript, tool activity included.
@@ -153,7 +188,7 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 // discovered in the CALLER'S OWN sessions dir. Traversal and cross-workspace reads
 // are impossible by construction rather than by sanitising the input.
 func (s *Server) handleCronRun(w http.ResponseWriter, r *http.Request) {
-	key, ok := s.restartCallerKey(w, r, false)
+	key, _, ok := s.cronCallerKey(w, r)
 	if !ok {
 		return
 	}

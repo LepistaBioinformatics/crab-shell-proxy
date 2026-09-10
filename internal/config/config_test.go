@@ -495,6 +495,11 @@ func TestUnknownHarnessIsRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), HarnessPicoclaw) {
 		t.Errorf("error should name the accepted value %q, got: %v", HarnessPicoclaw, err)
 	}
+	// Both accepted values, not just the first: an operator reading this
+	// message is choosing between them.
+	if !strings.Contains(err.Error(), HarnessGanglion) {
+		t.Errorf("error should name the accepted value %q, got: %v", HarnessGanglion, err)
+	}
 	if !strings.Contains(err.Error(), "hermes") {
 		t.Errorf("error should echo the rejected value, got: %v", err)
 	}
@@ -679,5 +684,185 @@ func TestLoadParsesTurnIdleTimeout(t *testing.T) {
 	}
 	if got := cfg.TurnIdleTimeout.Std(); got != 90*time.Second {
 		t.Errorf("TurnIdleTimeout = %v, want 90s", got)
+	}
+}
+
+// A ganglion agent with no image DISABLES ITSELF. It must not fail the load.
+//
+// This was a hard error until it was run on a real deployment: one test agent
+// with no image put the proxy in a crash loop and took the two working agents
+// down with it. FR-19's intent is to fail LOUDLY -- which the boot log does,
+// naming the variable -- not to fail FATALLY.
+func TestLoadDisablesAGanglionAgentWithNoImage(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("a missing image must not fail the load: %v", err)
+	}
+	if _, still := cfg.Agents["alpha"]; still {
+		t.Error("an agent with no image is still live")
+	}
+	if len(cfg.DisabledAgents) != 1 {
+		t.Fatalf("DisabledAgents = %+v, want one entry", cfg.DisabledAgents)
+	}
+	if !strings.Contains(cfg.DisabledAgents[0].Reason, "ganglionImage") {
+		t.Errorf("reason does not name the missing setting: %q", cfg.DisabledAgents[0].Reason)
+	}
+}
+
+// The failure that was actually hit: ONE misconfigured agent must not take the
+// working ones with it. This is the whole point of degrading instead of dying.
+func TestLoadKeepsWorkingAgentsWhenOneGanglionAgentIsUnprovisioned(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("TOK_BETA", "resolved-beta")
+	body := strings.Replace(harnessSample, "harness: picoclaw", "harness: ganglion", 1)
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("one unprovisioned agent must not fail the load: %v", err)
+	}
+	if len(cfg.Agents) == 0 {
+		t.Fatal("every agent was dropped")
+	}
+	if len(cfg.DisabledAgents) != 1 {
+		t.Errorf("DisabledAgents = %+v, want exactly the unprovisioned one", cfg.DisabledAgents)
+	}
+	// The others must be untouched -- that is the entire point.
+	for k, a := range cfg.Agents {
+		if a.Harness == HarnessGanglion {
+			t.Errorf("agent %q survived without an image", k)
+		}
+	}
+}
+
+// The same agent loads once an image is configured, and the harness survives
+// onto the parsed agent.
+func TestLoadAcceptsAGanglionAgentWithAnImage(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
+	body += "\nganglionImage: \"ghcr.io/lepistabioinformatics/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Agents["alpha"].Harness; got != HarnessGanglion {
+		t.Errorf("harness = %q, want %q", got, HarnessGanglion)
+	}
+	// The port has a default; the image deliberately does not.
+	if cfg.GanglionPort != 18800 {
+		t.Errorf("GanglionPort = %d, want the 18800 default", cfg.GanglionPort)
+	}
+}
+
+// FR-18. One config should be able to describe several deployments: a shared
+// config declaring a ganglion agent reaches a host with no provider key for it
+// and degrades to "that agent does not exist" instead of "the proxy will not
+// boot", which would take every other agent down with it.
+func TestLoadDisablesAGanglionAgentWhoseKeyIsUnset(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("GANGLION_KEY", "") // declared, not provisioned here
+
+	body := strings.Replace(sample, "  alpha:\n",
+		"  alpha:\n    harness: ganglion\n    model:\n      provider: deepseek\n"+
+			"      name: deepseek-chat\n      apiKeyEnv: GANGLION_KEY\n", 1)
+	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load must not fail because one agent is unprovisioned: %v", err)
+	}
+	if _, still := cfg.Agents["alpha"]; still {
+		t.Error("the unprovisioned agent is still live")
+	}
+	if len(cfg.DisabledAgents) != 1 {
+		t.Fatalf("DisabledAgents = %+v, want exactly one entry", cfg.DisabledAgents)
+	}
+	// The reason has to name the missing setting, or an operator sees a 404 on
+	// a route they configured and has nothing to chase.
+	if !strings.Contains(cfg.DisabledAgents[0].Reason, "GANGLION_KEY") {
+		t.Errorf("reason does not name the missing variable: %q", cfg.DisabledAgents[0].Reason)
+	}
+}
+
+// The same agent stays live once its key is present.
+func TestLoadKeepsAGanglionAgentWhoseKeyIsSet(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("GANGLION_KEY", "provisioned")
+
+	body := strings.Replace(sample, "  alpha:\n",
+		"  alpha:\n    harness: ganglion\n    model:\n      provider: deepseek\n"+
+			"      name: deepseek-chat\n      apiKeyEnv: GANGLION_KEY\n", 1)
+	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Agents["alpha"]; !ok {
+		t.Error("a provisioned ganglion agent was disabled")
+	}
+	if len(cfg.DisabledAgents) != 0 {
+		t.Errorf("DisabledAgents = %+v, want none", cfg.DisabledAgents)
+	}
+}
+
+// Picoclaw is deliberately exempt: its key is written into a per-user
+// .security.yml at provisioning time and an empty one surfaces as an auth
+// error on the first model call. Every existing deployment depends on that.
+func TestLoadDoesNotDisableAPicoclawAgentWhoseKeyIsUnset(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("PICO_KEY", "")
+
+	body := strings.Replace(sample, "  alpha:\n",
+		"  alpha:\n    model:\n      provider: deepseek\n"+
+			"      name: deepseek-chat\n      apiKeyEnv: PICO_KEY\n", 1)
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Agents["alpha"]; !ok {
+		t.Error("a picoclaw agent was disabled for an unset key; that is a behaviour change")
+	}
+}
+
+// The third env var whose absence used to be fatal, after the image and the
+// provider key. Fixing them one at a time is how this one survived two
+// rounds, so it gets the same test as the others.
+func TestLoadDisablesAGanglionAgentWhoseTokenIsUnset(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("TOK_BETA", "") // declared, not provisioned here
+
+	body := strings.Replace(harnessSample, "harness: picoclaw", "harness: ganglion", 1)
+	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("a missing ganglion token must not fail the load: %v", err)
+	}
+	if len(cfg.Agents) == 0 {
+		t.Fatal("every agent was dropped")
+	}
+	if len(cfg.DisabledAgents) == 0 {
+		t.Error("the unprovisioned agent was dropped without being reported")
+	}
+}
+
+// Picoclaw's token stays FATAL, and that is deliberate rather than an
+// oversight: every deployment today declares picoclaw agents it is
+// provisioned for, and silently dropping one would remove a member's access
+// with no signal beyond a log line nobody reads until they are locked out.
+func TestLoadStillFailsOnAMissingPicoclawToken(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "")
+
+	_, err := Load(writeConfig(t, sample))
+	if err == nil {
+		t.Fatal("a missing picoclaw token must still fail the load")
+	}
+	if !strings.Contains(err.Error(), "token") {
+		t.Errorf("error does not name the problem: %v", err)
 	}
 }

@@ -32,10 +32,10 @@ func staffProfile() *mycelium.Profile { return &mycelium.Profile{IsStaff: true} 
 
 func TestCallerTier(t *testing.T) {
 	cases := []struct {
-		name             string
-		p                *mycelium.Profile
-		tenant, subs     string
-		want             Tier
+		name         string
+		p            *mycelium.Profile
+		tenant, subs string
+		want         Tier
 	}{
 		{"nil", nil, tenantT, subsX, TierNone},
 		{"staff-instance", staffProfile(), tenantT, subsX, TierInstance},
@@ -60,10 +60,10 @@ func TestCallerTier(t *testing.T) {
 
 func TestAuthorizeSharedScope(t *testing.T) {
 	cases := []struct {
-		name                    string
-		p                       *mycelium.Profile
-		kind, tenant, subs      string
-		want                    bool
+		name               string
+		p                  *mycelium.Profile
+		kind, tenant, subs string
+		want               bool
 	}{
 		{"instance-tenant", staffProfile(), "tenant", tenantT, "", true},
 		{"instance-subs", staffProfile(), "subscription", tenantT, subsX, true},
