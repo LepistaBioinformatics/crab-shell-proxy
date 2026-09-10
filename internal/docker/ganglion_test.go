@@ -116,3 +116,59 @@ func TestGanglionEnv_KeyIsEnvironmentNotLabel(t *testing.T) {
 		t.Error("the API key did not reach the environment")
 	}
 }
+
+// The persona cascade must reach a ganglion container.
+//
+// It did not, and the harness said so on every boot: "persona file
+// /data/.ganglion/workspace/AGENT.md unreadable ... no such file or
+// directory". GANGLION_SYSTEM_FILE was wired to a path nothing created, so
+// every member's agent ran with no identity while the env var claimed
+// otherwise.
+func TestGanglionEnvAndPersonaAgree(t *testing.T) {
+	cfg := &config.Config{GanglionPort: 18800}
+	env := ganglionEnv(cfg, config.Agent{}, "t")
+
+	var systemFile string
+	for _, e := range env {
+		if strings.HasPrefix(e, "GANGLION_SYSTEM_FILE=") {
+			systemFile = strings.TrimPrefix(e, "GANGLION_SYSTEM_FILE=")
+		}
+	}
+	if systemFile == "" {
+		t.Fatal("GANGLION_SYSTEM_FILE is not set")
+	}
+
+	// personaBinds lands each file at <mountDest>/workspace/<name>. The env
+	// var must name a path in that set, or it points at nothing again.
+	want := ganglionMountDest + "/workspace/AGENT.md"
+	if systemFile != want {
+		t.Errorf("GANGLION_SYSTEM_FILE = %q, but the persona cascade mounts at %q", systemFile, want)
+	}
+}
+
+// A persona bind whose file exists must be produced for the ganglion mount
+// destination, not only for picoclaw's.
+func TestPersonaBindsCoverTheGanglionMountDest(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{ContainerDataRoot: root, HostDataRoot: root}
+	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
+
+	dir := config.EffectivePersonaDir(root, key.TenantID, key.SubsAccID, key.Role)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AGENT.md"), []byte("sou a eva"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binds := personaBindStrings(cfg, key, ganglionMountDest)
+	found := false
+	for _, b := range binds {
+		if strings.Contains(b, ganglionMountDest+"/workspace/AGENT.md:ro") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("AGENT.md is not bound into the ganglion mount: %v", binds)
+	}
+}

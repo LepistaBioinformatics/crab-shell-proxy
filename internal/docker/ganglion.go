@@ -140,7 +140,15 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 			LabelUser:         key.UserAccID,
 			LabelMode:         string(agent.Mode),
 		},
-		Binds:   []string{hostDir + ":" + ganglionMountDest},
+		// The per-user volume, plus the persona cascade READ-ONLY on top of it.
+		//
+		// personaBinds is harness-agnostic -- it takes the mount destination --
+		// and it lands each file at <mountDest>/workspace/<name>, which is
+		// exactly where GANGLION_SYSTEM_FILE points. Without this the harness
+		// logged "persona file ... no such file or directory" every boot and
+		// ran every member's agent with no identity at all: the env var was
+		// wired to a path nothing created.
+		Binds:   append([]string{hostDir + ":" + ganglionMountDest}, personaBindStrings(m.cfg, key, ganglionMountDest)...),
 		Network: m.cfg.Network,
 		// One process, PID 1, signals handled in main. No supervisor to reap
 		// children for.
@@ -180,12 +188,17 @@ func (m *Manager) ensureGanglionRunning(
 			return Target{}, serr
 		}
 
-	case m.imageDrift(ctx, agent, st):
-		// The one drift that matters here. It is also the one that is invisible:
-		// a container reuses whatever image it was created from for as long as
-		// it exists, so publishing a new harness image and redeploying the stack
-		// changes nothing on its own.
-		m.logf("container %s: harness image stale, recreating", name)
+	case personaBindDrift(m.cfg, key, ganglionMountDest, st.Binds) || m.imageDrift(ctx, agent, st):
+		// Two drifts, both invisible without this check.
+		//
+		// Bind sets are fixed at create time, so a container created before a
+		// persona file existed has no mount for it and an admin's save can
+		// never arrive however many times it is bounced.
+		//
+		// An image is worse: a container reuses whatever it was created from
+		// for as long as it exists, so publishing a new harness image and
+		// redeploying the stack changes nothing on its own.
+		m.logf("container %s: persona mounts or harness image stale, recreating", name)
 		if st.Running {
 			if serr := m.docker.Stop(ctx, name, 10*time.Second); serr != nil {
 				return Target{}, serr
