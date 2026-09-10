@@ -37,7 +37,7 @@ func publicMigrationFixture(t *testing.T) (*Manager, WorkspaceKey, string, strin
 func TestPublicRootMigratesALegacyUploadsDir(t *testing.T) {
 	m, key, legacy, want := publicMigrationFixture(t)
 
-	got, err := m.publicRoot(key, "")
+	got, err := m.publicRoot(key, "", "")
 	if err != nil {
 		t.Fatalf("publicRoot: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestPublicRootMigratesALegacyUploadsDir(t *testing.T) {
 func TestPublicRootIsIdempotent(t *testing.T) {
 	m, key, _, want := publicMigrationFixture(t)
 	for i := 0; i < 3; i++ {
-		got, err := m.publicRoot(key, "")
+		got, err := m.publicRoot(key, "", "")
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
@@ -113,7 +113,7 @@ func TestPublicRootMergesWhenBothExist(t *testing.T) {
 	// A legacy-only file, nested, must arrive.
 	write(legacy, "reports/q1.pdf", "legacy q1", older)
 
-	if _, err := m.publicRoot(key, ""); err != nil {
+	if _, err := m.publicRoot(key, "", ""); err != nil {
 		t.Fatalf("publicRoot: %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestPublicRootIsAnoopWithNoLegacyDir(t *testing.T) {
 	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "alpha", UserAccID: "u"}
 	m := &Manager{cfg: &config.Config{ContainerDataRoot: root, HostDataRoot: root}}
 
-	got, err := m.publicRoot(key, "")
+	got, err := m.publicRoot(key, "", "")
 	if err != nil {
 		t.Fatalf("publicRoot on a fresh workspace: %v", err)
 	}

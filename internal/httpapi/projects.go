@@ -211,8 +211,13 @@ func writeProjectError(w http.ResponseWriter, s *Server, key docker.WorkspaceKey
 // read the form would make every GET and DELETE on it parse a body they do not
 // have. The two are not interchangeable — reading the query on that one handler
 // is what sent project uploads into the main workspace.
+//
+// It takes the HARNESS for the reason workspaceSegmentOf does: a ganglion
+// project lives under the workspace, not beside it, so resolving the picoclaw
+// shape here would point the history reader at a directory that never exists
+// and answer an ordinary conversation with an empty transcript.
 func (s *Server) workspaceSegmentFor(
-	w http.ResponseWriter, r *http.Request, key docker.WorkspaceKey,
+	w http.ResponseWriter, r *http.Request, harness string, key docker.WorkspaceKey,
 ) (segment, projectID string, ok bool) {
 	projectID = r.URL.Query().Get("project")
 	if projectID == "" {
@@ -228,7 +233,7 @@ func (s *Server) workspaceSegmentFor(
 		writeJSON(w, http.StatusNotFound, errBody("unknown project: "+projectID))
 		return "", "", false
 	}
-	return config.ProjectWorkspace(projectID), projectID, true
+	return workspaceSegmentOf(harness, projectID), projectID, true
 }
 
 // projectSessionID applies the project prefix a dispatch rule matches on. Kept
@@ -260,9 +265,11 @@ func (s *Server) checkProject(w http.ResponseWriter, key docker.WorkspaceKey, pr
 
 // workspaceSegmentOf mirrors the proxy-side helper for the HTTP layer, which
 // resolves a project id it already validated.
-func workspaceSegmentOf(project string) string {
-	if project == "" {
-		return config.MainWorkspace
-	}
-	return config.ProjectWorkspace(project)
+//
+// It needs the HARNESS, because the two put a project's files
+// in different places -- a sibling directory for picoclaw, a child for the
+// ganglion. Reading the wrong one returns an empty history for a conversation
+// that exists, which looks like data loss and is not.
+func workspaceSegmentOf(harness, project string) string {
+	return config.WorkspaceSegment(harness, project)
 }

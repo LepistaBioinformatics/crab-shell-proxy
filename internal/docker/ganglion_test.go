@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 )
 
 // A returning user must get the same bearer. A recreate that rotated it would
@@ -423,5 +425,218 @@ func TestTheSkillsRootReachesTheHarness(t *testing.T) {
 	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil), "\n")
 	if !strings.Contains(joined, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest) {
 		t.Errorf("the shared skills root was not named:\n%s", joined)
+	}
+}
+
+// ganglionSeedManager is the narrowest Manager seedGanglionProjects needs: a
+// data root and no chown user, so the seed runs where lchown is not permitted.
+// It returns the user directory the workspace lives under, because that is what
+// materializeGanglion hands the seeder.
+func ganglionSeedManager(t *testing.T) (*Manager, WorkspaceKey, string) {
+	t.Helper()
+	root := t.TempDir()
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "gamma", UserAccID: "u1"}
+	userDir := config.UserWorkspace(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	if err := os.MkdirAll(filepath.Join(userDir, config.MainWorkspace), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		cfg:  &config.Config{ContainerDataRoot: root, PicoclawUser: ""},
+		logf: func(string, ...any) {},
+	}
+	return m, key, userDir
+}
+
+// The harness resolves a project's transcripts, its context window, its
+// generated images and the member's uploads under one root, and it runs
+// non-root. The proxy makes that root so the ownership is decided once, here,
+// rather than by whichever of the two processes reaches the directory first.
+func TestSeedingAGanglionProjectCreatesItsSubtreeUnderTheWorkspace(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+	p, err := m.projectStore(key).Create("Seed Trial", "Only discuss the 2026 seed trial.", time.Now())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	root := filepath.Join(userDir, config.GanglionProjectWorkspace(p.ID))
+	for _, sub := range ganglionProjectDirs {
+		if fi, statErr := os.Stat(filepath.Join(root, sub)); statErr != nil || !fi.IsDir() {
+			t.Errorf("%s was not created under the project root: %v", sub, statErr)
+		}
+	}
+	// The legacy spelling must NOT be created: publicRoot migrates a directory
+	// called `uploads` into `public` on first access, so seeding it would make
+	// every ensure recreate what every media call then renames.
+	if _, statErr := os.Stat(filepath.Join(root, config.LegacyPublicDirName)); statErr == nil {
+		t.Errorf("the seed created %q, which publicRoot would migrate on every access",
+			config.LegacyPublicDirName)
+	}
+}
+
+// The instructions are what the harness folds into the system prompt, and the
+// file name is the whole contract between the two repositories: the harness
+// reads it as a constant (skills.ProjectFileName), not as a configured path.
+func TestAGanglionProjectFileCarriesTheMembersInstructions(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+	p, err := m.projectStore(key).Create("Seed Trial", "Only discuss the 2026 seed trial.", time.Now())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(userDir,
+		config.GanglionProjectWorkspace(p.ID), ganglionProjectFileName))
+	if err != nil {
+		t.Fatalf("read %s: %v", ganglionProjectFileName, err)
+	}
+	got := string(raw)
+	if !strings.Contains(got, "Only discuss the 2026 seed trial.") {
+		t.Errorf("the instructions did not reach the agent: %q", got)
+	}
+	if !strings.HasPrefix(got, "# Seed Trial\n") {
+		t.Errorf("the project is not named at the head of the document: %q", got)
+	}
+}
+
+// The file is fully DERIVED from the store, so an edit the agent makes to it is
+// reverted on the next ensure -- the same trade composeProjectAgentMD documents
+// for picoclaw. A seed that respected the agent's edit would let the agent
+// rewrite the instructions the member gave it.
+func TestSeedingAGanglionProjectRevertsAnAgentEditToTheProjectFile(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+	p, err := m.projectStore(key).Create("Seed Trial", "Only discuss the 2026 seed trial.", time.Now())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("first seed: %v", err)
+	}
+
+	path := filepath.Join(userDir, config.GanglionProjectWorkspace(p.ID), ganglionProjectFileName)
+	if err := os.WriteFile(path, []byte("# Whatever I like\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("second seed: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Only discuss the 2026 seed trial.") {
+		t.Errorf("the agent's edit survived the ensure: %q", raw)
+	}
+}
+
+// An empty project is a legitimate state -- a member may create one and write
+// the instructions later -- and the agent should be told what it is looking at
+// rather than reading a bare heading.
+func TestAGanglionProjectWithNoInstructionsStillSaysWhatItIs(t *testing.T) {
+	got := ganglionProjectDoc(projects.Project{ID: "seedtrial", Name: "Seed Trial"})
+	if !strings.Contains(got, "no instructions yet") {
+		t.Errorf("an empty project rendered a bare heading: %q", got)
+	}
+}
+
+// NFR-1, the regression bar: an agent that has never had a project must be
+// byte-identical to what it is today, and that includes not acquiring a
+// `projects` directory it has no use for.
+func TestAGanglionWorkspaceWithNoProjectsGetsNoProjectsDirectory(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(userDir, config.MainWorkspace, "projects")); !os.IsNotExist(err) {
+		t.Errorf("a workspace with no projects grew a projects directory: %v", err)
+	}
+}
+
+// Decision D-1, and the reason the ganglion layout differs from picoclaw's: a
+// project is a directory INSIDE the one bind the container already has, so
+// creating one is not a bind change and must never cost a recreate. A
+// scale-to-zero agent may have no container at all when its member makes a
+// project, and "recreate to add a project" would be a strange price for it.
+func TestSeedingAGanglionProjectIsNotABindChange(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+	cfg := &config.Config{HostDataRoot: "/host/data"}
+	binds := ganglionBinds(cfg, key, config.UserWorkspace(cfg.HostDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID))
+	if ganglionBindDrift(cfg, binds) {
+		t.Fatal("the bind set this test starts from already reads as drift")
+	}
+
+	if _, err := m.projectStore(key).Create("Seed Trial", "", time.Now()); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if ganglionBindDrift(cfg, binds) {
+		t.Error("a project made the bind set look stale; the container would be recreated for a directory")
+	}
+}
+
+// The webapp warns a member that deleting a project removes its transcripts and
+// its files. That warning has to be TRUE on whichever harness answered.
+//
+// A ganglion project's subtree lives under workspace/projects/, which
+// removeProjectWorkspace did not touch and which syncProjectWorkspaces never
+// reaches -- the ganglion ensure path returns before it. So a deleted project's
+// conversations stayed on disk after the member was told they were gone.
+func TestDeletingAProjectRemovesItOnEitherHarness(t *testing.T) {
+	userDir := t.TempDir()
+	pico := filepath.Join(userDir, config.ProjectWorkspace("demo"), "sessions")
+	gang := filepath.Join(userDir, config.GanglionProjectWorkspace("demo"), "sessions")
+	for _, d := range []string{pico, gang} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "conv.jsonl"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := removeProjectWorkspace(userDir, "demo"); err != nil {
+		t.Fatalf("removeProjectWorkspace: %v", err)
+	}
+	for _, d := range []string{pico, gang} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("%s survived the delete", d)
+		}
+	}
+	// The main workspace is untouched: only the project's own subtree goes.
+	if _, err := os.Stat(filepath.Join(userDir, config.MainWorkspace)); err == nil {
+		t.Log("main workspace intact")
+	}
+}
+
+// Deleting removes the RECORD first and the directory second, so a crash between
+// the two leaves a member's transcripts on disk and invisible to them. On the
+// picoclaw side syncProjectWorkspaces sweeps that; the ganglion path returns
+// before it ever runs, so its own ensure has to.
+func TestAnOrphanedGanglionProjectIsSweptOnTheNextEnsure(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+
+	orphan := filepath.Join(userDir, config.MainWorkspace, "projects", "gone")
+	if err := os.MkdirAll(filepath.Join(orphan, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, "sessions", "conv.jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("seedGanglionProjects: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatal("a project with no record kept its transcripts")
 	}
 }

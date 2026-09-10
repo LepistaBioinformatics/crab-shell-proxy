@@ -63,8 +63,15 @@ var picoclawOnly = map[harnessFeature]bool{
 // featurePersonalModel/ganglion: DF-4 of the harness spec, closed by
 // ganglion-model-registry. A ganglion container reads a materialized registry
 // file written from the same cascade, so a member's own model reaches it.
+//
+// featureProjects/ganglion: DF-3 of the harness spec, closed by
+// ganglion-projects slice A. The harness takes the project as a header and keeps
+// its subtree under the workspace it already mounts, so a project scopes the
+// transcripts, the window and the files without a second bind — which is what
+// makes it reachable at all for an agent that may have no container running.
 var alsoServedBy = map[harnessFeature]map[string]bool{
 	featurePersonalModel: {config.HarnessGanglion: true},
+	featureProjects:      {config.HarnessGanglion: true},
 }
 
 // requireHarnessFeature writes a 501 and returns false when this agent's

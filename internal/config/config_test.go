@@ -866,3 +866,42 @@ func TestLoadStillFailsOnAMissingPicoclawToken(t *testing.T) {
 		t.Errorf("error does not name the problem: %v", err)
 	}
 }
+
+// The two harnesses put a project's files in DIFFERENT places, and this is the
+// one function that says which. picoclaw's projects are siblings of the main
+// workspace because each is a separate agent that resolves its own workspace;
+// the ganglion has one agent and takes the project as a header, so its projects
+// are children of the workspace it already mounts.
+//
+// Getting this wrong does not fail: it reads an empty transcript for a
+// conversation that exists, which the member experiences as lost history.
+func TestTheWorkspaceSegmentIsASiblingForPicoclawAndAChildForTheGanglion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		harness string
+		project string
+		want    string
+	}{
+		{"picoclaw puts a project beside the main workspace", HarnessPicoclaw, "seedtrial", "workspace-seedtrial"},
+		{"the ganglion puts a project under it", HarnessGanglion, "seedtrial", "workspace/projects/seedtrial"},
+		{"an empty harness is picoclaw", "", "seedtrial", "workspace-seedtrial"},
+		{"an unknown harness keeps the picoclaw shape", "something-new", "seedtrial", "workspace-seedtrial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WorkspaceSegment(tc.harness, tc.project); got != tc.want {
+				t.Errorf("WorkspaceSegment(%q, %q) = %q, want %q", tc.harness, tc.project, got, tc.want)
+			}
+		})
+	}
+}
+
+// No project is the main workspace on every harness, and it must stay the bare
+// segment every existing deployment already writes into. A deployment that has
+// never had a project has to keep the paths it has always had.
+func TestTheMainWorkspaceIsTheSameSegmentOnEveryHarness(t *testing.T) {
+	for _, harness := range []string{HarnessPicoclaw, HarnessGanglion, "", "something-new"} {
+		if got := WorkspaceSegment(harness, ""); got != MainWorkspace {
+			t.Errorf("WorkspaceSegment(%q, \"\") = %q, want the main workspace %q", harness, got, MainWorkspace)
+		}
+	}
+}

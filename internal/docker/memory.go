@@ -22,10 +22,10 @@ const MemoryDirName = "memory"
 // workspaceDir is the segment root the memory dir lives in — the agent's own
 // workspace, or a project's. Confinement is anchored HERE rather than at the
 // memory dir, because `memory` is itself a component the agent can replace.
-func (m *Manager) workspaceDir(key WorkspaceKey, project string) string {
+func (m *Manager) workspaceDir(key WorkspaceKey, harness, project string) string {
 	return filepath.Join(
 		config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
-		workspaceSegment(project),
+		workspaceSegment(harness, project),
 	)
 }
 
@@ -37,8 +37,8 @@ const memoryRel = MemoryDirName + "/" + MemoryFileName
 // ReadMemory returns the current MEMORY_CUSTOM.md contents for the caller's
 // workspace. An absent file is an empty document (not an error) -- the editor
 // simply opens blank.
-func (m *Manager) ReadMemory(key WorkspaceKey, project string) (string, error) {
-	tree, err := openTreeIfExists(m.workspaceDir(key, project))
+func (m *Manager) ReadMemory(key WorkspaceKey, harness, project string) (string, error) {
+	tree, err := openTreeIfExists(m.workspaceDir(key, harness, project))
 	if err != nil {
 		if errors.Is(err, ErrMediaNotFound) {
 			return "", nil // no workspace yet is an empty document, not a failure
@@ -80,8 +80,8 @@ func (m *Manager) ReadMemory(key WorkspaceKey, project string) (string, error) {
 // Confined to the workspace root, both components of memory/MEMORY_CUSTOM.md are
 // resolved by the kernel against that boundary, so a swapped component fails the
 // syscall instead of redirecting the write.
-func (m *Manager) WriteMemory(key WorkspaceKey, project, content string) error {
-	tree, err := openTree(m.workspaceDir(key, project))
+func (m *Manager) WriteMemory(key WorkspaceKey, harness, project, content string) error {
+	tree, err := openTree(m.workspaceDir(key, harness, project))
 	if err != nil {
 		return err
 	}

@@ -51,7 +51,7 @@ func (s *Server) graphScope(w http.ResponseWriter, r *http.Request) (memgraph.Sc
 	// be told which one. An unknown id 404s here rather than falling back to the
 	// main graph — showing one project's memory under another project's name is
 	// worse than an error.
-	_, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	_, projectID, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return memgraph.Scope{}, false
 	}

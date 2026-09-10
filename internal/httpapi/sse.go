@@ -310,6 +310,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		SessionID:  sessionKey,
 		SessionKey: key.UserAccID + ":" + key.Role,
 		Model:      model,
+		Project:    project,
 		Content:    userContent,
 	}, turn.Sink{
 		Content: func(delta string) {
@@ -339,7 +340,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		// logged and never surfaced as an error: losing the file is bad, replacing
 		// the answer the user is reading with a 502 is worse.
 		Attachment: func(a turn.Attachment) {
-			stored, err := s.storeTurnAttachment(turnCtx, key, project, a)
+			stored, err := s.storeTurnAttachment(turnCtx, key, agent.Harness, project, a)
 			if err != nil {
 				s.logf("stream: attachment %q not stored: %v", a.Filename, err)
 				return
@@ -365,7 +366,7 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 	// Fold the just-written turn into the durable transcript now — while the live
 	// file still holds it — so a later restart that rewrites the live file can't
 	// erase the history.
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegmentOf(project))
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegmentOf(agent.Harness, project))
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
 		s.logf("stream: sync durable history failed: %v", syncErr)
 	}

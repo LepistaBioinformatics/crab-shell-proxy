@@ -103,28 +103,28 @@ type Orchestrator interface {
 	ArmScheduledBounce(scope docker.Scope, at time.Time)
 	// StoreMedia writes an uploaded file into the caller's workspace uploads
 	// dir and returns its workspace-relative path.
-	StoreMedia(key docker.WorkspaceKey, project, rawName string, r io.Reader) (docker.StoredMedia, error)
+	StoreMedia(key docker.WorkspaceKey, harness, project, rawName string, r io.Reader) (docker.StoredMedia, error)
 	// StoreAgentAttachment saves a file the HARNESS delivered out-of-band (the
 	// "Requested output delivered via tool attachment." path) into
 	// uploads/attachments/, which is what makes it reachable: the media list and
 	// download route already handle nested paths, so it appears in the uploads
 	// sidebar like any file the user uploaded.
-	StoreAgentAttachment(key docker.WorkspaceKey, project, rawName string, r io.Reader) (docker.StoredMedia, error)
+	StoreAgentAttachment(key docker.WorkspaceKey, harness, project, rawName string, r io.Reader) (docker.StoredMedia, error)
 	// ListMedia returns the files in the caller's workspace uploads dir.
-	ListMedia(key docker.WorkspaceKey, project string) ([]docker.StoredMedia, error)
+	ListMedia(key docker.WorkspaceKey, harness, project string) ([]docker.StoredMedia, error)
 	// DeleteMedia removes one uploaded file (by its stored filename).
-	DeleteMedia(key docker.WorkspaceKey, project, storedName string) error
+	DeleteMedia(key docker.WorkspaceKey, harness, project, storedName string) error
 	// Member-driven organisation of the uploads tree. MoveMedia covers renaming;
 	// DeleteFolder is recursive and reports how many files it removed.
-	CreateFolder(key docker.WorkspaceKey, project, rel string) error
-	MoveMedia(key docker.WorkspaceKey, project, fromRel, toRel string) error
-	DeleteFolder(key docker.WorkspaceKey, project, rel string) (int, error)
+	CreateFolder(key docker.WorkspaceKey, harness, project, rel string) error
+	MoveMedia(key docker.WorkspaceKey, harness, project, fromRel, toRel string) error
+	DeleteFolder(key docker.WorkspaceKey, harness, project, rel string) (int, error)
 	// OpenMedia opens one uploaded file for download (reader + display name).
-	OpenMedia(key docker.WorkspaceKey, project, storedName string) (io.ReadCloser, string, error)
+	OpenMedia(key docker.WorkspaceKey, harness, project, storedName string) (io.ReadCloser, string, error)
 	// ReadMemory returns the caller's workspace MEMORY_CUSTOM.md (empty if unset).
-	ReadMemory(key docker.WorkspaceKey, project string) (string, error)
+	ReadMemory(key docker.WorkspaceKey, harness, project string) (string, error)
 	// WriteMemory replaces the caller's workspace MEMORY_CUSTOM.md.
-	WriteMemory(key docker.WorkspaceKey, project, content string) error
+	WriteMemory(key docker.WorkspaceKey, harness, project, content string) error
 
 	// --- admin-shared-content (authority-over-target; gated in internal/authz) ---
 
@@ -152,9 +152,9 @@ type Orchestrator interface {
 	// ListSubscriptionUsers enumerates the end users under a subscription.
 	ListSubscriptionUsers(tenantID, subsAccID string) ([]docker.UserRef, error)
 	// ListUserFiles returns a user's private-file metadata only (no bytes — FR-7).
-	ListUserFiles(key docker.WorkspaceKey, project string) ([]docker.FileMeta, error)
+	ListUserFiles(key docker.WorkspaceKey, harness, project string) ([]docker.FileMeta, error)
 	// DeleteUserFile removes one of a user's private files (never reads it — FR-7).
-	DeleteUserFile(key docker.WorkspaceKey, project, name string) error
+	DeleteUserFile(key docker.WorkspaceKey, harness, project, name string) error
 
 	// --- admin-instance-config-editor ---
 
@@ -767,10 +767,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		SessionID:  sessionKey,
 		SessionKey: key.UserAccID + ":" + key.Role,
 		Model:      model,
+		Project:    req.Project,
 		Content:    userContent,
 	}, turn.Sink{
 		Attachment: func(a turn.Attachment) {
-			stored, storeErr := s.storeTurnAttachment(turnCtx, key, req.Project, a)
+			stored, storeErr := s.storeTurnAttachment(turnCtx, key, agent.Harness, req.Project, a)
 			if storeErr != nil {
 				s.logf("chat: attachment %q not stored: %v", a.Filename, storeErr)
 				return
@@ -785,7 +786,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegmentOf(req.Project))
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID, workspaceSegmentOf(agent.Harness, req.Project))
 	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
 		s.logf("chat: sync durable history failed: %v", syncErr)
 	}
@@ -987,7 +988,7 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 		TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
 		Role: agent.Key, UserAccID: ident.AccID,
 	}
-	segment, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	segment, projectID, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}
@@ -1053,7 +1054,7 @@ func (s *Server) handleSessionsResolve(w http.ResponseWriter, r *http.Request) {
 		TenantID: tenantID.String(), SubsAccID: subsAccID.String(),
 		Role: agent.Key, UserAccID: ident.AccID,
 	}
-	segment, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	segment, projectID, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}
@@ -1328,7 +1329,7 @@ func (s *Server) handleMediaPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.Mgr.StoreMedia(key, project, header.Filename, file)
+	stored, err := s.Mgr.StoreMedia(key, agent.Harness, project, header.Filename, file)
 	if err != nil {
 		if errors.Is(err, docker.ErrMediaName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
@@ -1364,7 +1365,7 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	_, project, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}
@@ -1374,7 +1375,7 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		s.serveMediaFile(w, key, project, agent, ident, path)
 		return
 	}
-	files, err := s.Mgr.ListMedia(key, project)
+	files, err := s.Mgr.ListMedia(key, agent.Harness, project)
 	if err != nil {
 		s.logf("media: list failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -1403,7 +1404,7 @@ func mediaRelPath(p string) string {
 
 // serveMediaFile streams one uploaded file back as a download attachment.
 func (s *Server) serveMediaFile(w http.ResponseWriter, key docker.WorkspaceKey, project string, agent config.Agent, ident identity.Identity, path string) {
-	rc, display, err := s.Mgr.OpenMedia(key, project, mediaRelPath(path))
+	rc, display, err := s.Mgr.OpenMedia(key, agent.Harness, project, mediaRelPath(path))
 	if err != nil {
 		switch {
 		case errors.Is(err, docker.ErrMediaName):
@@ -1449,11 +1450,11 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	_, project, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}
-	if err := s.Mgr.DeleteMedia(key, project, mediaRelPath(path)); err != nil {
+	if err := s.Mgr.DeleteMedia(key, agent.Harness, project, mediaRelPath(path)); err != nil {
 		if errors.Is(err, docker.ErrMediaName) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
@@ -1491,11 +1492,11 @@ func (s *Server) handleMemoryGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, project, ok := s.workspaceSegmentFor(w, r, key)
+	_, project, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}
-	content, err := s.Mgr.ReadMemory(key, project)
+	content, err := s.Mgr.ReadMemory(key, agent.Harness, project)
 	if err != nil {
 		s.logf("memory: read failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -1549,7 +1550,7 @@ func (s *Server) handleMemoryPut(w http.ResponseWriter, r *http.Request) {
 	if !s.checkProject(w, key, req.Project) {
 		return
 	}
-	if err := s.Mgr.WriteMemory(key, req.Project, req.Content); err != nil {
+	if err := s.Mgr.WriteMemory(key, agent.Harness, req.Project, req.Content); err != nil {
 		s.logf("memory: write failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return

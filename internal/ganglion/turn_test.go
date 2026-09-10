@@ -207,3 +207,48 @@ func TestCancel_StopsARunningTurnAndIsSafeWhenThereIsNone(t *testing.T) {
 		t.Fatal("Cancel did not stop the running turn")
 	}
 }
+
+// The proxy owns the preimage of every scope the harness runs a turn in, and
+// the project is now one of them (ganglion-projects D-2). The harness never
+// derives it: a project reaches picoclaw through the "p.<id>." session-id
+// prefix and a dispatch rule, and making the ganglion parse that string would
+// make it depend on a routing convention owned somewhere else.
+func TestAProjectTurnCarriesTheProjectHeader(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Ganglion-Project")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	tr := req(srv.URL)
+	tr.Project = "seedtrial"
+	if _, err := New(srv.Client()).RunTurn(context.Background(), tr, turn.Sink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if got != "seedtrial" {
+		t.Errorf("X-Ganglion-Project = %q, want %q — the turn would run in the main workspace", got, "seedtrial")
+	}
+}
+
+// A turn with no project must send the request it sends today, header for
+// header. This is the regression bar for every deployment that has no projects
+// at all (NFR-1): an empty header is a value the harness would have to decide
+// what to do with, and there is nothing for it to mean.
+func TestATurnWithNoProjectSendsNoProjectHeader(t *testing.T) {
+	present := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["X-Ganglion-Project"]
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.Client()).RunTurn(context.Background(), req(srv.URL), turn.Sink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if present {
+		t.Error("a turn with no project sent X-Ganglion-Project; the unscoped request must be unchanged")
+	}
+}
