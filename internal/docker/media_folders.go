@@ -75,7 +75,6 @@ func isInsideReserved(rel string) bool {
 	return strings.HasPrefix(clean, AttachmentsSubdir+"/")
 }
 
-
 // CreateFolder makes a folder (and any missing parents) inside the member's public
 // tree, chowned so the non-root agent can use it too.
 //

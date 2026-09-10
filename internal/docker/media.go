@@ -93,7 +93,6 @@ func safeStoredPath(name string) (string, error) {
 	return clean, nil
 }
 
-
 // StoreMedia writes an uploaded file into the caller's agent-readable workspace
 // uploads dir, keyed by the sanitized filename so re-uploading the same name
 // OVERWRITES (one file per name — no accumulating duplicates), chowned to the

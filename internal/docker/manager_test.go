@@ -558,9 +558,11 @@ func TestImageDrift(t *testing.T) {
 			f.imageIDErr = c.wantErr
 			m, _ := testManager(t, config.ModeScaleToZero, f)
 
-			got := m.imageDrift(context.Background(), ContainerState{
-				Exists: true, Running: true, Image: c.container,
-			})
+			// A picoclaw agent: imageDrift now resolves the image from the
+			// agent's harness rather than from a single global.
+			got := m.imageDrift(context.Background(),
+				config.Agent{Harness: config.HarnessPicoclaw},
+				ContainerState{Exists: true, Running: true, Image: c.container})
 			if got != c.drift {
 				t.Errorf("imageDrift = %v, want %v", got, c.drift)
 			}

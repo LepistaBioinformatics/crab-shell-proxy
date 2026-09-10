@@ -400,7 +400,7 @@ func projectBindDrift(mountDest string, list []projects.Project, actual []string
 // something that may not be broken. The real read, the one that matters, happens
 // in create().
 // imageDrift reports whether a container is running something other than what
-// PicoclawImage resolves to right now.
+// this agent's harness image resolves to right now.
 //
 // Compares resolved IDS, not the tag. The tag is what create() was given and it
 // does not change when the image behind it is rebuilt — which is the case that
@@ -413,13 +413,14 @@ func projectBindDrift(mountDest string, list []projects.Project, actual []string
 // on "I don't know" would destroy a live conversation to install nothing: the
 // container is already running a working image, and create() calls EnsureImage,
 // which is where a genuinely missing image is pulled or fails loudly.
-func (m *Manager) imageDrift(ctx context.Context, st ContainerState) bool {
+func (m *Manager) imageDrift(ctx context.Context, agent config.Agent, st ContainerState) bool {
 	if st.Image == "" {
 		return false // an older daemon, or a fake in a test that does not model it
 	}
-	want, err := m.docker.ImageID(ctx, m.cfg.PicoclawImage)
+	image := m.harnessImage(agent)
+	want, err := m.docker.ImageID(ctx, image)
 	if err != nil {
-		m.logf("image drift check skipped for %s: %v", m.cfg.PicoclawImage, err)
+		m.logf("image drift check skipped for %s: %v", image, err)
 		return false
 	}
 	if want == "" {
