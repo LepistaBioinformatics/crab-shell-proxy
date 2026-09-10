@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
@@ -146,6 +147,15 @@ type Agent struct {
 	ResolvedToken string `yaml:"-"`
 }
 
+// DisabledAgent records an agent that was declared but removed at load, and
+// why. Reported rather than silently dropped: "that agent does not exist" is a
+// legible failure only if something, somewhere, says it was disabled and names
+// the missing setting.
+type DisabledAgent struct {
+	Key    string
+	Reason string
+}
+
 // modelKey identifies a ModelConfig by its selectable identity.
 type modelKey struct{ Provider, Name string }
 
@@ -218,8 +228,12 @@ type Config struct {
 	// per-commit tag.
 	GanglionImage string `yaml:"ganglionImage"`
 	// GanglionPort is where the harness serves HTTP+SSE inside its container.
-	GanglionPort    int      `yaml:"ganglionPort"`
-	StartupDeadline Duration `yaml:"startupDeadline"`
+	GanglionPort int `yaml:"ganglionPort"`
+
+	// DisabledAgents lists agents removed at Load because this environment
+	// cannot provision them, in key order. Filled by Load, never by YAML.
+	DisabledAgents  []DisabledAgent `yaml:"-"`
+	StartupDeadline Duration        `yaml:"startupDeadline"`
 	// TurnIdleTimeout is how long the harness may stay SILENT before its turn is
 	// declared dead. It is not a cap on how long a turn may take: an agentic turn
 	// legitimately runs for many minutes while narrating its work, and the total
@@ -342,8 +356,36 @@ func Load(path string) (*Config, error) {
 				mc.APIKey = os.Getenv(mc.APIKeyEnv)
 			}
 		}
+		// FR-18. A ganglion agent whose provider key is not provisioned in THIS
+		// environment removes itself instead of taking the proxy down with it.
+		//
+		// The mechanism existed for the withdrawn Hermes harness and died with
+		// it; multi-harness-support/implementation-notes.md §10 recommends
+		// bringing it back, and a second harness is when it starts mattering
+		// again. The value is that one config can describe several deployments:
+		// a shared config declaring a ganglion agent reaches a host with no key
+		// for it and degrades to "that agent does not exist" -- a 404 on that
+		// agent's routes -- instead of "the proxy will not boot", which takes
+		// every other agent down too.
+		//
+		// Picoclaw agents are deliberately NOT subject to this: their key is
+		// written into a per-user .security.yml at provisioning time and an
+		// empty one surfaces as an auth error on the first model call, which is
+		// the behaviour every existing deployment already depends on.
+		if agent.Harness == HarnessGanglion && agent.Model != nil &&
+			agent.Model.APIKeyEnv != "" && agent.Model.APIKey == "" {
+			cfg.DisabledAgents = append(cfg.DisabledAgents, DisabledAgent{
+				Key:    key,
+				Reason: fmt.Sprintf("%s is unset", agent.Model.APIKeyEnv),
+			})
+			delete(cfg.Agents, key)
+			continue
+		}
 		cfg.Agents[key] = agent
 	}
+	sort.Slice(cfg.DisabledAgents, func(i, j int) bool {
+		return cfg.DisabledAgents[i].Key < cfg.DisabledAgents[j].Key
+	})
 	sec, err := cfg.WebhookSecret.resolve()
 	if err != nil {
 		return nil, fmt.Errorf("webhookSecret: %w", err)

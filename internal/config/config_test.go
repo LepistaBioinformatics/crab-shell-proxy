@@ -726,3 +726,75 @@ func TestLoadAcceptsAGanglionAgentWithAnImage(t *testing.T) {
 		t.Errorf("GanglionPort = %d, want the 18800 default", cfg.GanglionPort)
 	}
 }
+
+// FR-18. One config should be able to describe several deployments: a shared
+// config declaring a ganglion agent reaches a host with no provider key for it
+// and degrades to "that agent does not exist" instead of "the proxy will not
+// boot", which would take every other agent down with it.
+func TestLoadDisablesAGanglionAgentWhoseKeyIsUnset(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("GANGLION_KEY", "") // declared, not provisioned here
+
+	body := strings.Replace(sample, "  alpha:\n",
+		"  alpha:\n    harness: ganglion\n    model:\n      provider: deepseek\n"+
+			"      name: deepseek-chat\n      apiKeyEnv: GANGLION_KEY\n", 1)
+	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load must not fail because one agent is unprovisioned: %v", err)
+	}
+	if _, still := cfg.Agents["alpha"]; still {
+		t.Error("the unprovisioned agent is still live")
+	}
+	if len(cfg.DisabledAgents) != 1 {
+		t.Fatalf("DisabledAgents = %+v, want exactly one entry", cfg.DisabledAgents)
+	}
+	// The reason has to name the missing setting, or an operator sees a 404 on
+	// a route they configured and has nothing to chase.
+	if !strings.Contains(cfg.DisabledAgents[0].Reason, "GANGLION_KEY") {
+		t.Errorf("reason does not name the missing variable: %q", cfg.DisabledAgents[0].Reason)
+	}
+}
+
+// The same agent stays live once its key is present.
+func TestLoadKeepsAGanglionAgentWhoseKeyIsSet(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("GANGLION_KEY", "provisioned")
+
+	body := strings.Replace(sample, "  alpha:\n",
+		"  alpha:\n    harness: ganglion\n    model:\n      provider: deepseek\n"+
+			"      name: deepseek-chat\n      apiKeyEnv: GANGLION_KEY\n", 1)
+	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Agents["alpha"]; !ok {
+		t.Error("a provisioned ganglion agent was disabled")
+	}
+	if len(cfg.DisabledAgents) != 0 {
+		t.Errorf("DisabledAgents = %+v, want none", cfg.DisabledAgents)
+	}
+}
+
+// Picoclaw is deliberately exempt: its key is written into a per-user
+// .security.yml at provisioning time and an empty one surfaces as an auth
+// error on the first model call. Every existing deployment depends on that.
+func TestLoadDoesNotDisableAPicoclawAgentWhoseKeyIsUnset(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("PICO_KEY", "")
+
+	body := strings.Replace(sample, "  alpha:\n",
+		"  alpha:\n    model:\n      provider: deepseek\n"+
+			"      name: deepseek-chat\n      apiKeyEnv: PICO_KEY\n", 1)
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Agents["alpha"]; !ok {
+		t.Error("a picoclaw agent was disabled for an unset key; that is a behaviour change")
+	}
+}

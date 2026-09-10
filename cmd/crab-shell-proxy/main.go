@@ -49,6 +49,14 @@ func main() {
 	}
 	defer func() { _ = reg.Close() }()
 
+	// An agent that removed itself at load must SAY so. A route answering 404
+	// for an agent the operator wrote into the config, with nothing anywhere
+	// naming the missing variable, is the failure FR-18's reporting prevents --
+	// the degradation is the feature, the silence would not be.
+	for _, d := range cfg.DisabledAgents {
+		logger.Printf("agent %q disabled: %s — its routes will answer 404", d.Key, d.Reason)
+	}
+
 	mgr := docker.NewManager(cfg, dkr, nil, reg, logger.Printf)
 
 	srv := &httpapi.Server{
