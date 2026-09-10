@@ -179,7 +179,14 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 		return a.JobID < b.JobID
 	})
 
-	writeJSON(w, http.StatusOK, cronTasksResponse{Tasks: tasks, Orphans: orphans, Fires: agent.Mode == config.ModeContinuous})
+	// Per instance, not per agent: the whole point of the override is that one
+	// member's schedules can run while the rest of the agent still scales to
+	// zero, and this is the field that tells them which they have.
+	writeJSON(w, http.StatusOK, cronTasksResponse{
+		Tasks:   tasks,
+		Orphans: orphans,
+		Fires:   s.Mgr.ModeFor(agent, key) == config.ModeContinuous,
+	})
 }
 
 // handleCronRun serves one execution's whole transcript, tool activity included.

@@ -593,9 +593,13 @@ func (m *Manager) SubscriptionScaffolded(tenantID, subsAccID string) bool {
 }
 
 // ArmIdle re-arms the scale-to-zero idle timer for a container after a turn
-// completes. No-op for continuous-mode agents.
+// completes. No-op for a continuous instance.
+//
+// Resolved per INSTANCE, not per agent: an instance overridden to continuous on
+// a scale-to-zero agent must not be armed here, or the override would hold for
+// the reconciler and not for the turn that just finished.
 func (m *Manager) ArmIdle(agent config.Agent, key WorkspaceKey) {
-	if agent.Mode != config.ModeScaleToZero {
+	if m.ModeFor(agent, key) != config.ModeScaleToZero {
 		return
 	}
 	name := m.ContainerName(key)
@@ -647,7 +651,7 @@ func (m *Manager) RestartWorkspace(key WorkspaceKey) error {
 	if err := m.waitHealthy(ctx, name, port, budget); err != nil {
 		return fmt.Errorf("container %s did not become ready after restart: %w", name, err)
 	}
-	if agent, ok := m.cfg.Agents[key.Role]; ok && agent.Mode == config.ModeScaleToZero {
+	if agent, ok := m.cfg.Agents[key.Role]; ok && m.ModeFor(agent, key) == config.ModeScaleToZero {
 		m.armLocked(ks, name, agent.IdleTimeout.Std())
 	}
 	m.stampRestart(key)

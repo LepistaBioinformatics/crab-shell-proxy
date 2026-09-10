@@ -37,6 +37,11 @@ type fakeOrch struct {
 	projectErr error
 	ensureErr  error
 	armed      int
+
+	modeOverride map[docker.WorkspaceKey]config.Mode
+	setModeErr   error
+	setModeCalls int
+
 	scaffolded map[string]bool
 	keys       []docker.WorkspaceKey
 
@@ -499,6 +504,30 @@ func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.W
 	return docker.Target{Name: "picoclaw-alpha-h", Endpoint: "ws://x:1/pico/ws", AuthToken: "t"}, nil
 }
 func (f *fakeOrch) ArmIdle(config.Agent, docker.WorkspaceKey) { f.armed++ }
+
+// Per-instance mode. The fake models the real resolution -- override first,
+// agent default second -- rather than returning a fixed value, because the
+// handler under test branches on exactly that precedence.
+func (f *fakeOrch) ModeFor(agent config.Agent, key docker.WorkspaceKey) config.Mode {
+	if m, ok := f.modeOverride[key]; ok && m != "" {
+		return m
+	}
+	return agent.Mode
+}
+
+func (f *fakeOrch) ModeOverride(key docker.WorkspaceKey) config.Mode { return f.modeOverride[key] }
+
+func (f *fakeOrch) SetMode(agent config.Agent, key docker.WorkspaceKey, mode config.Mode) error {
+	if f.setModeErr != nil {
+		return f.setModeErr
+	}
+	if f.modeOverride == nil {
+		f.modeOverride = map[docker.WorkspaceKey]config.Mode{}
+	}
+	f.modeOverride[key] = mode
+	f.setModeCalls++
+	return nil
+}
 
 func (f *fakeOrch) Instances(context.Context) ([]docker.Instance, error) {
 	if f.instancesErr != nil {

@@ -48,8 +48,21 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		}
 		agentKey := s.Labels[LabelAgent]
 		agent, ok := m.cfg.Agents[agentKey]
-		if !ok || agent.Mode != config.ModeScaleToZero {
-			continue // continuous running containers need no timer; unknown agents left alone
+		if !ok {
+			continue // unknown agents left alone
+		}
+		// Per INSTANCE. Keyed off the container's own labels rather than the
+		// agent default, so an instance overridden to scale-to-zero on a
+		// continuous agent is adopted here too -- it would otherwise run
+		// forever with nobody to arm its timer.
+		labelKey := WorkspaceKey{
+			TenantID:  s.Labels[LabelTenant],
+			SubsAccID: s.Labels[LabelSubscription],
+			Role:      agentKey,
+			UserAccID: s.Labels[LabelUser],
+		}
+		if m.ModeFor(agent, labelKey) != config.ModeScaleToZero {
+			continue // continuous running containers need no timer
 		}
 		name := trimName(s.Names)
 		if name == "" {
@@ -64,11 +77,15 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 
 	// Ensure continuous containers are up for every existing per-user workspace
 	// under tenants/*/subscriptions/*/agents/<role>/users/*.
+	// EVERY agent is walked, not only those defaulting to continuous: a single
+	// instance overridden to continuous on a scale-to-zero agent still has to be
+	// brought up, and the old loop skipped its agent entirely before ever
+	// looking at a workspace.
 	for _, agent := range m.cfg.Agents {
-		if agent.Mode != config.ModeContinuous {
-			continue
-		}
 		for _, key := range m.existingWorkspaces(agent.Key) {
+			if m.ModeFor(agent, key) != config.ModeContinuous {
+				continue
+			}
 			// Owner email is unknown here (no request); the marker was already
 			// written on first provision, and the dir already exists so it isn't
 			// re-seeded, so passing "" is fine.

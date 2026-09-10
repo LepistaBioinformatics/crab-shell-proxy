@@ -161,7 +161,11 @@ func ganglionUnprovisioned(c Config, a Agent) string {
 			"set it to an immutable reference, not a moving tag"
 	}
 	if a.Model != nil && a.Model.APIKeyEnv != "" && a.Model.APIKey == "" {
-		return "required model API key environment variable is unset"
+		// Named, not described. An operator reading "an API key is unset" for
+		// an agent they configured has a 404 and nothing to chase; the whole
+		// point of disabling instead of exiting is that the log says which
+		// variable to set.
+		return a.Model.APIKeyEnv + " is unset (the agent's model apiKeyEnv)"
 	}
 	return ""
 }
@@ -255,6 +259,20 @@ type Config struct {
 	// (FR-10). Empty disables export inside the harness rather than making it
 	// log a failed request per turn.
 	GanglionOTLPEndpoint string `yaml:"ganglionOtlpEndpoint"`
+
+	// GanglionKeyPassphrase and GanglionKeyFile are the two factors that let a
+	// harness resolve an enc:// credential. This proxy never decrypts anything
+	// -- it forwards the ciphertext verbatim, because an agent's apiKeyEnv is
+	// an opaque string to it -- so these exist only to be handed on.
+	//
+	// They are deliberately of DIFFERENT KINDS: one arrives as environment,
+	// the other as a file bound read-only into the container. Both as
+	// environment would mean one `docker inspect` yields the plaintext, and
+	// the encryption would be decoration.
+	GanglionKeyPassphrase string `yaml:"-"`
+	// GanglionKeyFile is a path ON THE HOST. Empty means enc:// values are not
+	// in use, and nothing is bound.
+	GanglionKeyFile string `yaml:"ganglionKeyFile"`
 	// cannot provision them, in key order. Filled by Load, never by YAML.
 	DisabledAgents  []DisabledAgent `yaml:"-"`
 	StartupDeadline Duration        `yaml:"startupDeadline"`
@@ -484,6 +502,14 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("GANGLION_OTLP_ENDPOINT"); v != "" {
 		c.GanglionOTLPEndpoint = v
+	}
+	// Passphrase from the environment only -- never from config.yaml, which is
+	// in git.
+	if v := os.Getenv("CRAB_GANGLION_KEY_PASSPHRASE"); v != "" {
+		c.GanglionKeyPassphrase = v
+	}
+	if v := os.Getenv("CRAB_GANGLION_KEY_FILE"); v != "" {
+		c.GanglionKeyFile = v
 	}
 }
 
@@ -746,6 +772,18 @@ func SubscriptionModelOverrideFile(root, tenantID, subsAccID string) string {
 // ignores it: UserWorkspace/.crab-model.json.
 func UserModelOverrideFile(root, tenantID, subsAccID, role, userAccID string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID), ".crab-model.json")
+}
+
+// UserModeOverrideFile is the per-instance lifecycle override:
+// UserWorkspace/.crab-mode.json.
+//
+// A dotfile beside .crab-model.json and .crab-owner.json, ABOVE workspace/ --
+// so picoclaw's restrict_to_workspace and the ganglion's Landlock domain both
+// keep the agent from reading or editing it. That matters more here than for a
+// model selection: an agent able to write this file could keep its own
+// container alive indefinitely.
+func UserModeOverrideFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID), ".crab-mode.json")
 }
 
 // TenantSharedFilesDir is the tenant-scope shared-files store, cascaded

@@ -36,6 +36,20 @@ import (
 type Orchestrator interface {
 	EnsureRunning(ctx context.Context, agent config.Agent, key docker.WorkspaceKey, ownerEmail string) (docker.Target, error)
 	ArmIdle(agent config.Agent, key docker.WorkspaceKey)
+
+	// --- per-instance lifecycle mode ---
+	//
+	// ModeFor resolves ONE instance's mode: its override, or its agent's
+	// default. Every branch on lifecycle goes through it, so an override cannot
+	// hold for the idle timer and not for the reconciler.
+	ModeFor(agent config.Agent, key docker.WorkspaceKey) config.Mode
+	// ModeOverride reports the override alone, empty when the instance follows
+	// its agent. The admin screen needs the distinction: "continuous" inherited
+	// and "continuous" pinned differ in what happens when the default moves.
+	ModeOverride(key docker.WorkspaceKey) config.Mode
+	// SetMode writes the override AND moves the idle timer to match, in one
+	// operation. Empty clears it.
+	SetMode(agent config.Agent, key docker.WorkspaceKey, mode config.Mode) error
 	// Instances returns every managed workspace for the telemetry inventory.
 	// READ-ONLY: it must not create, start, stop or remove anything. See
 	// docker.Manager.Instances.
@@ -400,6 +414,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/users/files", s.handleAdminUserFilesDelete)
 	mux.HandleFunc("GET /v1/admin/users/config", s.handleAdminInstanceConfigGet)
 	mux.HandleFunc("PUT /v1/admin/users/config", s.handleAdminInstanceConfigPut)
+	mux.HandleFunc("GET /v1/admin/users/mode", s.handleAdminInstanceModeGet)
+	mux.HandleFunc("PUT /v1/admin/users/mode", s.handleAdminInstanceModePut)
 	mux.HandleFunc("GET /v1/admin/scope/config/keys", s.handleAdminScopeConfigKeys)
 	mux.HandleFunc("GET /v1/admin/scope/config/inspect", s.handleAdminScopeConfigInspect)
 	mux.HandleFunc("PUT /v1/admin/scope/config", s.handleAdminScopeConfigPut)
