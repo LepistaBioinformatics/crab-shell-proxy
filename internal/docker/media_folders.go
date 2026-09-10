@@ -81,7 +81,7 @@ func isInsideReserved(rel string) bool {
 // Idempotent: an existing folder is success, not a conflict. A member clicking "new
 // folder" twice, or two tabs racing, should not produce an error about something that
 // is already true.
-func (m *Manager) CreateFolder(key WorkspaceKey, project string, rel string) error {
+func (m *Manager) CreateFolder(key WorkspaceKey, harness, project string, rel string) error {
 	// The system's own folder cannot be created by a member: it already exists (or the
 	// proxy makes it on the next delivery), and a member-made one by that name would
 	// collide with it.
@@ -92,7 +92,7 @@ func (m *Manager) CreateFolder(key WorkspaceKey, project string, rel string) err
 	if err != nil {
 		return err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func (m *Manager) CreateFolder(key WorkspaceKey, project string, rel string) err
 // MoveMedia moves a file or a folder to a new path inside the uploads tree. A move
 // within the same parent is a rename — deliberately not a separate operation, because
 // it is the same filesystem call with the same three failure modes.
-func (m *Manager) MoveMedia(key WorkspaceKey, project string, fromRel, toRel string) error {
+func (m *Manager) MoveMedia(key WorkspaceKey, harness, project string, fromRel, toRel string) error {
 	// Renaming or moving the system folder detaches every future agent delivery from
 	// the place the proxy writes them. Moving INTO it is refused for the mirror
 	// reason: the agent treats everything there as its own output.
@@ -141,7 +141,7 @@ func (m *Manager) MoveMedia(key WorkspaceKey, project string, fromRel, toRel str
 	if err != nil {
 		return err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func (m *Manager) MoveMedia(key WorkspaceKey, project string, fromRel, toRel str
 // count is returned so the interface can name it in a confirmation — the member is
 // told "12 files" before the click, not after. The uploads root itself is refused
 // outright; it is not the member's to delete.
-func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (int, error) {
+func (m *Manager) DeleteFolder(key WorkspaceKey, harness, project string, rel string) (int, error) {
 	if isReservedFolder(rel) {
 		return 0, ErrMediaReserved
 	}
@@ -205,7 +205,7 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (in
 	if err != nil {
 		return 0, err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return 0, err
 	}
@@ -243,9 +243,6 @@ func (m *Manager) DeleteFolder(key WorkspaceKey, project string, rel string) (in
 // used to hardcode the main workspace, which inside a project was not "shared"
 // but WRONG: the project's agent writes into workspace-<id>/, so an upload made
 // from a project landed somewhere its own agent could not see.
-func workspaceSegment(project string) string {
-	if project == "" {
-		return config.MainWorkspace
-	}
-	return config.ProjectWorkspace(project)
+func workspaceSegment(harness, project string) string {
+	return config.WorkspaceSegment(harness, project)
 }

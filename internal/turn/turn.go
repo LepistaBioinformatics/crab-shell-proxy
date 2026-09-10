@@ -21,6 +21,15 @@ type Request struct {
 	// Model is the model label for this turn. Unused by picoclaw, which is pinned
 	// server-side.
 	Model string
+	// Project scopes the turn to one of the member's projects. Empty is the main
+	// workspace, which is every turn a deployment with no projects ever runs.
+	//
+	// Read by the ganglion runner, which sends it as a header. Picoclaw IGNORES
+	// it: a project is a picoclaw AGENT there, reached through the "p.<id>."
+	// prefix on SessionID and the dispatch rule the proxy writes from the same
+	// store — a routing convention that is unchanged and that this field does not
+	// replace.
+	Project string
 	// Content is the user message for this turn.
 	Content string
 }

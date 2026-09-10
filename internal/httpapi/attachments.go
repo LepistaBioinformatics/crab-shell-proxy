@@ -43,8 +43,11 @@ const maxAttachmentBytes = 64 << 20
 // project scopes the store to the workspace of the agent that produced the file:
 // a turn answered by a project agent delivers into that project's uploads, not
 // into the main workspace where its own agent could never open it again.
+// harness says how that project's workspace is SHAPED — a sibling directory for
+// picoclaw, a child of the workspace for the ganglion — so the two travel
+// together everywhere a project does.
 func (s *Server) storeTurnAttachment(
-	ctx context.Context, key docker.WorkspaceKey, project string, a turn.Attachment,
+	ctx context.Context, key docker.WorkspaceKey, harness, project string, a turn.Attachment,
 ) (docker.StoredMedia, error) {
 	if !strings.HasPrefix(a.URL, "http://") && !strings.HasPrefix(a.URL, "https://") {
 		// The runner resolves the harness-relative path before it gets here; an
@@ -77,7 +80,7 @@ func (s *Server) storeTurnAttachment(
 	}
 
 	name := attachmentName(a, res.Header.Get("Content-Disposition"))
-	return s.Mgr.StoreAgentAttachment(key, project, name, io.LimitReader(res.Body, maxAttachmentBytes))
+	return s.Mgr.StoreAgentAttachment(key, harness, project, name, io.LimitReader(res.Body, maxAttachmentBytes))
 }
 
 // attachmentName is the file name to store under. The frame's own filename is

@@ -32,10 +32,15 @@ func TestRequireHarnessFeature(t *testing.T) {
 			allowed: true,
 		},
 		{
-			name:    "ganglion does not serve projects",
+			// DF-3, closed by ganglion-projects slice A: the harness takes the
+			// project as a header and keeps its subtree under the workspace it
+			// already mounts, so a project scopes the transcripts, the window
+			// and the files without a second bind. This row was `false` and the
+			// change of fact is the feature.
+			name:    "ganglion now serves projects",
 			agent:   config.Agent{Key: "zcrab-g", Harness: config.HarnessGanglion},
 			feature: featureProjects,
-			allowed: false,
+			allowed: true,
 		},
 		{
 			// DF-4, closed by ganglion-model-registry: a ganglion container

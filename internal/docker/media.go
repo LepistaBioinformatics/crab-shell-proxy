@@ -98,12 +98,12 @@ func safeStoredPath(name string) (string, error) {
 // OVERWRITES (one file per name — no accumulating duplicates), chowned to the
 // picoclaw user. The size cap + type allowlist are enforced by the caller
 // before this is reached. Returns the "public/<name>" path the turn references.
-func (m *Manager) StoreMedia(key WorkspaceKey, project, rawName string, r io.Reader) (StoredMedia, error) {
+func (m *Manager) StoreMedia(key WorkspaceKey, harness, project, rawName string, r io.Reader) (StoredMedia, error) {
 	name, err := sanitizeFilename(rawName)
 	if err != nil {
 		return StoredMedia{}, err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return StoredMedia{}, err
 	}
@@ -147,12 +147,12 @@ func (m *Manager) StoreMedia(key WorkspaceKey, project, rawName string, r io.Rea
 
 // DeleteMedia removes one uploaded file (by its stored filename from the list)
 // from the caller's uploads dir. Missing file = success (idempotent).
-func (m *Manager) DeleteMedia(key WorkspaceKey, project, storedName string) error {
+func (m *Manager) DeleteMedia(key WorkspaceKey, harness, project, storedName string) error {
 	rel, err := safeStoredPath(storedName)
 	if err != nil {
 		return err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return err
 	}
@@ -179,12 +179,12 @@ func (m *Manager) DeleteMedia(key WorkspaceKey, project, storedName string) erro
 
 // OpenMedia opens one uploaded file for download and returns the reader plus its
 // display name. The caller must Close the reader.
-func (m *Manager) OpenMedia(key WorkspaceKey, project, storedName string) (io.ReadCloser, string, error) {
+func (m *Manager) OpenMedia(key WorkspaceKey, harness, project, storedName string) (io.ReadCloser, string, error) {
 	rel, err := safeStoredPath(storedName)
 	if err != nil {
 		return nil, "", err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return nil, "", err
 	}
@@ -235,8 +235,8 @@ const maxListedMedia = 2000
 // interface derived the tree purely from the folder PREFIXES of file paths — which
 // works until a folder is empty. A member who created one saw nothing: no row, and
 // therefore no drop target to put a file into, which made creating a folder pointless.
-func (m *Manager) ListMedia(key WorkspaceKey, project string) ([]StoredMedia, error) {
-	dir, err := m.publicRoot(key, project)
+func (m *Manager) ListMedia(key WorkspaceKey, harness, project string) ([]StoredMedia, error) {
+	dir, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return nil, err
 	}
@@ -317,12 +317,12 @@ const AttachmentsSubdir = "attachments"
 // caller may push INTO a container; this file was written by the agent inside its
 // own workspace, so refusing it here would drop legitimate deliverables while
 // adding no boundary that the workspace itself does not already have.
-func (m *Manager) StoreAgentAttachment(key WorkspaceKey, project, rawName string, r io.Reader) (StoredMedia, error) {
+func (m *Manager) StoreAgentAttachment(key WorkspaceKey, harness, project, rawName string, r io.Reader) (StoredMedia, error) {
 	name, err := sanitizeFilename(rawName)
 	if err != nil {
 		return StoredMedia{}, err
 	}
-	root, err := m.publicRoot(key, project)
+	root, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return StoredMedia{}, err
 	}
@@ -379,8 +379,8 @@ func (m *Manager) StoreAgentAttachment(key WorkspaceKey, project, rawName string
 //
 // A failure is returned, never swallowed. Continuing would leave the member looking
 // at a directory that is missing files they can see are gone.
-func (m *Manager) publicRoot(key WorkspaceKey, project string) (string, error) {
-	segment := workspaceSegment(project)
+func (m *Manager) publicRoot(key WorkspaceKey, harness, project string) (string, error) {
+	segment := workspaceSegment(harness, project)
 	dir := config.PublicDir(m.cfg.ContainerDataRoot,
 		key.TenantID, key.SubsAccID, key.Role, key.UserAccID, segment)
 	legacy := config.LegacyPublicDir(m.cfg.ContainerDataRoot,

@@ -115,7 +115,7 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 	// agent-projects: the RUNS are per-workspace (each agent writes its transcripts
 	// beside itself), but the JOB STORE is one file for the whole container — so the
 	// segment selects the transcripts and the project id filters the jobs.
-	segment, projectID, ok := s.workspaceSegmentFor(w, r, key)
+	segment, projectID, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}
@@ -195,7 +195,7 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 // discovered in the CALLER'S OWN sessions dir. Traversal and cross-workspace reads
 // are impossible by construction rather than by sanitising the input.
 func (s *Server) handleCronRun(w http.ResponseWriter, r *http.Request) {
-	key, _, ok := s.cronCallerKey(w, r)
+	key, agent, ok := s.cronCallerKey(w, r)
 	if !ok {
 		return
 	}
@@ -203,7 +203,7 @@ func (s *Server) handleCronRun(w http.ResponseWriter, r *http.Request) {
 	// produced it — cron turns are dispatched on the chat id the job recorded, so a
 	// project's job is answered by the project's agent and writes beside it. Only the
 	// job STORE is shared (see config.CronFile).
-	segment, _, ok := s.workspaceSegmentFor(w, r, key)
+	segment, _, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
 		return
 	}

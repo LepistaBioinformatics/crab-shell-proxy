@@ -83,6 +83,13 @@ func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) 
 	// silently disagree.
 	hreq.Header.Set("X-Ganglion-Session-Id", req.SessionID)
 	hreq.Header.Set("X-Ganglion-Session-Key", req.SessionKey)
+	// The project, on the same terms (ganglion-projects D-2). Sent only when there
+	// is one: an empty header and an absent one are the same request to the
+	// harness today, and staying silent keeps a deployment with no projects
+	// byte-identical to what it sends now.
+	if req.Project != "" {
+		hreq.Header.Set("X-Ganglion-Project", req.Project)
+	}
 
 	resp, err := c.HTTP.Do(hreq)
 	if err != nil {

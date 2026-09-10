@@ -378,8 +378,8 @@ func dirNames(dir string) ([]string, error) {
 // ListUserFiles returns the metadata (never bytes) of a user's private uploaded
 // files for the addressed agent's workspace (FR-6/FR-7). "Private files" are
 // the user's public dir — the content the user themselves uploaded.
-func (m *Manager) ListUserFiles(key WorkspaceKey, project string) ([]FileMeta, error) {
-	dir, err := m.publicRoot(key, project)
+func (m *Manager) ListUserFiles(key WorkspaceKey, harness, project string) ([]FileMeta, error) {
+	dir, err := m.publicRoot(key, harness, project)
 	if err != nil {
 		return nil, err
 	}
@@ -390,8 +390,8 @@ func (m *Manager) ListUserFiles(key WorkspaceKey, project string) ([]FileMeta, e
 // name. The name is validated to a safe base name so it can never escape the
 // uploads dir. Missing file is a success (idempotent). It NEVER reads the bytes
 // (FR-7).
-func (m *Manager) DeleteUserFile(key WorkspaceKey, project, name string) error {
-	return m.DeleteMedia(key, project, name)
+func (m *Manager) DeleteUserFile(key WorkspaceKey, harness, project, name string) error {
+	return m.DeleteMedia(key, harness, project, name)
 }
 
 // PropagateScope puts the change on disk for EVERY workspace in scope, running

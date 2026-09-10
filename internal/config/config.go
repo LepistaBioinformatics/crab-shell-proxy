@@ -674,6 +674,35 @@ func ProjectWorkspace(projectID string) string {
 	return "workspace-" + identity.SanitizeID(projectID)
 }
 
+// GanglionProjectWorkspace is the same idea for a ganglion agent, and a
+// DIFFERENT SHAPE, because the two harnesses reach a project by different means.
+//
+// picoclaw needs a sibling directory because each project is a separate picoclaw
+// AGENT, and an agent resolves its own workspace independently. The ganglion has
+// one agent and takes the project as a header, so its projects are children of
+// the workspace it already mounts -- which is what lets a project be created
+// without adding a bind, and therefore without recreating a container that,
+// under scale-to-zero, may not be running.
+//
+// Kept in step with the harness's own domain.ProjectsDirName. If the two ever
+// disagree the proxy reads an empty history for a conversation that exists,
+// which is the failure jsonl.go's header already records once.
+func GanglionProjectWorkspace(projectID string) string {
+	return MainWorkspace + "/projects/" + identity.SanitizeID(projectID)
+}
+
+// WorkspaceSegment is the segment for one (harness, project) pair. The empty
+// project is the main workspace for both.
+func WorkspaceSegment(harness, projectID string) string {
+	if projectID == "" {
+		return MainWorkspace
+	}
+	if harness == HarnessGanglion {
+		return GanglionProjectWorkspace(projectID)
+	}
+	return ProjectWorkspace(projectID)
+}
+
 // ProjectsFile is the proxy-owned list of a user's projects,
 // UserWorkspace/.projects.json.
 //

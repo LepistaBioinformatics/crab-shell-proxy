@@ -266,13 +266,13 @@ func (f *fakeOrch) RestartWorkspace(key docker.WorkspaceKey) error {
 // The project is RECORDED, not ignored: it is the whole difference between a file
 // the project's agent can open and one it cannot, and the upload is the only media
 // route that carries it in a form field rather than the query.
-func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, project, rawName string, r io.Reader) (docker.StoredMedia, error) {
+func (f *fakeOrch) StoreMedia(_ docker.WorkspaceKey, _, project, rawName string, r io.Reader) (docker.StoredMedia, error) {
 	n, _ := io.Copy(io.Discard, r)
 	f.mediaProjects = append(f.mediaProjects, project)
 	return docker.StoredMedia{Path: "uploads/test-" + rawName, Name: rawName, Size: n}, nil
 }
 
-func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, _, rawName string, r io.Reader) (docker.StoredMedia, error) {
+func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, _, _, rawName string, r io.Reader) (docker.StoredMedia, error) {
 	n, _ := io.Copy(io.Discard, r)
 	f.attachmentWrites = append(f.attachmentWrites, rawName)
 	return docker.StoredMedia{
@@ -280,44 +280,44 @@ func (f *fakeOrch) StoreAgentAttachment(_ docker.WorkspaceKey, _, rawName string
 	}, nil
 }
 
-func (f *fakeOrch) ListMedia(docker.WorkspaceKey, string) ([]docker.StoredMedia, error) {
+func (f *fakeOrch) ListMedia(docker.WorkspaceKey, string, string) ([]docker.StoredMedia, error) {
 	return nil, nil
 }
 
-func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string, string) error {
+func (f *fakeOrch) DeleteMedia(docker.WorkspaceKey, string, string, string) error {
 	return nil
 }
 
 // Folder operations record what they were asked to do, so a handler test can assert
 // the path actually forwarded rather than only the status code — the mediaRelPath
 // stripping is exactly the kind of thing a status assertion would miss.
-func (f *fakeOrch) CreateFolder(_ docker.WorkspaceKey, _, rel string) error {
+func (f *fakeOrch) CreateFolder(_ docker.WorkspaceKey, _, _, rel string) error {
 	f.folderCreated = append(f.folderCreated, rel)
 	return f.folderErr
 }
 
-func (f *fakeOrch) MoveMedia(_ docker.WorkspaceKey, _, fromRel, toRel string) error {
+func (f *fakeOrch) MoveMedia(_ docker.WorkspaceKey, _, _, fromRel, toRel string) error {
 	f.moved = append(f.moved, fromRel+" -> "+toRel)
 	return f.folderErr
 }
 
-func (f *fakeOrch) DeleteFolder(_ docker.WorkspaceKey, _, rel string) (int, error) {
+func (f *fakeOrch) DeleteFolder(_ docker.WorkspaceKey, _, _, rel string) (int, error) {
 	f.folderDeleted = append(f.folderDeleted, rel)
 	return f.removedFiles, f.folderErr
 }
 
-func (f *fakeOrch) OpenMedia(docker.WorkspaceKey, string, string) (io.ReadCloser, string, error) {
+func (f *fakeOrch) OpenMedia(docker.WorkspaceKey, string, string, string) (io.ReadCloser, string, error) {
 	return io.NopCloser(strings.NewReader("data")), "file.txt", nil
 }
 
-func (f *fakeOrch) ReadMemory(docker.WorkspaceKey, string) (string, error) {
+func (f *fakeOrch) ReadMemory(docker.WorkspaceKey, string, string) (string, error) {
 	return f.memory, nil
 }
 
 // The project is RECORDED for the same reason StoreMedia records it: a note saved
 // inside a project must not overwrite the main workspace's document, and the write
 // takes its project from the BODY, which no query-based test would catch.
-func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, project, content string) error {
+func (f *fakeOrch) WriteMemory(_ docker.WorkspaceKey, _, project, content string) error {
 	f.memory = content
 	f.memoryProjects = append(f.memoryProjects, project)
 	return nil
@@ -455,11 +455,11 @@ func (f *fakeOrch) ListSubscriptionUsers(_, _ string) ([]docker.UserRef, error) 
 	return f.users, nil
 }
 
-func (f *fakeOrch) ListUserFiles(docker.WorkspaceKey, string) ([]docker.FileMeta, error) {
+func (f *fakeOrch) ListUserFiles(docker.WorkspaceKey, string, string) ([]docker.FileMeta, error) {
 	return f.userFiles, nil
 }
 
-func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _, _ string) error {
+func (f *fakeOrch) DeleteUserFile(key docker.WorkspaceKey, _, _, _ string) error {
 	f.userFileDeletes = append(f.userFileDeletes, key)
 	return nil
 }

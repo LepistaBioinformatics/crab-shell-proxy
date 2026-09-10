@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
@@ -294,9 +296,9 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets [
 	return append(env, secrets...)
 }
 
-// materializeGanglion resolves this workspace's model from the inventory and
-// writes the harness's configuration file, returning the credential variables
-// the container needs.
+// materializeGanglion resolves this workspace's model from the inventory, writes
+// the harness's configuration file and seeds the member's project subtrees,
+// returning the credential variables the container needs.
 //
 // Called on EVERY ensure, not only at create. That is what makes an admin's
 // model change reach a container that is already running: the file is rewritten,
@@ -378,7 +380,166 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 			m.logf("ganglion %s: could not record the assignment: %v", ref.Key(), rerr)
 		}
 	}
+
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		return nil, err
+	}
 	return ganglionSecretEnv(res, web), nil
+}
+
+// ganglionProjectDirs are the subtrees the harness resolves under a project
+// root: its transcripts, its context window and the images generate_image
+// writes, plus the member's own uploads.
+//
+// Created by the PROXY even though the harness would create the first three
+// itself, for the reason projectWorkspaceDirs gives on the picoclaw side: the
+// proxy runs as root and the harness does not, so a directory conjured later by
+// whichever of the two got there first is a coin flip on ownership. Making them
+// here, and chowning them here, means the agent always finds a tree it can
+// write.
+//
+// config.PublicDirName rather than the "uploads" a member sees in a path
+// reference: `uploads` is LegacyPublicDirName, and publicRoot MIGRATES a
+// directory by that name into `public` on first access. Seeding the legacy
+// spelling would make every ensure recreate what every media call then renames.
+var ganglionProjectDirs = []string{"sessions", "windows", "media", config.PublicDirName}
+
+// seedGanglionProjects brings every project's subtree under the ganglion
+// workspace to its intended state, on every ensure.
+//
+// NOT A BIND, and that is decision D-1 rather than an implementation detail:
+// these are directories INSIDE the one bind the container already has, so a
+// project created for a scale-to-zero agent changes nothing ganglionBindDrift
+// can see and costs no recreate. A container that may not even be running must
+// not be a prerequisite for making a project.
+//
+// A workspace with no projects gets no `projects` directory at all -- the loop
+// simply does not run -- so an agent that has never had one behaves exactly as
+// it does today.
+//
+// Every path is resolved through an os.Root anchored at the workspace, because
+// `projects`, the project id and each leaf are all components the shell tool can
+// replace with a symlink: the harness's Landlock domain grants the whole
+// workspace tree (D-1), so a root-owned MkdirAll here would follow whatever the
+// agent pointed it at. The same boundary WriteMemory documents, for the same
+// reason.
+func (m *Manager) seedGanglionProjects(key WorkspaceKey, userDir string) error {
+	list, err := m.projectStore(key).List()
+	if err != nil {
+		return fmt.Errorf("read projects: %w", err)
+	}
+	root := filepath.Join(userDir, config.MainWorkspace)
+	if len(list) == 0 {
+		// NFR-1: a workspace that has never had a project gets no `projects`
+		// directory, so an agent that never had one behaves exactly as today.
+		// But one that HAD projects and no longer does still has orphans to
+		// sweep, so an empty list is not on its own a reason to stop.
+		//
+		// A plain Stat rather than a rooted one: it only decides whether there
+		// is work, and every path that does work goes through the os.Root below.
+		if _, serr := os.Stat(filepath.Join(root, ganglionProjectsDirName)); serr != nil {
+			return nil
+		}
+	}
+
+	tree, err := openTree(root)
+	if err != nil {
+		return err
+	}
+	defer tree.Close()
+
+	for _, p := range list {
+		// Derived from the same helper the segment resolution uses, minus the
+		// workspace prefix the tree is already anchored at. Deriving it twice is
+		// how the seeder and the reader would come to disagree about where a
+		// transcript lives.
+		rel := strings.TrimPrefix(config.GanglionProjectWorkspace(p.ID), config.MainWorkspace+"/")
+		for _, sub := range ganglionProjectDirs {
+			if err := tree.root.MkdirAll(rel+"/"+sub, 0o700); err != nil {
+				if escaped(err) {
+					return ErrMediaName
+				}
+				return fmt.Errorf("create ganglion project dir %s/%s: %w", rel, sub, err)
+			}
+		}
+		if err := tree.root.WriteFile(rel+"/"+ganglionProjectFileName,
+			[]byte(ganglionProjectDoc(p)), 0o600); err != nil {
+			if escaped(err) {
+				return ErrMediaName
+			}
+			return fmt.Errorf("write ganglion %s: %w", ganglionProjectFileName, err)
+		}
+		if err := chownTree(tree.abs(rel), m.cfg.PicoclawUser); err != nil {
+			return fmt.Errorf("chown ganglion project %s: %w", p.ID, err)
+		}
+	}
+	return m.sweepGanglionProjects(key, tree, list)
+}
+
+// ganglionProjectsDirName is the directory holding the per-project subtrees,
+// matching the harness's own domain.ProjectsDirName.
+const ganglionProjectsDirName = "projects"
+
+// sweepGanglionProjects removes the subtree of a project that no longer exists.
+//
+// The same argument syncProjectWorkspaces makes on the picoclaw side, and it is
+// not tidiness: DeleteProject removes the RECORD first and the directory second,
+// so a crash between the two leaves a member's transcripts on disk, invisible to
+// them, after the interface told them the project was gone. Nothing else would
+// ever remove it — the ganglion ensure path returns before
+// syncProjectWorkspaces runs.
+func (m *Manager) sweepGanglionProjects(key WorkspaceKey, tree *treeRoot, list []projects.Project) error {
+	live := make(map[string]bool, len(list))
+	for _, p := range list {
+		live[p.ID] = true
+	}
+	// Listed through the Root's own fs.FS, so a symlink planted where `projects`
+	// should be cannot make this enumerate -- and then delete -- somewhere else.
+	entries, err := fs.ReadDir(tree.root.FS(), ganglionProjectsDirName)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("scan ganglion projects: %w", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || live[e.Name()] {
+			continue
+		}
+		if err := tree.root.RemoveAll(ganglionProjectsDirName + "/" + e.Name()); err != nil {
+			return fmt.Errorf("remove orphaned ganglion project %s: %w", e.Name(), err)
+		}
+		m.logf("workspace %s/%s: removed orphaned ganglion project dir %s",
+			key.Role, key.UserAccID, e.Name())
+	}
+	return nil
+}
+
+// ganglionProjectFileName is the file the harness reads as the project's
+// instructions and folds into the system prompt. It is a CONSTANT on that side
+// (skills.ProjectFileName), not a configured path, so the name is the whole
+// contract between the two repositories.
+const ganglionProjectFileName = "PROJECT.md"
+
+// ganglionProjectDoc renders one project record as that file.
+//
+// FULLY DERIVED from the project store and rewritten on every ensure, which is
+// the same trade composeProjectAgentMD documents for picoclaw: nothing authored
+// by a human lives only here, and the cost is that an edit the AGENT makes to
+// this file is reverted on the member's next turn.
+//
+// No frontmatter, unlike the picoclaw twin. There is nothing to inherit: the
+// ganglion has one agent whose persona comes from GANGLION_SYSTEM_FILE, and this
+// file is appended to that prompt rather than replacing it.
+func ganglionProjectDoc(p projects.Project) string {
+	instructions := strings.TrimSpace(p.Instructions)
+	if instructions == "" {
+		// An empty project is legitimate -- a member may create one and write the
+		// instructions later -- but the agent should be told what it is looking at
+		// rather than reading a bare heading.
+		instructions = "This project has no instructions yet."
+	}
+	return "# " + p.Name + "\n\n" + instructions + "\n"
 }
 
 // createGanglion creates (but does not start) a ganglion container.
