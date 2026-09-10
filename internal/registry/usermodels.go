@@ -39,14 +39,15 @@ const OwnPrefix = "own-"
 // never marshalled to a client: handlers convert to PublicUserModel, so leaking
 // a key requires adding a field rather than forgetting one.
 type UserModel struct {
-	OwnerAccID string          `json:"owner_acc_id"`
-	Slug       string          `json:"slug"`
-	Label      string          `json:"label"`
-	Provider   string          `json:"provider"`
-	Model      string          `json:"model"`
-	APIBase    string          `json:"api_base"`
-	APIKey     string          `json:"api_key,omitempty"`
-	ExtraBody  json.RawMessage `json:"extra_body,omitempty"`
+	OwnerAccID    string          `json:"owner_acc_id"`
+	Slug          string          `json:"slug"`
+	Label         string          `json:"label"`
+	Provider      string          `json:"provider"`
+	Model         string          `json:"model"`
+	APIBase       string          `json:"api_base"`
+	APIKey        string          `json:"api_key,omitempty"`
+	ExtraBody     json.RawMessage `json:"extra_body,omitempty"`
+	ThinkingLevel string          `json:"thinking_level,omitempty"`
 
 	// Enabled is the administrator's switch (parent R6). A member has no control
 	// over it: their own "off" is to stop selecting the model.
@@ -75,26 +76,28 @@ type TestResult struct {
 
 // PublicUserModel is the client-facing shape. No key field, by construction.
 type PublicUserModel struct {
-	OwnerAccID string          `json:"owner_acc_id"`
-	Slug       string          `json:"slug"`
-	Label      string          `json:"label"`
-	Provider   string          `json:"provider"`
-	Model      string          `json:"model"`
-	APIBase    string          `json:"api_base"`
-	ExtraBody  json.RawMessage `json:"extra_body,omitempty"`
-	Enabled    bool            `json:"enabled"`
-	HasKey     bool            `json:"has_key"`
-	LastTest   *TestResult     `json:"last_test,omitempty"`
-	Version    uint64          `json:"version"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
+	OwnerAccID    string          `json:"owner_acc_id"`
+	Slug          string          `json:"slug"`
+	Label         string          `json:"label"`
+	Provider      string          `json:"provider"`
+	Model         string          `json:"model"`
+	APIBase       string          `json:"api_base"`
+	ExtraBody     json.RawMessage `json:"extra_body,omitempty"`
+	ThinkingLevel string          `json:"thinking_level,omitempty"`
+	Enabled       bool            `json:"enabled"`
+	HasKey        bool            `json:"has_key"`
+	LastTest      *TestResult     `json:"last_test,omitempty"`
+	Version       uint64          `json:"version"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 func PublicUser(m UserModel) PublicUserModel {
 	return PublicUserModel{
 		OwnerAccID: m.OwnerAccID, Slug: m.Slug, Label: m.Label,
 		Provider: m.Provider, Model: m.Model, APIBase: m.APIBase,
-		ExtraBody: m.ExtraBody, Enabled: m.Enabled, HasKey: m.APIKey != "",
+		ExtraBody: m.ExtraBody, ThinkingLevel: m.ThinkingLevel,
+		Enabled: m.Enabled, HasKey: m.APIKey != "",
 		LastTest: m.LastTest, Version: m.Version,
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}
@@ -150,16 +153,17 @@ func (m UserModel) MaterializedName() string { return OwnPrefix + m.Slug }
 // Status is active because a disabled one never reaches this function.
 func (m UserModel) asModel() Model {
 	return Model{
-		ModelName: m.MaterializedName(),
-		Provider:  m.Provider,
-		Model:     m.Model,
-		APIBase:   m.APIBase,
-		APIKey:    m.APIKey,
-		ExtraBody: m.ExtraBody,
-		Status:    StatusActive,
-		Version:   m.Version,
-		CreatedAt: m.CreatedAt,
-		UpdatedAt: m.UpdatedAt,
+		ModelName:     m.MaterializedName(),
+		Provider:      m.Provider,
+		Model:         m.Model,
+		APIBase:       m.APIBase,
+		APIKey:        m.APIKey,
+		ExtraBody:     m.ExtraBody,
+		ThinkingLevel: m.ThinkingLevel,
+		Status:        StatusActive,
+		Version:       m.Version,
+		CreatedAt:     m.CreatedAt,
+		UpdatedAt:     m.UpdatedAt,
 	}
 }
 
@@ -184,7 +188,7 @@ func validateUserModel(m UserModel) error {
 	if len(m.ExtraBody) > 0 && !json.Valid(m.ExtraBody) {
 		return fmt.Errorf("%w: extra_body is not valid JSON", ErrInvalid)
 	}
-	return nil
+	return validateThinkingLevel(m.ThinkingLevel)
 }
 
 // CreateUserModel registers one personal model. Enabled starts true: the
@@ -343,7 +347,8 @@ func probeIdentityChanged(a, b UserModel) bool {
 		a.Model != b.Model ||
 		a.APIBase != b.APIBase ||
 		a.APIKey != b.APIKey ||
-		string(a.ExtraBody) != string(b.ExtraBody)
+		string(a.ExtraBody) != string(b.ExtraBody) ||
+		a.ThinkingLevel != b.ThinkingLevel
 }
 
 // RecordUserModelTest stores a probe outcome against the saved record. It does

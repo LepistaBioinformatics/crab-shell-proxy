@@ -51,6 +51,12 @@ type Model struct {
 	APIKey     string          `json:"api_key,omitempty"`
 	AuthMethod string          `json:"auth_method,omitempty"`
 	ExtraBody  json.RawMessage `json:"extra_body,omitempty"`
+	// ThinkingLevel is picoclaw's own `model_list[].thinking_level`, one of
+	// ThinkingLevels or empty. It lives on the INVENTORY record rather than on a
+	// harness because it is a property of the model -- what this endpoint will
+	// do if asked to reason -- and both harnesses read the same key from the
+	// same materialized file.
+	ThinkingLevel string `json:"thinking_level,omitempty"`
 
 	Status     Status `json:"status"`
 	ReplacedBy string `json:"replaced_by,omitempty"`

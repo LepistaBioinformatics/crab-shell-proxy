@@ -36,9 +36,14 @@ type userModelRequest struct {
 	APIBase   string          `json:"api_base"`
 	APIKey    *string         `json:"api_key"`
 	ExtraBody json.RawMessage `json:"extra_body"`
-	Version   uint64          `json:"version"`
-	TenantID  string          `json:"tenant_id"`
-	SubsAccID string          `json:"subs_acc_id"`
+	// ThinkingLevel is picoclaw's key on a member's own model. A member who
+	// brings their own reasoning model is the case that most wants this, and
+	// leaving it out would mean their model could never think deeply while an
+	// admin's could.
+	ThinkingLevel string `json:"thinking_level"`
+	Version       uint64 `json:"version"`
+	TenantID      string `json:"tenant_id"`
+	SubsAccID     string `json:"subs_acc_id"`
 }
 
 // resolveUserModelCaller runs the preamble every route here shares. write selects
@@ -241,14 +246,15 @@ func (s *Server) handleUserModelCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, err := s.Reg.CreateUserModel(registry.UserModel{
-		OwnerAccID: key.UserAccID,
-		Slug:       strings.ToLower(strings.TrimSpace(req.Slug)),
-		Label:      strings.TrimSpace(req.Label),
-		Provider:   strings.ToLower(strings.TrimSpace(req.Provider)),
-		Model:      strings.TrimSpace(req.Model),
-		APIBase:    strings.TrimRight(strings.TrimSpace(req.APIBase), "/"),
-		APIKey:     *req.APIKey,
-		ExtraBody:  req.ExtraBody,
+		OwnerAccID:    key.UserAccID,
+		Slug:          strings.ToLower(strings.TrimSpace(req.Slug)),
+		Label:         strings.TrimSpace(req.Label),
+		Provider:      strings.ToLower(strings.TrimSpace(req.Provider)),
+		Model:         strings.TrimSpace(req.Model),
+		APIBase:       strings.TrimRight(strings.TrimSpace(req.APIBase), "/"),
+		APIKey:        *req.APIKey,
+		ExtraBody:     req.ExtraBody,
+		ThinkingLevel: req.ThinkingLevel,
 	})
 	if err != nil {
 		status, body := userModelErrStatus(err)
@@ -293,6 +299,7 @@ func (s *Server) handleUserModelUpdate(w http.ResponseWriter, r *http.Request) {
 		m.Model = strings.TrimSpace(req.Model)
 		m.APIBase = strings.TrimRight(strings.TrimSpace(req.APIBase), "/")
 		m.ExtraBody = req.ExtraBody
+		m.ThinkingLevel = req.ThinkingLevel
 		if req.APIKey != nil {
 			if *req.APIKey == "" {
 				return inputError{"api_key_not_clearable"}

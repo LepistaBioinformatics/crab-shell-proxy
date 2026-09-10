@@ -180,6 +180,12 @@ func modelListEntry(m registry.Model) map[string]any {
 			entry["extra_body"] = eb
 		}
 	}
+	// picoclaw's own key, reaching picoclaw. It is set on the inventory record
+	// because it describes the MODEL, so a value set once serves whichever
+	// harness the agent happens to run.
+	if m.ThinkingLevel != "" {
+		entry["thinking_level"] = m.ThinkingLevel
+	}
 	return entry
 }
 

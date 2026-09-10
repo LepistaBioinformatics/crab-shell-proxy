@@ -157,3 +157,31 @@ func TestGetModelUnknownIsNotFound(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
+
+// The vocabulary is picoclaw's and the proxy holds the line on it. A value
+// neither harness parses would be a setting that silently does nothing: the
+// file would look configured and the wire would carry no depth field.
+func TestThinkingLevelAcceptsPicoclawsSixValuesAndNothingElse(t *testing.T) {
+	r := testRegistry(t)
+	base := func(name, level string) Model {
+		return Model{
+			ModelName: name, Provider: "deepseek", Model: "deepseek-chat",
+			APIBase: "https://api.deepseek.com/v1", ThinkingLevel: level,
+		}
+	}
+	// Empty is the ordinary case and must stay legal: it means "send no depth
+	// field", which is what every model does today.
+	if _, err := r.CreateModel(base("m-empty", "")); err != nil {
+		t.Fatalf("an empty thinking_level was rejected: %v", err)
+	}
+	for i, l := range ThinkingLevels {
+		if _, err := r.CreateModel(base("m"+string(rune('a'+i)), l)); err != nil {
+			t.Errorf("thinking_level %q was rejected: %v", l, err)
+		}
+	}
+	for _, bad := range []string{"HIGH", "max", "minimal", "none", "ultra"} {
+		if _, err := r.CreateModel(base("m-bad", bad)); err == nil {
+			t.Errorf("thinking_level %q was accepted", bad)
+		}
+	}
+}

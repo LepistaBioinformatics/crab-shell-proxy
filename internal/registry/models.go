@@ -59,7 +59,25 @@ func requiredFields(m Model) error {
 	case m.APIBase == "" && m.AuthMethod == "":
 		return fmt.Errorf("%w: api_base is required unless auth_method is set", ErrInvalid)
 	}
-	return nil
+	return validateThinkingLevel(m.ThinkingLevel)
+}
+
+// ThinkingLevels is picoclaw's `thinking_level` vocabulary, exactly
+// (pkg/config/config.go:780). The proxy validates it rather than passing it
+// through, because this record materializes into two harnesses' config.json and
+// a value neither of them parses would be a setting that silently does nothing.
+var ThinkingLevels = []string{"off", "low", "medium", "high", "xhigh", "adaptive"}
+
+func validateThinkingLevel(v string) error {
+	if v == "" {
+		return nil
+	}
+	for _, l := range ThinkingLevels {
+		if v == l {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: thinking_level must be one of %s", ErrInvalid, strings.Join(ThinkingLevels, ", "))
 }
 
 // CreateModel inserts a new model. Position defaults to the end of the list so a
