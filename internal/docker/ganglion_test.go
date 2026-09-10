@@ -397,3 +397,31 @@ func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
 		t.Errorf("an encryption variable was forwarded with none configured:\n%s", joined)
 	}
 }
+
+// R11 of ganglion-evolution. The harness cannot observe whether its own
+// container stops when idle, and it needs that for one decision: refusing a
+// SCHEDULED evolution pass on a scale-to-zero agent, which would store an
+// intention and fire nothing.
+//
+// If this variable stops being set, that refusal silently stops happening and
+// the agent quietly schedules an analysis pass that never runs.
+func TestTheLifecycleModeReachesTheHarness(t *testing.T) {
+	cfg := &config.Config{GanglionPort: 18800}
+	for _, mode := range []config.Mode{config.ModeScaleToZero, config.ModeContinuous} {
+		joined := strings.Join(ganglionEnv(cfg, config.Agent{Mode: mode}, "t", nil), "\n")
+		want := "GANGLION_LIFECYCLE_MODE=" + string(mode)
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+// The skills root the bind lands at, named to the harness. The agent's own
+// <workspace>/skills is found without being told, so only the proxy-owned half
+// is passed.
+func TestTheSkillsRootReachesTheHarness(t *testing.T) {
+	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil), "\n")
+	if !strings.Contains(joined, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest) {
+		t.Errorf("the shared skills root was not named:\n%s", joined)
+	}
+}

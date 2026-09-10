@@ -282,6 +282,11 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets [
 	// The admin's shared skills root. The agent's own <workspace>/skills is
 	// found without being told, so this names only the half the proxy owns.
 	env = append(env, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest)
+	// The lifecycle mode. The harness cannot observe whether its own container
+	// stops when idle, and it needs that for one decision: refusing a SCHEDULED
+	// evolution pass on a scale-to-zero agent, which would store an intention
+	// and fire nothing. Same argument the cron routes already make.
+	env = append(env, "GANGLION_LIFECYCLE_MODE="+string(agent.Mode))
 	// One variable per model and per search provider, already ordered. The
 	// GANGLION_MODEL/BASE_URL/API_KEY trio above stays: it is what a workspace
 	// whose cascade resolves nothing still runs on, and dropping it would make
