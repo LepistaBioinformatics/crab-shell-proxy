@@ -191,3 +191,169 @@ func TestPersonaBindsCoverTheGanglionMountDest(t *testing.T) {
 		t.Errorf("AGENT.md is not bound into the ganglion mount: %v", binds)
 	}
 }
+
+// AC-3. The bearer file must be outside what the container can see.
+//
+// Asserted against ganglionTokenFile's own location rather than a literal
+// path, so moving the file without reconsidering the mount fails here.
+func TestTheBearerFileIsOutsideTheMount(t *testing.T) {
+	hostDir := "/srv/data/tenants/t/subscriptions/s/agents/gamma/users/u"
+	src, dest, ok := splitBind(ganglionWorkspaceBind(hostDir))
+	if !ok {
+		t.Fatalf("ganglionWorkspaceBind produced an unparseable bind")
+	}
+	token := filepath.Join(hostDir, ganglionTokenFile)
+	if strings.HasPrefix(token, src+string(filepath.Separator)) {
+		t.Errorf("%s is inside the mounted source %s: the agent can read the bearer", token, src)
+	}
+	if want := ganglionMountDest + "/" + config.MainWorkspace; dest != want {
+		t.Errorf("mount destination = %q, want %q", dest, want)
+	}
+}
+
+// AC-3, the other half: the persona binds must still land inside the mounted
+// workspace, or narrowing the bind would have silently unmounted the persona.
+func TestPersonaBindsStillLandInsideTheNarrowedMount(t *testing.T) {
+	cfg := &config.Config{ContainerDataRoot: t.TempDir(), HostDataRoot: "/srv/data"}
+	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
+	workspaceDest := ganglionMountDest + "/" + config.MainWorkspace
+
+	for _, b := range personaBindStrings(cfg, key, ganglionMountDest) {
+		_, dest, ok := splitBind(b)
+		if !ok {
+			t.Fatalf("unparseable persona bind %q", b)
+		}
+		if !strings.HasPrefix(dest, workspaceDest+"/") {
+			t.Errorf("persona bind lands at %q, outside the mounted workspace %q", dest, workspaceDest)
+		}
+	}
+}
+
+// AC-4. A container created with the old wide bind must be recreated.
+func TestGanglionBindDrift(t *testing.T) {
+	plain := &config.Config{}
+	encrypted := &config.Config{GanglionKeyFile: "/srv/secrets/ganglion.key"}
+
+	workspaceBind := ganglionWorkspaceBind("/srv/data/u")
+	persona := ganglionMountDest + "/" + config.MainWorkspace + "/AGENT.md"
+	keyBind := "/srv/secrets/ganglion.key:" + ganglionKeyFileDest + ":ro"
+
+	if ganglionBindDrift(plain, []string{workspaceBind, "/srv/persona/AGENT.md:" + persona + ":ro"}) {
+		t.Error("a correctly narrowed container was reported as drifted")
+	}
+	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest}) {
+		t.Error("the old wide bind was not detected: the agent keeps reading proxy state")
+	}
+	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest + ":rw"}) {
+		t.Error("the old wide bind with explicit options was not detected")
+	}
+	if !ganglionBindDrift(encrypted, []string{workspaceBind}) {
+		t.Error("switching encryption on did not drift a container with no key file bound")
+	}
+	if ganglionBindDrift(encrypted, []string{workspaceBind, keyBind}) {
+		t.Error("a container that already has the key file was reported as drifted")
+	}
+	if !ganglionBindDrift(plain, []string{workspaceBind, keyBind}) {
+		t.Error("switching encryption off left a stale key file bound")
+	}
+}
+
+// The bind set and the drift checks that read it back must agree.
+//
+// They are three predicates OR'd together, and a false positive in any of them
+// does not fail loudly: it recreates the container on every turn, forever. The
+// specific trap is personaBindDrift, which counts persona mounts by prefix --
+// narrowing the workspace bind put a NEW bind under that prefix's parent, and
+// had personaMountDests matched on <mountDest>/workspace rather than
+// <mountDest>/workspace/, the count would never have matched again.
+func TestGanglionBindsDoNotLookLikeDrift(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{ContainerDataRoot: root, HostDataRoot: root}
+	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
+
+	// A persona file must exist, or personaBinds emits nothing and the test
+	// passes without exercising the count.
+	dir := config.EffectivePersonaDir(root, key.TenantID, key.SubsAccID, key.Role)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AGENT.md"), []byte("persona"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binds := ganglionBinds(cfg, key, filepath.Join(root, "u"))
+	if len(binds) < 2 {
+		t.Fatalf("expected the workspace bind plus a persona bind, got %v", binds)
+	}
+	if personaBindDrift(cfg, key, ganglionMountDest, binds) {
+		t.Errorf("a freshly built bind set reports persona drift: every turn would recreate the container\n%v", binds)
+	}
+	if ganglionBindDrift(cfg, binds) {
+		t.Errorf("a freshly built bind set reports bind drift\n%v", binds)
+	}
+}
+
+// The second factor only IS a second factor if the agent cannot read it.
+//
+// The harness confines a command to its workspace with Landlock, so a file
+// beside the workspace is out of reach -- but only while it stays beside it.
+// This asserts the destination is not under the mounted workspace, which is
+// the property the whole enc:// scheme rests on.
+func TestTheCredentialKeyFileIsOutOfTheAgentsReach(t *testing.T) {
+	cfg := &config.Config{
+		ContainerDataRoot:     t.TempDir(),
+		HostDataRoot:          "/srv/data",
+		GanglionKeyFile:       "/srv/secrets/ganglion.key",
+		GanglionKeyPassphrase: "pass",
+	}
+	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
+
+	var keyBind string
+	for _, b := range ganglionBinds(cfg, key, "/srv/data/u") {
+		if _, dest, ok := splitBind(b); ok && dest == ganglionKeyFileDest {
+			keyBind = b
+		}
+	}
+	if keyBind == "" {
+		t.Fatal("a configured key file produced no bind: enc:// values could never resolve")
+	}
+	if !strings.HasSuffix(keyBind, ":ro") {
+		t.Errorf("the key file is not read-only: %q", keyBind)
+	}
+	workspaceDest := ganglionMountDest + "/" + config.MainWorkspace
+	if strings.HasPrefix(ganglionKeyFileDest, workspaceDest+"/") {
+		t.Errorf("the key file lands at %q, INSIDE the workspace the agent can read: the second factor is not one", ganglionKeyFileDest)
+	}
+}
+
+// Both factors must be handed on together, or the harness fails to boot with
+// a value it cannot resolve.
+func TestBothEncryptionFactorsTravelTogether(t *testing.T) {
+	cfg := &config.Config{GanglionPort: 18800, GanglionKeyPassphrase: "pass", GanglionKeyFile: "/srv/k"}
+	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t"), "\n")
+
+	for _, want := range []string{"GANGLION_KEY_PASSPHRASE=pass", "GANGLION_KEY_FILE=" + ganglionKeyFileDest} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "GANGLION_KEY_FILE=/srv/k") {
+		t.Error("the HOST path reached the container; it must be the mount destination")
+	}
+}
+
+// Nothing is bound and nothing is forwarded when encryption is not in use, so
+// a deployment with plaintext keys is unchanged by this feature.
+func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
+	cfg := &config.Config{ContainerDataRoot: t.TempDir(), HostDataRoot: "/srv/data", GanglionPort: 18800}
+	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
+
+	for _, b := range ganglionBinds(cfg, key, "/srv/data/u") {
+		if strings.Contains(b, "credential.key") {
+			t.Errorf("a key file was bound with none configured: %q", b)
+		}
+	}
+	if joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t"), "\n"); strings.Contains(joined, "GANGLION_KEY_") {
+		t.Errorf("an encryption variable was forwarded with none configured:\n%s", joined)
+	}
+}
