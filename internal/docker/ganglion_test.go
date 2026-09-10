@@ -241,12 +241,20 @@ func TestGanglionBindDrift(t *testing.T) {
 	// always carries it and one created before this feature always drifts --
 	// exactly once, which is how it gets the mount at all.
 	configBind := "/srv/data/u/" + ganglionConfigFile + ":" + ganglionConfigDest + ":ro"
+	// D-1's shared skills root, also unconditional and also read-only.
+	skillsBind := "/srv/data/effective-skills/t/s/a:" + ganglionSkillsDest + ":ro"
 
-	if ganglionBindDrift(plain, []string{workspaceBind, configBind, "/srv/persona/AGENT.md:" + persona + ":ro"}) {
+	if ganglionBindDrift(plain, []string{workspaceBind, configBind, skillsBind,
+		"/srv/persona/AGENT.md:" + persona + ":ro"}) {
 		t.Error("a correctly narrowed container was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind}) {
+	if !ganglionBindDrift(plain, []string{workspaceBind, skillsBind}) {
 		t.Error("a container with no model registry bound was not detected: an admin's model change can never reach it")
+	}
+	// An index that names skill files the container has no mount for would tell
+	// the model a capability exists and then fail to open it.
+	if !ganglionBindDrift(plain, []string{workspaceBind, configBind}) {
+		t.Error("a container with no shared skills bound was not detected")
 	}
 	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest}) {
 		t.Error("the old wide bind was not detected: the agent keeps reading proxy state")
@@ -254,13 +262,13 @@ func TestGanglionBindDrift(t *testing.T) {
 	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest + ":rw"}) {
 		t.Error("the old wide bind with explicit options was not detected")
 	}
-	if !ganglionBindDrift(encrypted, []string{workspaceBind}) {
+	if !ganglionBindDrift(encrypted, []string{workspaceBind, configBind, skillsBind}) {
 		t.Error("switching encryption on did not drift a container with no key file bound")
 	}
-	if ganglionBindDrift(encrypted, []string{workspaceBind, configBind, keyBind}) {
+	if ganglionBindDrift(encrypted, []string{workspaceBind, configBind, skillsBind, keyBind}) {
 		t.Error("a container that already has the key file was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind, configBind, keyBind}) {
+	if !ganglionBindDrift(plain, []string{workspaceBind, configBind, skillsBind, keyBind}) {
 		t.Error("switching encryption off left a stale key file bound")
 	}
 }
@@ -387,5 +395,33 @@ func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
 	}
 	if joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n"); strings.Contains(joined, "GANGLION_KEY_") {
 		t.Errorf("an encryption variable was forwarded with none configured:\n%s", joined)
+	}
+}
+
+// R11 of ganglion-evolution. The harness cannot observe whether its own
+// container stops when idle, and it needs that for one decision: refusing a
+// SCHEDULED evolution pass on a scale-to-zero agent, which would store an
+// intention and fire nothing.
+//
+// If this variable stops being set, that refusal silently stops happening and
+// the agent quietly schedules an analysis pass that never runs.
+func TestTheLifecycleModeReachesTheHarness(t *testing.T) {
+	cfg := &config.Config{GanglionPort: 18800}
+	for _, mode := range []config.Mode{config.ModeScaleToZero, config.ModeContinuous} {
+		joined := strings.Join(ganglionEnv(cfg, config.Agent{Mode: mode}, "t", nil), "\n")
+		want := "GANGLION_LIFECYCLE_MODE=" + string(mode)
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+// The skills root the bind lands at, named to the harness. The agent's own
+// <workspace>/skills is found without being told, so only the proxy-owned half
+// is passed.
+func TestTheSkillsRootReachesTheHarness(t *testing.T) {
+	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil), "\n")
+	if !strings.Contains(joined, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest) {
+		t.Errorf("the shared skills root was not named:\n%s", joined)
 	}
 }

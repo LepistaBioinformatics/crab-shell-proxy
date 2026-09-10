@@ -79,8 +79,32 @@ func ganglionBinds(cfg *config.Config, key WorkspaceKey, hostDir string) []strin
 	// reach, and a writable model list would let a tool steered by untrusted
 	// natural language choose the endpoint its own keys are sent to.
 	binds = append(binds, filepath.Join(hostDir, ganglionConfigFile)+":"+ganglionConfigDest+":ro")
+	// The admin's shared skills (D-1). Same effective-skills directory picoclaw
+	// already mounts, so one admin action reaches both harnesses -- and the
+	// same read-only discipline.
+	binds = append(binds, config.EffectiveSkillsDir(cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role)+
+		":"+ganglionSkillsDest+":ro")
 	return append(binds, personaBindStrings(cfg, key, ganglionMountDest)...)
 }
+
+// ganglionSkillsDest is where the admin's shared skills land in the container.
+//
+// INSIDE the workspace, unlike every other proxy-owned mount, and that is
+// deliberate rather than an inconsistency.
+//
+// The harness renders a skills INDEX into the system prompt -- name, description
+// and PATH -- and the agent reads the body it needs with the shell tool. That
+// tool runs under a Landlock ruleset whose only writable-or-readable hierarchy
+// is the workspace, so a skills root beside the data dir would produce an index
+// pointing at files the agent cannot open. An index of unreachable paths is
+// worse than no index: the model is told a capability exists and then fails to
+// use it.
+//
+// Read-only at the MOUNT, which is a kernel guarantee independent of Landlock --
+// Landlock only ever narrows, so it can never grant a write to a read-only
+// bind. That is what makes "evolution may only write into the workspace copy"
+// (spec R5.2) enforced rather than merely intended.
+const ganglionSkillsDest = ganglionMountDest + "/" + config.MainWorkspace + "/shared-skills"
 
 // ganglionKeyFileDest is where the credential key file lands in the container.
 //
@@ -108,7 +132,7 @@ const ganglionKeyFileDest = ganglionMountDest + "/credential.key"
 // Same class of invisible staleness as personaBindDrift and imageDrift, and it
 // sits beside them for that reason.
 func ganglionBindDrift(cfg *config.Config, actual []string) bool {
-	haveKeyFile, haveConfig := false, false
+	haveKeyFile, haveConfig, haveSkills := false, false, false
 	for _, b := range actual {
 		_, dest, ok := splitBind(b)
 		if !ok {
@@ -122,11 +146,13 @@ func ganglionBindDrift(cfg *config.Config, actual []string) bool {
 			haveKeyFile = true
 		case ganglionConfigDest:
 			haveConfig = true
+		case ganglionSkillsDest:
+			haveSkills = true
 		}
 	}
-	// The config bind is unconditional, so a container created before this
-	// feature has none and must be recreated exactly once to get it.
-	if !haveConfig {
+	// Both are unconditional, so a container created before either feature has
+	// none and must be recreated exactly once to get it.
+	if !haveConfig || !haveSkills {
 		return true
 	}
 	return haveKeyFile != (cfg.GanglionKeyFile != "")
@@ -253,6 +279,14 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets [
 	// turn rather than at boot, so an admin's edit reaches the member without a
 	// container restart.
 	env = append(env, "GANGLION_SYSTEM_FILE="+ganglionMountDest+"/workspace/AGENT.md")
+	// The admin's shared skills root. The agent's own <workspace>/skills is
+	// found without being told, so this names only the half the proxy owns.
+	env = append(env, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest)
+	// The lifecycle mode. The harness cannot observe whether its own container
+	// stops when idle, and it needs that for one decision: refusing a SCHEDULED
+	// evolution pass on a scale-to-zero agent, which would store an intention
+	// and fire nothing. Same argument the cron routes already make.
+	env = append(env, "GANGLION_LIFECYCLE_MODE="+string(agent.Mode))
 	// One variable per model and per search provider, already ordered. The
 	// GANGLION_MODEL/BASE_URL/API_KEY trio above stays: it is what a workspace
 	// whose cascade resolves nothing still runs on, and dropping it would make
@@ -359,6 +393,13 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 	secrets, err := m.materializeGanglion(agent, key, containerDir)
 	if err != nil {
 		return err
+	}
+	// The merged (tenant, subscription, agent) skills directory the bind below
+	// points at. Built before create, because a bind whose source does not
+	// exist is created by the daemon as an empty root-owned directory and then
+	// never populated.
+	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID, key.Role); err != nil {
+		return fmt.Errorf("sync effective skills: %w", err)
 	}
 
 	image := m.harnessImage(agent)
