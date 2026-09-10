@@ -29,6 +29,12 @@ type ContainerState struct {
 	// from. The id is what makes a harness upgrade detectable: a rebuild under the
 	// same tag leaves the tag identical and changes only this (see imageDrift).
 	Image string
+	// The environment the container was CREATED with, same argument as Binds:
+	// fixed at create time, so it is the only way to tell that a running
+	// container is missing a credential it now needs (see ganglionSecretDrift).
+	//
+	// It carries secrets. Nothing logs it; it is compared and discarded.
+	Env []string
 }
 
 // ContainerSummary is one entry from the list endpoint.
@@ -124,6 +130,9 @@ func (c *HTTPClient) Inspect(ctx context.Context, name string) (ContainerState, 
 		HostConfig struct {
 			Binds []string `json:"Binds"`
 		} `json:"HostConfig"`
+		Config struct {
+			Env []string `json:"Env"`
+		} `json:"Config"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		resp.Body.Close()
@@ -135,7 +144,7 @@ func (c *HTTPClient) Inspect(ctx context.Context, name string) (ContainerState, 
 	// under an unchanged tag is exactly the upgrade that has to be noticed.
 	return ContainerState{
 		Exists: true, Running: out.State.Running, ID: out.ID,
-		Binds: out.HostConfig.Binds, Image: out.Image,
+		Binds: out.HostConfig.Binds, Image: out.Image, Env: out.Config.Env,
 	}, nil
 }
 

@@ -34,23 +34,43 @@ func scopeSelFromQuery(get func(string) string, routedAgent string) (registry.Sc
 	}
 }
 
-// rejectNonPicoclawAgent writes a 400 and returns true when the routed agent is
-// not governed by the model inventory.
+// inventoryGoverned names the harnesses whose containers actually read what the
+// model inventory resolves.
+//
+// An ALLOWLIST, so a fourth harness added later is refused by default and has to
+// be declared here once it has a sink — which fails in the safe direction.
+var inventoryGoverned = map[string]bool{
+	config.HarnessPicoclaw: true,
+	config.HarnessGanglion: true,
+}
+
+// rejectUngovernedAgent writes a 400 and returns true when the routed agent's
+// harness does not consult the model inventory.
 //
 // The gate lives HERE, in the proxy, because the proxy is the gate (NFR-6) — a
-// webapp-only filter leaves this open. Picoclaw is currently the only harness, so
-// nothing reaches the 400 today; the check is kept because it is the thing that
-// makes that safe. A harness that read its model from somewhere else would take an
-// assignment nothing ever consults: the write restarts the container for nothing and
-// leaves a phantom workspace referrer that blocks delete and disable of that model
-// forever.
-func rejectNonPicoclawAgent(w http.ResponseWriter, agent config.Agent) bool {
-	if agent.Harness == "" || agent.Harness == config.HarnessPicoclaw {
+// webapp-only filter leaves this open. What it protects against is precise: a
+// harness that read its model from somewhere else would take an assignment
+// nothing ever consults, so the write restarts the container for nothing and
+// leaves a phantom workspace referrer that blocks delete and disable of that
+// model forever.
+//
+// GANGLION IS NOW GOVERNED, and that is a change of fact rather than a
+// relaxation. It reads a materialized registry file
+// (internal/docker/ganglion_config.go) written from the same registry.Resolve
+// this endpoint feeds, and records its materialization, so an assignment made
+// here is consulted and a model in use is a model that cannot be deleted. The
+// gate was correct while that was not true.
+func rejectUngovernedAgent(w http.ResponseWriter, agent config.Agent) bool {
+	harness := agent.Harness
+	if harness == "" {
+		harness = config.HarnessPicoclaw
+	}
+	if inventoryGoverned[harness] {
 		return false
 	}
-	writeJSON(w, http.StatusBadRequest, errBody("agent "+agent.Key+" runs the "+agent.Harness+
+	writeJSON(w, http.StatusBadRequest, errBody("agent "+agent.Key+" runs the "+harness+
 		" harness, which reads its model from the proxy configuration; the model inventory "+
-		"governs picoclaw agents only"))
+		"does not govern it"))
 	return true
 }
 
@@ -59,9 +79,15 @@ func rejectNonPicoclawAgent(w http.ResponseWriter, agent config.Agent) bool {
 // tenant to express, and letting a tenant admin set them would hand them the whole
 // instance.
 //
-// mutating narrows the agent-level check to writes: reading a never-consulted
-// default is harmless and lets a UI render what is stored, while writing one is the
+// mutating narrows the harness check to writes: reading a never-consulted default
+// is harmless and lets a UI render what is stored, while writing one is the
 // operation that does nothing and blocks a model forever.
+//
+// The check used to apply at the AGENT level only, which was a real hole rather
+// than a simplification: a tenant- or subscription-level default on an
+// ungoverned agent was accepted and then never consulted — the exact failure the
+// agent-level check exists to prevent, one scope up. It applies to every
+// mutating level now.
 func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request, mutating bool) (registry.ScopeSel, bool) {
 	agent, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
@@ -72,7 +98,7 @@ func (s *Server) authorizeScopeDefault(w http.ResponseWriter, r *http.Request, m
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 		return registry.ScopeSel{}, false
 	}
-	if mutating && sel.Level == registry.LevelAgent && rejectNonPicoclawAgent(w, agent) {
+	if mutating && rejectUngovernedAgent(w, agent) {
 		return registry.ScopeSel{}, false
 	}
 	switch sel.Level {
@@ -190,7 +216,7 @@ func (s *Server) resolveAssignmentTarget(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return docker.WorkspaceKey{}, modelAssignmentRequest{}, false
 	}
-	if rejectNonPicoclawAgent(w, agent) {
+	if rejectUngovernedAgent(w, agent) {
 		return docker.WorkspaceKey{}, modelAssignmentRequest{}, false
 	}
 	var req modelAssignmentRequest
