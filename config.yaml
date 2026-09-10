@@ -112,6 +112,24 @@ agents:
       name: "deepseek-chat"
       apiKeyEnv: "PICOCLAW_ALPHA_API_KEY"
 
+  # TESTE LOCAL — o segundo harness. Entrada NOVA, nao um flip do alpha (D-5):
+  # trocar o harness do unico agente em producao seria cutover, nao coexistencia.
+  # Mesmo provider/modelo do alpha, para isolar o harness como variavel.
+  gamma:
+    serviceName: "gamma"
+    harness: "ganglion"
+    token: { env: "MYC_GANGLION_TOKEN" }
+    template: "alpha"
+    mode: "continuous"
+    idleTimeout: 15m
+    model:
+      provider: "deepseek"
+      name: "deepseek-chat"
+      apiKeyEnv: "GANGLION_API_KEY"
+      # Obrigatorio para o ganglion: nao existe registry de provider->endpoint,
+      # e um baseUrl vazio falha como 404 do provedor, nao como erro de config.
+      baseUrl: "https://api.deepseek.com/v1"
+
   beta:
     serviceName: "beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }

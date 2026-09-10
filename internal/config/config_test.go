@@ -687,23 +687,53 @@ func TestLoadParsesTurnIdleTimeout(t *testing.T) {
 	}
 }
 
-// A ganglion agent with no image configured must fail the LOAD, not the first
-// turn.
+// A ganglion agent with no image DISABLES ITSELF. It must not fail the load.
 //
-// The failure it prevents is specific and has already happened once with the
-// other harness: an agent that resolves and routes, and only reveals it has no
-// runtime when a member sends a message. Loudly at boot is the only place this
-// is cheap.
-func TestLoadRejectsAGanglionAgentWithNoImage(t *testing.T) {
+// This was a hard error until it was run on a real deployment: one test agent
+// with no image put the proxy in a crash loop and took the two working agents
+// down with it. FR-19's intent is to fail LOUDLY -- which the boot log does,
+// naming the variable -- not to fail FATALLY.
+func TestLoadDisablesAGanglionAgentWithNoImage(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "resolved-alpha")
 	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
 
-	_, err := Load(writeConfig(t, body))
-	if err == nil {
-		t.Fatal("Load accepted a ganglion agent with no ganglionImage")
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("a missing image must not fail the load: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ganglionImage") {
-		t.Errorf("error does not name the missing setting: %v", err)
+	if _, still := cfg.Agents["alpha"]; still {
+		t.Error("an agent with no image is still live")
+	}
+	if len(cfg.DisabledAgents) != 1 {
+		t.Fatalf("DisabledAgents = %+v, want one entry", cfg.DisabledAgents)
+	}
+	if !strings.Contains(cfg.DisabledAgents[0].Reason, "ganglionImage") {
+		t.Errorf("reason does not name the missing setting: %q", cfg.DisabledAgents[0].Reason)
+	}
+}
+
+// The failure that was actually hit: ONE misconfigured agent must not take the
+// working ones with it. This is the whole point of degrading instead of dying.
+func TestLoadKeepsWorkingAgentsWhenOneGanglionAgentIsUnprovisioned(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	t.Setenv("TOK_BETA", "resolved-beta")
+	body := strings.Replace(harnessSample, "harness: picoclaw", "harness: ganglion", 1)
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("one unprovisioned agent must not fail the load: %v", err)
+	}
+	if len(cfg.Agents) == 0 {
+		t.Fatal("every agent was dropped")
+	}
+	if len(cfg.DisabledAgents) != 1 {
+		t.Errorf("DisabledAgents = %+v, want exactly the unprovisioned one", cfg.DisabledAgents)
+	}
+	// The others must be untouched -- that is the entire point.
+	for k, a := range cfg.Agents {
+		if a.Harness == HarnessGanglion {
+			t.Errorf("agent %q survived without an image", k)
+		}
 	}
 }
 

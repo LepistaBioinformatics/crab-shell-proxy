@@ -147,6 +147,25 @@ type Agent struct {
 	ResolvedToken string `yaml:"-"`
 }
 
+// ganglionUnprovisioned reports why this environment cannot run the agent, or
+// "" when it can. Only ganglion agents are subject to it: a picoclaw agent's
+// key is written into a per-user .security.yml at provisioning time and an
+// empty one surfaces as an auth error on the first model call, which is the
+// behaviour every existing deployment already depends on.
+func ganglionUnprovisioned(c Config, a Agent) string {
+	if a.Harness != HarnessGanglion {
+		return ""
+	}
+	if c.GanglionImage == "" {
+		return "ganglionImage (or CRAB_GANGLION_IMAGE) is unset; it has no default on purpose -- " +
+			"set it to an immutable reference, not a moving tag"
+	}
+	if a.Model != nil && a.Model.APIKeyEnv != "" && a.Model.APIKey == "" {
+		return fmt.Sprintf("%s is unset", a.Model.APIKeyEnv)
+	}
+	return ""
+}
+
 // DisabledAgent records an agent that was declared but removed at load, and
 // why. Reported rather than silently dropped: "that agent does not exist" is a
 // legible failure only if something, somewhere, says it was disabled and names
@@ -372,12 +391,8 @@ func Load(path string) (*Config, error) {
 		// written into a per-user .security.yml at provisioning time and an
 		// empty one surfaces as an auth error on the first model call, which is
 		// the behaviour every existing deployment already depends on.
-		if agent.Harness == HarnessGanglion && agent.Model != nil &&
-			agent.Model.APIKeyEnv != "" && agent.Model.APIKey == "" {
-			cfg.DisabledAgents = append(cfg.DisabledAgents, DisabledAgent{
-				Key:    key,
-				Reason: fmt.Sprintf("%s is unset", agent.Model.APIKeyEnv),
-			})
+		if reason := ganglionUnprovisioned(cfg, agent); reason != "" {
+			cfg.DisabledAgents = append(cfg.DisabledAgents, DisabledAgent{Key: key, Reason: reason})
 			delete(cfg.Agents, key)
 			continue
 		}
@@ -510,13 +525,23 @@ func (c *Config) validate() error {
 		switch agent.Harness {
 		case "", HarnessPicoclaw:
 		case HarnessGanglion:
-			// Caught here rather than at the first turn: an agent declared for a
-			// harness this deployment has no image for would otherwise resolve,
-			// route, and fail only when a member sends a message.
-			if c.GanglionImage == "" {
-				return fmt.Errorf("agent %q: harness %q requires ganglionImage (or CRAB_GANGLION_IMAGE); "+
-					"set it to an immutable reference, not a moving tag", key, HarnessGanglion)
-			}
+			// A missing image does NOT fail the load. It disables the agent, the
+			// same way a missing provider key does -- see the DisabledAgents
+			// block below.
+			//
+			// This was a hard error until it was tried on a real deployment: one
+			// test agent with no image put the proxy in a crash loop and took
+			// alpha and beta down with it. FR-19's intent is to fail LOUDLY, not
+			// to fail FATALLY, and "agent gamma disabled: CRAB_GANGLION_IMAGE is
+			// unset" in the boot log is loud. Refusing to serve every other agent
+			// is not a louder version of that -- it is a different, worse
+			// failure, and it is exactly what FR-18 exists to prevent.
+			//
+			// Nothing is silently downgraded: the agent's routes answer 404 and
+			// the reason names the variable. The one thing this must never do is
+			// invent a default image, because a moving tag left this stack
+			// running a three-week-old binary once already.
+
 		default:
 			return fmt.Errorf("agent %q: harness must be %q or %q (or omitted), got %q",
 				key, HarnessPicoclaw, HarnessGanglion, agent.Harness)
