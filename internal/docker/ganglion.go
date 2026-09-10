@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 // crab-ganglion-harness containers.
@@ -72,6 +74,11 @@ func ganglionBinds(cfg *config.Config, key WorkspaceKey, hostDir string) []strin
 	if cfg.GanglionKeyFile != "" {
 		binds = append(binds, cfg.GanglionKeyFile+":"+ganglionKeyFileDest+":ro")
 	}
+	// The model registry, READ-ONLY and above the workspace, for the same
+	// reason the key file is: the workspace is the only thing a command can
+	// reach, and a writable model list would let a tool steered by untrusted
+	// natural language choose the endpoint its own keys are sent to.
+	binds = append(binds, filepath.Join(hostDir, ganglionConfigFile)+":"+ganglionConfigDest+":ro")
 	return append(binds, personaBindStrings(cfg, key, ganglionMountDest)...)
 }
 
@@ -101,7 +108,7 @@ const ganglionKeyFileDest = ganglionMountDest + "/credential.key"
 // Same class of invisible staleness as personaBindDrift and imageDrift, and it
 // sits beside them for that reason.
 func ganglionBindDrift(cfg *config.Config, actual []string) bool {
-	haveKeyFile := false
+	haveKeyFile, haveConfig := false, false
 	for _, b := range actual {
 		_, dest, ok := splitBind(b)
 		if !ok {
@@ -110,11 +117,51 @@ func ganglionBindDrift(cfg *config.Config, actual []string) bool {
 		if dest == ganglionMountDest {
 			return true
 		}
-		if dest == ganglionKeyFileDest {
+		switch dest {
+		case ganglionKeyFileDest:
 			haveKeyFile = true
+		case ganglionConfigDest:
+			haveConfig = true
 		}
 	}
+	// The config bind is unconditional, so a container created before this
+	// feature has none and must be recreated exactly once to get it.
+	if !haveConfig {
+		return true
+	}
 	return haveKeyFile != (cfg.GanglionKeyFile != "")
+}
+
+// ganglionSecretDrift reports whether a running container is missing a key it
+// now needs.
+//
+// The asymmetry with the config file is the point, and it is FR-10: the FILE is
+// re-read by the harness on change, so switching a workspace between models it
+// already carries keys for costs nothing. The ENVIRONMENT is fixed at create
+// time, so introducing a model whose key the container has never held requires
+// a recreate -- and the proxy has to perform it rather than leave a candidate
+// that can only ever be skipped for "no API key".
+//
+// Only ADDITIONS and CHANGES count. A container holding a key for a model no
+// longer in the chain is carrying a variable nothing reads, which is untidy and
+// not worth destroying a member's running container over.
+func ganglionSecretDrift(want, actual []string) bool {
+	have := make(map[string]string, len(actual))
+	for _, kv := range actual {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			have[k] = v
+		}
+	}
+	for _, kv := range want {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if got, present := have[k]; !present || got != v {
+			return true
+		}
+	}
+	return false
 }
 
 // splitBind pulls the destination out of a "src:dest[:opts]" bind string.
@@ -175,11 +222,15 @@ func provisionGanglion(userDir, user string) (string, error) {
 // which matters more here than usual, because this is the only place the
 // harness's configuration contract is expressed and a typo in a variable name
 // fails as "the harness would not boot", with nothing naming the cause.
-func ganglionEnv(cfg *config.Config, agent config.Agent, token string) []string {
+func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets []string) []string {
 	env := []string{
 		fmt.Sprintf("GANGLION_ADDR=0.0.0.0:%d", cfg.GanglionPort),
 		"GANGLION_DATA_DIR=" + ganglionMountDest,
 		"GANGLION_TOKEN=" + token,
+		// Where the bound registry lands. Set explicitly rather than left to
+		// the harness's default so the two sides of this contract are both
+		// visible in `docker inspect`.
+		"GANGLION_CONFIG_FILE=" + ganglionConfigDest,
 	}
 	if agent.Model != nil {
 		env = append(env,
@@ -202,7 +253,98 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string) []string 
 	// turn rather than at boot, so an admin's edit reaches the member without a
 	// container restart.
 	env = append(env, "GANGLION_SYSTEM_FILE="+ganglionMountDest+"/workspace/AGENT.md")
-	return env
+	// One variable per model and per search provider, already ordered. The
+	// GANGLION_MODEL/BASE_URL/API_KEY trio above stays: it is what a workspace
+	// whose cascade resolves nothing still runs on, and dropping it would make
+	// this change a cutover instead of an addition.
+	return append(env, secrets...)
+}
+
+// materializeGanglion resolves this workspace's model from the inventory and
+// writes the harness's configuration file, returning the credential variables
+// the container needs.
+//
+// Called on EVERY ensure, not only at create. That is what makes an admin's
+// model change reach a container that is already running: the file is rewritten,
+// the harness notices the mtime at the next turn, and nothing is destroyed.
+//
+// A workspace the cascade resolves NOTHING for is not an error here, unlike
+// picoclaw's provision which refuses outright. The difference is real: a
+// ganglion agent has always had a working model from config.yaml, and failing
+// to start it because an inventory that never governed it has nothing to say
+// would turn adding a feature into an outage.
+func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, userDir string) ([]string, error) {
+	ref := m.workspaceRef(key)
+	// governed says the resolution came from the INVENTORY rather than from the
+	// agent's static configuration. It gates RecordMaterialization, and getting
+	// that wrong is not cosmetic -- see below.
+	governed := true
+	res, err := m.reg.Resolve(ref)
+	if err != nil {
+		if !errors.Is(err, registry.ErrNoModelResolvable) {
+			return nil, err
+		}
+		if agent.Model == nil {
+			return nil, err
+		}
+		// The floor: the agent's own static model, exactly what the three
+		// environment variables already carry. Written into the file too, so
+		// the harness reads one shape whether or not an inventory governs it.
+		//
+		// CascadeName is deliberately left empty, because no cascade resolved
+		// this. That is also why it must not be recorded.
+		governed = false
+		res = registry.Resolution{Primary: registry.Model{
+			ModelName: agent.Model.Name,
+			Provider:  agent.Model.Provider,
+			Model:     agent.Model.Name,
+			APIBase:   agent.Model.BaseURL,
+			APIKey:    agent.Model.APIKey,
+		}}
+	}
+	for _, name := range res.Skipped {
+		m.logf("ganglion %s: fallback %q is not active, skipped", ref.Key(), name)
+	}
+
+	web, err := ganglionWebSecrets(config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role))
+	if err != nil {
+		return nil, fmt.Errorf("read search provider secrets: %w", err)
+	}
+
+	doc, err := ganglionConfigDoc(res, web)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := writeGanglionConfig(userDir, doc, m.cfg.PicoclawUser)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		m.logf("ganglion %s: model configuration rewritten (primary %q)", ref.Key(), res.Primary.ModelName)
+	}
+	// Recorded for the same reason picoclaw's materialization records it: a
+	// model in use must not be deletable, and the referrer list is how the
+	// inventory knows. A ganglion workspace that never recorded would let an
+	// admin delete a model an agent is actively running.
+	//
+	// ONLY WHEN THE INVENTORY RESOLVED IT. RecordMaterialization writes an
+	// Assignment unconditionally, keyed on res.CascadeName -- which the
+	// synthesized fallback above leaves EMPTY. Recording it would store an
+	// assignment naming no model, and worse, would overwrite a legitimate
+	// earlier assignment's model name with "" the first time a cascade stopped
+	// resolving. There is nothing to protect from deletion here either: the
+	// fallback model comes from config.yaml and is not in the inventory.
+	//
+	// Also outside the `changed` branch, deliberately. The two are unrelated:
+	// an unchanged FILE says nothing about whether the referrer has been
+	// recorded, and tying them meant a workspace whose config happened to
+	// render identically was never registered as using its model.
+	if governed {
+		if rerr := m.reg.RecordMaterialization(ref, res); rerr != nil {
+			m.logf("ganglion %s: could not record the assignment: %v", ref.Key(), rerr)
+		}
+	}
+	return ganglionSecretEnv(res, web), nil
 }
 
 // createGanglion creates (but does not start) a ganglion container.
@@ -211,6 +353,10 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 	containerDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
 
 	token, err := provisionGanglion(containerDir, m.cfg.PicoclawUser)
+	if err != nil {
+		return err
+	}
+	secrets, err := m.materializeGanglion(agent, key, containerDir)
 	if err != nil {
 		return err
 	}
@@ -229,7 +375,7 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 		// Same uid the proxy already chowns per-user volumes to. Unlike Hermes,
 		// there is no s6 setuidgid step to break by setting this.
 		User: m.cfg.PicoclawUser,
-		Env:  ganglionEnv(m.cfg, agent, token),
+		Env:  ganglionEnv(m.cfg, agent, token, secrets),
 		Labels: map[string]string{
 			LabelManaged:      "true",
 			LabelAgent:        key.Role,
@@ -277,6 +423,26 @@ func (m *Manager) ensureGanglionRunning(
 	if err != nil {
 		return Target{}, err // daemon unreachable etc. — surfaced as 502 upstream
 	}
+
+	// Re-materialized on every ensure, BEFORE the drift decision, because it is
+	// what the drift decision reads: the file is rewritten here, and whether the
+	// container is missing a key for what the file now names is what
+	// ganglionSecretDrift then answers.
+	//
+	// A failure to rewrite is logged rather than fatal when the container
+	// already exists. The member has a working agent on the previous
+	// configuration; refusing to serve their turn because an inventory write
+	// failed would trade a stale model for no model.
+	containerDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	var wantSecrets []string
+	if st.Exists {
+		if sec, merr := m.materializeGanglion(agent, key, containerDir); merr != nil {
+			m.logf("container %s: could not refresh the model configuration, keeping the previous one: %v", name, merr)
+		} else {
+			wantSecrets = sec
+		}
+	}
+
 	switch {
 	case !st.Exists:
 		if cerr := m.createGanglion(ctx, agent, key, name); cerr != nil {
@@ -288,8 +454,9 @@ func (m *Manager) ensureGanglionRunning(
 
 	case personaBindDrift(m.cfg, key, ganglionMountDest, st.Binds) ||
 		ganglionBindDrift(m.cfg, st.Binds) ||
+		ganglionSecretDrift(wantSecrets, st.Env) ||
 		m.imageDrift(ctx, agent, st):
-		// Three drifts, all invisible without this check.
+		// Four drifts, all invisible without this check.
 		//
 		// Bind sets are fixed at create time, so a container created before a
 		// persona file existed has no mount for it and an admin's save can
@@ -303,7 +470,13 @@ func (m *Manager) ensureGanglionRunning(
 		// narrowed still exposes the proxy's own state to the agent, and one
 		// created before encryption was switched on has no key file to
 		// resolve its own credential with.
-		m.logf("container %s: persona mounts, bind set or harness image stale, recreating", name)
+		//
+		// The fourth is the credential set. Unlike the model configuration --
+		// a file the harness re-reads -- environment is fixed at create time,
+		// so a workspace newly pointed at a model this container has never held
+		// a key for can only be served by a recreate. Leaving it would give the
+		// member an agent whose every candidate is skipped for "no API key".
+		m.logf("container %s: persona mounts, bind set, credentials or harness image stale, recreating", name)
 		if st.Running {
 			if serr := m.docker.Stop(ctx, name, 10*time.Second); serr != nil {
 				return Target{}, serr

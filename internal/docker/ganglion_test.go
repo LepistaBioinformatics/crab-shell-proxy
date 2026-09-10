@@ -68,7 +68,7 @@ func TestGanglionEnv_CarriesTheConfigurationContract(t *testing.T) {
 		APIKey:  "secret",
 	}}
 
-	env := ganglionEnv(cfg, agent, "bearer-1")
+	env := ganglionEnv(cfg, agent, "bearer-1", nil)
 	joined := strings.Join(env, "\n")
 
 	for _, want := range []string{
@@ -90,7 +90,7 @@ func TestGanglionEnv_CarriesTheConfigurationContract(t *testing.T) {
 // the harness is in a container that reads nothing but its environment.
 func TestGanglionEnv_ForwardsTheCollectorEndpoint(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800, GanglionOTLPEndpoint: "http://otel-collector:4318"}
-	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t"), "\n")
+	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n")
 	if !strings.Contains(joined, "GANGLION_OTLP_ENDPOINT=http://otel-collector:4318") {
 		t.Errorf("the collector endpoint never reached the container:\n%s", joined)
 	}
@@ -99,7 +99,7 @@ func TestGanglionEnv_ForwardsTheCollectorEndpoint(t *testing.T) {
 // Unset means unset: the variable is absent rather than empty, so the harness
 // takes the "no telemetry" path instead of trying to post to "".
 func TestGanglionEnv_OmitsTheCollectorWhenUnconfigured(t *testing.T) {
-	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t"), "\n")
+	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil), "\n")
 	if strings.Contains(joined, "GANGLION_OTLP_ENDPOINT") {
 		t.Errorf("an empty collector endpoint was still passed:\n%s", joined)
 	}
@@ -109,7 +109,7 @@ func TestGanglionEnv_OmitsTheCollectorWhenUnconfigured(t *testing.T) {
 // fails loudly on its own missing GANGLION_MODEL, which is a legible error,
 // rather than the proxy panicking on a nil pointer.
 func TestGanglionEnv_ToleratesAnAgentWithNoModel(t *testing.T) {
-	env := ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t")
+	env := ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil)
 	if len(env) == 0 {
 		t.Fatal("no environment produced")
 	}
@@ -124,7 +124,7 @@ func TestGanglionEnv_ToleratesAnAgentWithNoModel(t *testing.T) {
 // anything that can list containers, including harness-sphere.
 func TestGanglionEnv_KeyIsEnvironmentNotLabel(t *testing.T) {
 	env := ganglionEnv(&config.Config{GanglionPort: 18800},
-		config.Agent{Model: &config.ModelConfig{APIKey: "super-secret"}}, "t")
+		config.Agent{Model: &config.ModelConfig{APIKey: "super-secret"}}, "t", nil)
 	found := false
 	for _, e := range env {
 		if e == "GANGLION_API_KEY=super-secret" {
@@ -145,7 +145,7 @@ func TestGanglionEnv_KeyIsEnvironmentNotLabel(t *testing.T) {
 // otherwise.
 func TestGanglionEnvAndPersonaAgree(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800}
-	env := ganglionEnv(cfg, config.Agent{}, "t")
+	env := ganglionEnv(cfg, config.Agent{}, "t", nil)
 
 	var systemFile string
 	for _, e := range env {
@@ -237,9 +237,16 @@ func TestGanglionBindDrift(t *testing.T) {
 	workspaceBind := ganglionWorkspaceBind("/srv/data/u")
 	persona := ganglionMountDest + "/" + config.MainWorkspace + "/AGENT.md"
 	keyBind := "/srv/secrets/ganglion.key:" + ganglionKeyFileDest + ":ro"
+	// The model registry bind is UNCONDITIONAL, so a correctly-built container
+	// always carries it and one created before this feature always drifts --
+	// exactly once, which is how it gets the mount at all.
+	configBind := "/srv/data/u/" + ganglionConfigFile + ":" + ganglionConfigDest + ":ro"
 
-	if ganglionBindDrift(plain, []string{workspaceBind, "/srv/persona/AGENT.md:" + persona + ":ro"}) {
+	if ganglionBindDrift(plain, []string{workspaceBind, configBind, "/srv/persona/AGENT.md:" + persona + ":ro"}) {
 		t.Error("a correctly narrowed container was reported as drifted")
+	}
+	if !ganglionBindDrift(plain, []string{workspaceBind}) {
+		t.Error("a container with no model registry bound was not detected: an admin's model change can never reach it")
 	}
 	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest}) {
 		t.Error("the old wide bind was not detected: the agent keeps reading proxy state")
@@ -250,11 +257,36 @@ func TestGanglionBindDrift(t *testing.T) {
 	if !ganglionBindDrift(encrypted, []string{workspaceBind}) {
 		t.Error("switching encryption on did not drift a container with no key file bound")
 	}
-	if ganglionBindDrift(encrypted, []string{workspaceBind, keyBind}) {
+	if ganglionBindDrift(encrypted, []string{workspaceBind, configBind, keyBind}) {
 		t.Error("a container that already has the key file was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind, keyBind}) {
+	if !ganglionBindDrift(plain, []string{workspaceBind, configBind, keyBind}) {
 		t.Error("switching encryption off left a stale key file bound")
+	}
+}
+
+// FR-10. The environment is fixed at create time, so a workspace newly pointed
+// at a model whose key the container has never held can only be served by a
+// recreate -- otherwise the member gets an agent whose every candidate is
+// skipped for "no API key".
+func TestGanglionSecretDrift(t *testing.T) {
+	have := []string{
+		"GANGLION_TOKEN=t",
+		"GANGLION_MODEL_KEY_PRIMARY=sk-1",
+	}
+	if ganglionSecretDrift([]string{"GANGLION_MODEL_KEY_PRIMARY=sk-1"}, have) {
+		t.Error("a container already carrying the key was reported as drifted")
+	}
+	if !ganglionSecretDrift([]string{"GANGLION_MODEL_KEY_BACKUP=sk-2"}, have) {
+		t.Error("a newly needed key was not detected")
+	}
+	if !ganglionSecretDrift([]string{"GANGLION_MODEL_KEY_PRIMARY=sk-rotated"}, have) {
+		t.Error("a rotated key was not detected")
+	}
+	// A key nothing reads any more is untidy, not a reason to destroy a
+	// member's running container.
+	if ganglionSecretDrift(nil, have) {
+		t.Error("a leftover key was treated as drift")
 	}
 }
 
@@ -330,7 +362,7 @@ func TestTheCredentialKeyFileIsOutOfTheAgentsReach(t *testing.T) {
 // a value it cannot resolve.
 func TestBothEncryptionFactorsTravelTogether(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800, GanglionKeyPassphrase: "pass", GanglionKeyFile: "/srv/k"}
-	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t"), "\n")
+	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n")
 
 	for _, want := range []string{"GANGLION_KEY_PASSPHRASE=pass", "GANGLION_KEY_FILE=" + ganglionKeyFileDest} {
 		if !strings.Contains(joined, want) {
@@ -353,7 +385,7 @@ func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
 			t.Errorf("a key file was bound with none configured: %q", b)
 		}
 	}
-	if joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t"), "\n"); strings.Contains(joined, "GANGLION_KEY_") {
+	if joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n"); strings.Contains(joined, "GANGLION_KEY_") {
 		t.Errorf("an encryption variable was forwarded with none configured:\n%s", joined)
 	}
 }

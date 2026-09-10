@@ -38,9 +38,22 @@ func TestRequireHarnessFeature(t *testing.T) {
 			allowed: false,
 		},
 		{
-			name:    "ganglion does not serve personal models",
+			// DF-4, closed by ganglion-model-registry: a ganglion container
+			// reads a materialized registry file written from the same cascade
+			// picoclaw's config.json comes from, so a member's own model
+			// reaches it. This row was `false` and the change of fact is the
+			// feature.
+			name:    "ganglion now serves personal models",
 			agent:   config.Agent{Key: "zcrab-g", Harness: config.HarnessGanglion},
 			feature: featurePersonalModel,
+			allowed: true,
+		},
+		{
+			// And the allowlist still refuses everything not declared: the
+			// exemption is per feature, not per harness.
+			name:    "ganglion still does not serve the memory graph",
+			agent:   config.Agent{Key: "zcrab-g", Harness: config.HarnessGanglion},
+			feature: featureMemoryGraph,
 			allowed: false,
 		},
 	} {

@@ -50,6 +50,23 @@ var picoclawOnly = map[harnessFeature]bool{
 	featureMemoryGraph:   true,
 }
 
+// alsoServedBy records the non-picoclaw harnesses that have since GROWN one of
+// the features above.
+//
+// A second table rather than a deletion from the first, because the two say
+// different things and both stay true: featurePersonalModel is still a picoclaw
+// construct in origin, and a harness that has not implemented it is still
+// refused by default. Removing the row instead would have opened the feature to
+// every harness that ever exists, which is the failure direction this file was
+// written to avoid.
+//
+// featurePersonalModel/ganglion: DF-4 of the harness spec, closed by
+// ganglion-model-registry. A ganglion container reads a materialized registry
+// file written from the same cascade, so a member's own model reaches it.
+var alsoServedBy = map[harnessFeature]map[string]bool{
+	featurePersonalModel: {config.HarnessGanglion: true},
+}
+
 // requireHarnessFeature writes a 501 and returns false when this agent's
 // harness cannot serve the feature.
 func requireHarnessFeature(w http.ResponseWriter, agent config.Agent, f harnessFeature) bool {
@@ -57,7 +74,7 @@ func requireHarnessFeature(w http.ResponseWriter, agent config.Agent, f harnessF
 	if harness == "" {
 		harness = config.HarnessPicoclaw
 	}
-	if harness == config.HarnessPicoclaw || !picoclawOnly[f] {
+	if harness == config.HarnessPicoclaw || !picoclawOnly[f] || alsoServedBy[f][harness] {
 		return true
 	}
 	writeJSON(w, http.StatusNotImplemented, errBody(fmt.Sprintf(
