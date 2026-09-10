@@ -275,6 +275,10 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets [
 // would turn adding a feature into an outage.
 func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, userDir string) ([]string, error) {
 	ref := m.workspaceRef(key)
+	// governed says the resolution came from the INVENTORY rather than from the
+	// agent's static configuration. It gates RecordMaterialization, and getting
+	// that wrong is not cosmetic -- see below.
+	governed := true
 	res, err := m.reg.Resolve(ref)
 	if err != nil {
 		if !errors.Is(err, registry.ErrNoModelResolvable) {
@@ -286,6 +290,10 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 		// The floor: the agent's own static model, exactly what the three
 		// environment variables already carry. Written into the file too, so
 		// the harness reads one shape whether or not an inventory governs it.
+		//
+		// CascadeName is deliberately left empty, because no cascade resolved
+		// this. That is also why it must not be recorded.
+		governed = false
 		res = registry.Resolution{Primary: registry.Model{
 			ModelName: agent.Model.Name,
 			Provider:  agent.Model.Provider,
@@ -313,10 +321,25 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 	}
 	if changed {
 		m.logf("ganglion %s: model configuration rewritten (primary %q)", ref.Key(), res.Primary.ModelName)
-		// Recorded for the same reason picoclaw's materialization records it:
-		// a model in use must not be deletable, and the referrer list is how
-		// the inventory knows. A ganglion workspace that never recorded would
-		// let an admin delete a model an agent is actively running.
+	}
+	// Recorded for the same reason picoclaw's materialization records it: a
+	// model in use must not be deletable, and the referrer list is how the
+	// inventory knows. A ganglion workspace that never recorded would let an
+	// admin delete a model an agent is actively running.
+	//
+	// ONLY WHEN THE INVENTORY RESOLVED IT. RecordMaterialization writes an
+	// Assignment unconditionally, keyed on res.CascadeName -- which the
+	// synthesized fallback above leaves EMPTY. Recording it would store an
+	// assignment naming no model, and worse, would overwrite a legitimate
+	// earlier assignment's model name with "" the first time a cascade stopped
+	// resolving. There is nothing to protect from deletion here either: the
+	// fallback model comes from config.yaml and is not in the inventory.
+	//
+	// Also outside the `changed` branch, deliberately. The two are unrelated:
+	// an unchanged FILE says nothing about whether the referrer has been
+	// recorded, and tying them meant a workspace whose config happened to
+	// render identically was never registered as using its model.
+	if governed {
 		if rerr := m.reg.RecordMaterialization(ref, res); rerr != nil {
 			m.logf("ganglion %s: could not record the assignment: %v", ref.Key(), rerr)
 		}

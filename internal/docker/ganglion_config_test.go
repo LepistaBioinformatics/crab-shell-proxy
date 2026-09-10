@@ -250,3 +250,62 @@ func TestNoTemporaryFileIsLeftBehind(t *testing.T) {
 		}
 	}
 }
+
+// THE COMBINATION THAT RUNS IN PRODUCTION TODAY, and the one none of the drift
+// cases above covers on its own.
+//
+// `zcrab-g`'s cascade has never been seeded, so every ensure takes the
+// ErrNoModelResolvable fallback and synthesizes a Resolution from the agent's
+// static config.yaml model. If the variables that path produces do not
+// round-trip through ganglionEnv and back out of ganglionSecretDrift, EVERY TURN
+// RECREATES THE CONTAINER -- and under scale-to-zero with a 0.2s cold start
+// nobody would notice except as an agent that intermittently forgets what it was
+// doing.
+func TestTheFallbackPathDoesNotRecreateOnEveryEnsure(t *testing.T) {
+	agentModel := registry.Model{
+		// The shape materializeGanglion synthesizes: ModelName and Model are
+		// both agent.Model.Name, which is what config.yaml carries.
+		ModelName: "deepseek-chat",
+		Provider:  "deepseek",
+		Model:     "deepseek-chat",
+		APIBase:   "https://api.deepseek.com/v1",
+		APIKey:    "sk-static-from-config-yaml",
+	}
+	res := registry.Resolution{Primary: agentModel}
+
+	secrets := ganglionSecretEnv(res, nil)
+	// What the container is actually created with, both halves together.
+	created := append([]string{
+		"GANGLION_ADDR=0.0.0.0:18800",
+		"GANGLION_MODEL=deepseek-chat",
+		"GANGLION_API_KEY=sk-static-from-config-yaml",
+	}, secrets...)
+
+	// The next ensure recomputes the same secrets from the same fallback.
+	if ganglionSecretDrift(ganglionSecretEnv(res, nil), created) {
+		t.Fatal("the fallback path reports drift against the container it just created: every turn would recreate it")
+	}
+
+	// And it stays stable across many ensures, which is what a recreate loop
+	// would look like if the derivation were merely unordered rather than wrong.
+	for i := 0; i < 10; i++ {
+		if ganglionSecretDrift(ganglionSecretEnv(res, nil), created) {
+			t.Fatalf("drift appeared on ensure %d", i+2)
+		}
+	}
+}
+
+// A model name with punctuation must survive the same round trip: envSlug and
+// the harness's KeyEnvVar both fold everything outside [A-Z0-9] to an
+// underscore, and a disagreement here is invisible until an agent skips every
+// candidate for "no API key".
+func TestAPunctuatedModelNameRoundTrips(t *testing.T) {
+	res := registry.Resolution{Primary: model("gpt-5.4", "openai", "gpt-5.4", "https://e/v1", "sk-1")}
+	secrets := ganglionSecretEnv(res, nil)
+	if len(secrets) != 1 || !strings.HasPrefix(secrets[0], "GANGLION_MODEL_KEY_GPT_5_4=") {
+		t.Fatalf("secrets = %v", secrets)
+	}
+	if ganglionSecretDrift(ganglionSecretEnv(res, nil), secrets) {
+		t.Fatal("a punctuated model name reported drift against itself")
+	}
+}
