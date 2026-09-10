@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"sort"
 )
 
@@ -88,8 +89,16 @@ func (m *Manager) Instances(ctx context.Context) ([]Instance, error) {
 			Agent:         key.Role,
 			UserAccID:     key.UserAccID,
 			ContainerName: name,
-			Mode:          s.Labels[LabelMode],
-			State:         state,
+			// RESOLVED, not read from LabelMode.
+			//
+			// The label is stamped at create time and a per-instance override
+			// changes nothing about a container that already exists, so the
+			// label goes stale the moment an admin changes the setting. It is
+			// still written on create -- it costs nothing and reads well in
+			// `docker inspect` -- but nothing behavioural may branch on it,
+			// which TestNothingBranchesOnTheModeLabel enforces.
+			Mode:  string(m.modeForLabelled(key)),
+			State: state,
 		}
 	}
 
@@ -109,7 +118,7 @@ func (m *Manager) Instances(ctx context.Context) ([]Instance, error) {
 				Agent:         key.Role,
 				UserAccID:     key.UserAccID,
 				ContainerName: m.ContainerName(key),
-				Mode:          string(agent.Mode),
+				Mode:          string(m.ModeFor(agent, key)),
 				State:         InstanceProvisioned,
 			}
 		}
@@ -139,4 +148,14 @@ func (m *Manager) Instances(ctx context.Context) ([]Instance, error) {
 		return a.UserAccID < b.UserAccID
 	})
 	return out, nil
+}
+
+// modeForLabelled resolves a mode for a key discovered from container labels,
+// where the agent may no longer be configured. An unknown agent has no default
+// to fall back to, so the override is reported alone rather than guessed at.
+func (m *Manager) modeForLabelled(key WorkspaceKey) config.Mode {
+	if agent, ok := m.cfg.Agents[key.Role]; ok {
+		return m.ModeFor(agent, key)
+	}
+	return m.ModeOverride(key)
 }
