@@ -149,7 +149,23 @@ func (m *Manager) ContainerName(key WorkspaceKey) string {
 
 // harnessPort is the health/API port for an agent's harness.
 func (m *Manager) harnessPort(agent config.Agent) int {
+	if agent.Harness == config.HarnessGanglion {
+		return m.cfg.GanglionPort
+	}
 	return m.cfg.PicoclawPort
+}
+
+// harnessImage is the image a container of this agent runs.
+//
+// ganglionImage has no default on purpose (see config.Config): a moving tag is
+// what left the Dokploy host on a three-week-old picoclaw with two of four
+// patches missing, silently, because the harness image is not a compose service
+// and EnsureImage only pulls what is absent.
+func (m *Manager) harnessImage(agent config.Agent) string {
+	if agent.Harness == config.HarnessGanglion {
+		return m.cfg.GanglionImage
+	}
+	return m.cfg.PicoclawImage
 }
 
 // startupDeadline is how long to wait for an agent's container to become
@@ -162,7 +178,14 @@ func (m *Manager) startupDeadline(agent config.Agent) time.Duration {
 }
 
 // endpoint is the address a turner dials for a running container of this agent.
+//
+// The scheme is the harness's, not a constant: ganglion serves HTTP natively,
+// which is the point of it -- there is no Pico Protocol and no WebSocket to
+// translate.
 func (m *Manager) endpoint(agent config.Agent, name string) string {
+	if agent.Harness == config.HarnessGanglion {
+		return fmt.Sprintf("http://%s:%d", name, m.cfg.GanglionPort)
+	}
 	return fmt.Sprintf("ws://%s:%d/pico/ws", name, m.cfg.PicoclawPort)
 }
 

@@ -495,6 +495,11 @@ func TestUnknownHarnessIsRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), HarnessPicoclaw) {
 		t.Errorf("error should name the accepted value %q, got: %v", HarnessPicoclaw, err)
 	}
+	// Both accepted values, not just the first: an operator reading this
+	// message is choosing between them.
+	if !strings.Contains(err.Error(), HarnessGanglion) {
+		t.Errorf("error should name the accepted value %q, got: %v", HarnessGanglion, err)
+	}
 	if !strings.Contains(err.Error(), "hermes") {
 		t.Errorf("error should echo the rejected value, got: %v", err)
 	}
@@ -679,5 +684,45 @@ func TestLoadParsesTurnIdleTimeout(t *testing.T) {
 	}
 	if got := cfg.TurnIdleTimeout.Std(); got != 90*time.Second {
 		t.Errorf("TurnIdleTimeout = %v, want 90s", got)
+	}
+}
+
+// A ganglion agent with no image configured must fail the LOAD, not the first
+// turn.
+//
+// The failure it prevents is specific and has already happened once with the
+// other harness: an agent that resolves and routes, and only reveals it has no
+// runtime when a member sends a message. Loudly at boot is the only place this
+// is cheap.
+func TestLoadRejectsAGanglionAgentWithNoImage(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
+
+	_, err := Load(writeConfig(t, body))
+	if err == nil {
+		t.Fatal("Load accepted a ganglion agent with no ganglionImage")
+	}
+	if !strings.Contains(err.Error(), "ganglionImage") {
+		t.Errorf("error does not name the missing setting: %v", err)
+	}
+}
+
+// The same agent loads once an image is configured, and the harness survives
+// onto the parsed agent.
+func TestLoadAcceptsAGanglionAgentWithAnImage(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "resolved-alpha")
+	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
+	body += "\nganglionImage: \"ghcr.io/lepistabioinformatics/crab-ganglion@sha256:abc\"\n"
+
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Agents["alpha"].Harness; got != HarnessGanglion {
+		t.Errorf("harness = %q, want %q", got, HarnessGanglion)
+	}
+	// The port has a default; the image deliberately does not.
+	if cfg.GanglionPort != 18800 {
+		t.Errorf("GanglionPort = %d, want the 18800 default", cfg.GanglionPort)
 	}
 }

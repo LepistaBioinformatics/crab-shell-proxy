@@ -16,6 +16,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/ganglion"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/httpapi"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
@@ -55,6 +56,10 @@ func main() {
 		Resolver: identity.NewSDKResolver(),
 		Mgr:      mgr,
 		Pico:     &pico.Client{IdleTimeout: cfg.TurnIdleTimeout.Std()},
+		// The second harness. Constructed unconditionally -- it is inert unless
+		// an agent declares harness: ganglion, and config.Load rejects such an
+		// agent when no image is configured.
+		Ganglion: ganglion.New(nil),
 		Logf:     logger.Printf,
 		Reg:      reg,
 		// The knowledge-graph memory. Rooted at the CONTAINER data root because this

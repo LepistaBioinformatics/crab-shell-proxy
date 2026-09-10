@@ -240,6 +240,20 @@ type Turner interface {
 	Cancel(ctx context.Context, req turn.Request) error
 }
 
+// turnerFor picks the runner for a resolved container.
+//
+// It keys off the Target rather than the agent because docker.Target already
+// records which harness it started -- asking the agent again would be a second
+// source of truth for the same fact.
+//
+// Two harnesses do not justify a registry; the third one is when that changes.
+func (s *Server) turnerFor(harness string) Turner {
+	if harness == config.HarnessGanglion && s.Ganglion != nil {
+		return s.Ganglion
+	}
+	return s.Pico
+}
+
 // Server holds the handler dependencies.
 type Server struct {
 	Cfg      *config.Config
@@ -247,7 +261,12 @@ type Server struct {
 	Mgr      Orchestrator
 	// Pico runs picoclaw turns.
 	Pico Turner
-	Logf func(string, ...any)
+	// Ganglion runs crab-ganglion-harness turns. Nil when this deployment
+	// declares no ganglion agent, in which case turnerFor falls back to Pico --
+	// which is unreachable anyway, since config.Load rejects a ganglion agent
+	// with no image.
+	Ganglion Turner
+	Logf     func(string, ...any)
 	// Reg is the model inventory. Handlers read and write it directly; Mgr is
 	// used only to make a change take effect on disk.
 	Reg *registry.Registry
@@ -726,7 +745,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// stream to notice it in. Notices are collected and appended to the answer
 	// below, since there is no incremental channel to write them to.
 	var notices []string
-	content, err := s.Pico.RunTurn(turnCtx, turn.Request{
+	content, err := s.turnerFor(tgt.Harness).RunTurn(turnCtx, turn.Request{
 		Endpoint:   tgt.Endpoint,
 		AuthToken:  tgt.AuthToken,
 		SessionID:  sessionKey,
@@ -790,7 +809,7 @@ func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
 		return
 	}
-	if err := s.Pico.Cancel(ctx, turn.Request{
+	if err := s.turnerFor(tgt.Harness).Cancel(ctx, turn.Request{
 		Endpoint:  tgt.Endpoint,
 		AuthToken: tgt.AuthToken,
 		SessionID: scope.SessionID,

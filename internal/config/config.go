@@ -42,13 +42,16 @@ const (
 	ModeContinuous Mode = "continuous"
 )
 
-// Harness kinds select the agent runtime an agent orchestrates. Picoclaw is
-// currently the only one; the discriminator is kept because it is a published
-// admin-API field and clients branch on it.
+// Harness kinds select the agent runtime an agent orchestrates.
 const (
 	// HarnessPicoclaw is the default: a picoclaw container spoken to over the
 	// Pico Protocol WebSocket.
 	HarnessPicoclaw = "picoclaw"
+	// HarnessGanglion is crab-ganglion-harness: this project's own runtime,
+	// spoken to over native HTTP with SSE. It is an ALTERNATIVE to picoclaw,
+	// not a replacement -- picoclaw stays the default until the exit criteria
+	// in .specs/features/crab-ganglion-harness/spec.md are met.
+	HarnessGanglion = "ganglion"
 )
 
 // secret is a value sourced either inline or from an environment variable
@@ -201,7 +204,21 @@ type Config struct {
 	// PicoclawHome is the in-container HOME for spawned picoclaw; the per-user
 	// data dir is mounted at <PicoclawHome>/.picoclaw and the config's workspace
 	// path is aligned to it. Must be a dir the PicoclawUser can write.
-	PicoclawHome    string   `yaml:"picoclawHome"`
+	PicoclawHome string `yaml:"picoclawHome"`
+
+	// GanglionImage is the crab-ganglion-harness image for agents whose harness
+	// is HarnessGanglion.
+	//
+	// It has NO default, and that is deliberate. picoclawImage defaults to a
+	// moving tag, and a moving tag is exactly what left the Dokploy host running
+	// a three-week-old binary with two of four patches missing, silently: the
+	// harness image is not a compose service, so a redeploy never pulls it, and
+	// EnsureImage only pulls what is absent. FR-19 requires an immutable
+	// reference, so this must be set explicitly -- ideally to a digest or a
+	// per-commit tag.
+	GanglionImage string `yaml:"ganglionImage"`
+	// GanglionPort is where the harness serves HTTP+SSE inside its container.
+	GanglionPort    int      `yaml:"ganglionPort"`
 	StartupDeadline Duration `yaml:"startupDeadline"`
 	// TurnIdleTimeout is how long the harness may stay SILENT before its turn is
 	// declared dead. It is not a cap on how long a turn may take: an agentic turn
@@ -383,6 +400,9 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("CRAB_MCP_BASE_URL"); v != "" {
 		c.MCPBaseURL = v
 	}
+	if v := os.Getenv("CRAB_GANGLION_IMAGE"); v != "" {
+		c.GanglionImage = v
+	}
 }
 
 func (c *Config) applyDefaults() {
@@ -402,6 +422,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.PicoclawPort == 0 {
 		c.PicoclawPort = 18790
+	}
+	if c.GanglionPort == 0 {
+		c.GanglionPort = 18800
 	}
 	if c.StartupDeadline == 0 {
 		c.StartupDeadline = Duration(35 * time.Second)
@@ -444,9 +467,17 @@ func (c *Config) validate() error {
 		// user a picoclaw container under a role provisioned for something else.
 		switch agent.Harness {
 		case "", HarnessPicoclaw:
+		case HarnessGanglion:
+			// Caught here rather than at the first turn: an agent declared for a
+			// harness this deployment has no image for would otherwise resolve,
+			// route, and fail only when a member sends a message.
+			if c.GanglionImage == "" {
+				return fmt.Errorf("agent %q: harness %q requires ganglionImage (or CRAB_GANGLION_IMAGE); "+
+					"set it to an immutable reference, not a moving tag", key, HarnessGanglion)
+			}
 		default:
-			return fmt.Errorf("agent %q: harness must be %q (or omitted), got %q",
-				key, HarnessPicoclaw, agent.Harness)
+			return fmt.Errorf("agent %q: harness must be %q or %q (or omitted), got %q",
+				key, HarnessPicoclaw, HarnessGanglion, agent.Harness)
 		}
 		switch agent.Mode {
 		case ModeScaleToZero, ModeContinuous:
