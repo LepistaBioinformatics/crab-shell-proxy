@@ -100,6 +100,9 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string) []string 
 			"GANGLION_API_KEY="+agent.Model.APIKey,
 		)
 	}
+	if cfg.GanglionOTLPEndpoint != "" {
+		env = append(env, "GANGLION_OTLP_ENDPOINT="+cfg.GanglionOTLPEndpoint)
+	}
 	// The persona file the proxy's cascade already materializes. Read at every
 	// turn rather than at boot, so an admin's edit reaches the member without a
 	// container restart.

@@ -86,6 +86,25 @@ func TestGanglionEnv_CarriesTheConfigurationContract(t *testing.T) {
 	}
 }
 
+// FR-10. The collector reaches the harness only if the proxy forwards it --
+// the harness is in a container that reads nothing but its environment.
+func TestGanglionEnv_ForwardsTheCollectorEndpoint(t *testing.T) {
+	cfg := &config.Config{GanglionPort: 18800, GanglionOTLPEndpoint: "http://otel-collector:4318"}
+	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t"), "\n")
+	if !strings.Contains(joined, "GANGLION_OTLP_ENDPOINT=http://otel-collector:4318") {
+		t.Errorf("the collector endpoint never reached the container:\n%s", joined)
+	}
+}
+
+// Unset means unset: the variable is absent rather than empty, so the harness
+// takes the "no telemetry" path instead of trying to post to "".
+func TestGanglionEnv_OmitsTheCollectorWhenUnconfigured(t *testing.T) {
+	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t"), "\n")
+	if strings.Contains(joined, "GANGLION_OTLP_ENDPOINT") {
+		t.Errorf("an empty collector endpoint was still passed:\n%s", joined)
+	}
+}
+
 // An agent with no model still produces a usable environment: the harness
 // fails loudly on its own missing GANGLION_MODEL, which is a legible error,
 // rather than the proxy panicking on a nil pointer.

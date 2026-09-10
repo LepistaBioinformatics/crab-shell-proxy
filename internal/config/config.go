@@ -250,6 +250,11 @@ type Config struct {
 	GanglionPort int `yaml:"ganglionPort"`
 
 	// DisabledAgents lists agents removed at Load because this environment
+
+	// GanglionOTLPEndpoint is the collector a ganglion container exports to
+	// (FR-10). Empty disables export inside the harness rather than making it
+	// log a failed request per turn.
+	GanglionOTLPEndpoint string `yaml:"ganglionOtlpEndpoint"`
 	// cannot provision them, in key order. Filled by Load, never by YAML.
 	DisabledAgents  []DisabledAgent `yaml:"-"`
 	StartupDeadline Duration        `yaml:"startupDeadline"`
@@ -476,6 +481,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("CRAB_GANGLION_IMAGE"); v != "" {
 		c.GanglionImage = v
+	}
+	if v := os.Getenv("GANGLION_OTLP_ENDPOINT"); v != "" {
+		c.GanglionOTLPEndpoint = v
 	}
 }
 
