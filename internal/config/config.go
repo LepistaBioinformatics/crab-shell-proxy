@@ -721,6 +721,27 @@ func ProjectsFile(root, tenantID, subsAccID, role, userAccID string) string {
 		".projects.json")
 }
 
+// SchedulesFile is the PROXY-OWNED scheduled-task store,
+// UserWorkspace/.schedules.json — beside .projects.json and, like it, ABOVE
+// workspace/.
+//
+// Not the same file as CronFile and not the same owner. CronFile is picoclaw's:
+// picoclaw creates the jobs, holds the timers and fires them, and the proxy only
+// reads it. This one is the proxy's: the proxy is the scheduler, so a record here
+// is a standing instruction to the proxy to wake a container and run a turn.
+//
+// That is exactly why it lives above the bind. For picoclaw a store inside the
+// workspace is harmless — the agent writing it is the same process that would
+// have to act on it. Here the agent and the actor are different processes, so a
+// store the shell tool could write would let a turn steered by untrusted text
+// schedule its own future turns, on a timer, in a container that would otherwise
+// have scaled to zero. The ganglion binds only workspace/ (ganglionBinds), so
+// this path is unreachable from inside.
+func SchedulesFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		".schedules.json")
+}
+
 // SessionsDir is the path to a user's picoclaw session transcripts (used by
 // /v1/sessions/history), under UserWorkspace/<segment>/sessions.
 //

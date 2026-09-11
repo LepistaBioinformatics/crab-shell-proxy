@@ -114,6 +114,15 @@ func main() {
 		}
 	}()
 
+	// ganglion-projects slice B: the scheduled-task clock. It lives here, not in a
+	// harness, because the ganglion runs scale-to-zero -- a clock inside a stopped
+	// container sleeps through its own work, and this process is the only one that
+	// can start it. picoclaw agents are skipped: their timers are their own.
+	//
+	// Started AFTER the model migration, like everything else that can run a turn,
+	// and before the listener only because it is a goroutine either way.
+	srv.StartScheduler(context.Background())
+
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),

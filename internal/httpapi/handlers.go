@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/cron"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/history"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
@@ -289,6 +291,17 @@ type Server struct {
 	// the interface and the bot read the same bytes.
 	MemoryGraph *memgraph.Store
 
+	// Schedules owns the proxy-side scheduled-task stores. Built by
+	// StartScheduler when nil; the write routes use the same instance, which is
+	// what makes a member's edit and the scheduler's own state write serialise
+	// over one lock per file.
+	Schedules *cron.Owner
+
+	// scheduledRuns is the set of workspaces with a scheduled run in flight
+	// (FR-B9). See claim.
+	runMu         sync.Mutex
+	scheduledRuns map[string]bool
+
 	// turns tracks which conversation each workspace is mid-turn on, so a
 	// memory-graph write arriving over MCP can be attributed to the chat it came out
 	// of. Built by Handler, shared with the MCP endpoint through Deps.SourceFor.
@@ -358,6 +371,13 @@ func (s *Server) Handler() http.Handler {
 	// per-run transcripts it leaves in the sessions dir.
 	mux.HandleFunc("GET /v1/cron/tasks", s.handleCronTasks)
 	mux.HandleFunc("GET /v1/cron/runs", s.handleCronRun)
+	// ganglion-projects slice B: the WRITE half, new and ganglion-only. The proxy
+	// is the scheduler for that harness, so it is also the only thing that can
+	// accept a schedule; picoclaw's own routes above stay read-only. See
+	// cron_write.go.
+	mux.HandleFunc("POST /v1/cron/tasks", s.handleCronTaskCreate)
+	mux.HandleFunc("PATCH /v1/cron/tasks", s.handleCronTaskUpdate)
+	mux.HandleFunc("DELETE /v1/cron/tasks", s.handleCronTaskDelete)
 	mux.HandleFunc("GET /v1/restart", s.handleRestartStatus)
 	mux.HandleFunc("POST /v1/restart", s.handleRestartPost)
 	mux.HandleFunc("GET /v1/projects", s.handleProjectsList)

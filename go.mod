@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/LepistaBioinformatics/mycelium-sdk-go v0.1.0
+	github.com/adhocore/gronx v1.20.0
 	github.com/coder/websocket v1.8.12
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
