@@ -1,27 +1,42 @@
-// Package cron reads picoclaw's scheduled-job store.
+// Package cron holds the scheduled-task record and the two stores that hold it.
 //
-// The store is picoclaw's, not the proxy's: picoclaw creates, schedules and
-// deletes jobs, and holds the live schedule in memory. This package therefore
-// exposes no writer. Editing the file from outside would diverge from those
-// in-memory timers with no way to tell the user, so the member surface stays
-// read-only until that reload behavior is verified.
+// There are two, with different owners, and the distinction is the thing to keep
+// straight:
+//
+//   - picoclaw's store (config.CronFile) is READ-ONLY here. picoclaw creates,
+//     schedules and deletes those jobs and holds the live schedule in memory.
+//     Editing the file from outside would diverge from those in-memory timers with
+//     no way to tell the user, so the member surface over it stays read-only until
+//     that reload behavior is verified. Load is the only entry point to it.
+//
+//   - the ganglion's store (config.SchedulesFile) is the PROXY's, and is
+//     writable — by Owner, and only through Owner. The ganglion has no scheduler
+//     of its own, so the proxy is both the writer and the only thing that fires
+//     these jobs. Nothing races it.
+//
+// The two are kept apart by entry point rather than by convention: Load reads,
+// Owner reads and writes, and a caller that reaches for Owner on a picoclaw path
+// has written something obviously wrong rather than something subtly wrong.
 //
 // The record shape below was taken from sipeed/picoclaw:latest by creating jobs
-// and dumping the file, not from documentation.
+// and dumping the file, not from documentation. The ganglion store reuses it
+// verbatim, plus one field (Project), so one reader and one panel serve both.
 //
-// There is exactly ONE store per container, shared by the main agent and every
-// project agent — picoclaw builds one CronService per gateway and gives it the
-// default workspace (config.CronFile records the citations). A project's tasks are
-// told apart by JobProject, not by which file they came from.
+// There is exactly ONE picoclaw store per container, shared by the main agent and
+// every project agent — picoclaw builds one CronService per gateway and gives it
+// the default workspace (config.CronFile records the citations). A project's tasks
+// are told apart by JobProject, not by which file they came from. The ganglion
+// store is per user too, for a different reason: the proxy holds the schedule, so
+// one file per (tenant, subscription, agent, user) is all there is to hold.
 //
-// Their EXECUTION, unlike their storage, is already per-project and needs nothing
-// from this package: CronTool.ExecuteJob replays the job through
-// ProcessDirectWithChannel with the chat id the job recorded, which reaches
-// processMessage and is dispatched by resolveMessageRoute
-// (pkg/agent/agent_message.go:149) like any inbound message. So a project's job is
+// Their EXECUTION differs the same way. picoclaw's CronTool.ExecuteJob replays the
+// job through ProcessDirectWithChannel with the chat id the job recorded, which
+// reaches processMessage and is dispatched by resolveMessageRoute
+// (pkg/agent/agent_message.go:149) like any inbound message — so a project's job is
 // answered by the project's agent and its transcript is written under that agent's
-// workspace — which is why run listings stay per-segment while the job listing is
-// filtered out of one shared file.
+// workspace. For the ganglion the proxy runs the turn itself, under the project the
+// record names, which is what lets a run land in the right sessions directory
+// without a second agent existing at all.
 package cron
 
 import (
@@ -48,6 +63,10 @@ type Schedule struct {
 	Expr    string `json:"expr,omitempty"`
 	EveryMs int64  `json:"everyMs,omitempty"`
 	AtMs    int64  `json:"atMs,omitempty"`
+	// Tz is the IANA zone a "cron" expression is read in. Empty means UTC, which
+	// is what a picoclaw record carries — it has no such field, so every picoclaw
+	// job parses as UTC and reads back exactly as it did before this existed.
+	Tz string `json:"tz,omitempty"`
 }
 
 // Payload is what the job does when it fires. Only "agent_turn" has been
@@ -90,6 +109,16 @@ type Job struct {
 	CreatedAtMs    int64    `json:"createdAtMs"`
 	UpdatedAtMs    int64    `json:"updatedAtMs"`
 	DeleteAfterRun bool     `json:"deleteAfterRun"`
+	// Project is the member project this job belongs to, or "" for the main
+	// workspace. Written only by the proxy's own store.
+	//
+	// It exists because the derivation JobProject does for picoclaw cannot work
+	// here: that one reads the conversation id out of Payload.To, and a
+	// proxy-created job has no originating conversation to read — a fired job
+	// answers nobody. Saying it outright is also the better record: the project is
+	// what selects the sessions directory a run is written into, and deriving that
+	// from a string the member can influence is a worse idea than storing it.
+	Project string `json:"project,omitempty"`
 }
 
 type store struct {
@@ -150,6 +179,11 @@ const projectPrefix = "p" + identity.ProjectSeparator
 // what stops "pico:p.seedtrial" (no session key, so not a session id this proxy
 // ever produced) from being attributed to anything.
 func JobProject(j Job) string {
+	// The proxy's own store says so outright; only a picoclaw record needs the
+	// derivation below. One function for both, because one panel lists both.
+	if j.Project != "" {
+		return j.Project
+	}
 	to, ok := strings.CutPrefix(j.Payload.To, picoChatPrefix)
 	if !ok {
 		return ""

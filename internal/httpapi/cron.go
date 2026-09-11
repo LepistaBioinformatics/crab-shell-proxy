@@ -6,9 +6,17 @@ package httpapi
 // read on the agent still has to be able to see what is scheduled and what it
 // produced.
 //
-// Read-only on purpose. picoclaw owns the store and holds the live schedule in
-// memory; whether it reloads an externally edited jobs.json is unverified, so a
-// write here could silently disagree with the timers actually running.
+// Read-only FOR PICOCLAW, and only for picoclaw. It owns the store and holds the
+// live schedule in memory; whether it reloads an externally edited jobs.json is
+// unverified, so a write there could silently disagree with the timers actually
+// running.
+//
+// For the ganglion the ownership is the other way round: the harness has no
+// scheduler, the proxy holds the schedule and fires the jobs (cron_scheduler.go),
+// and the store is the proxy's own file above the workspace bind. There is no
+// second writer to disagree with, so the mutating routes in cron_write.go exist —
+// and they answer 501 for any other harness rather than writing a file nothing
+// reads.
 
 import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
@@ -81,6 +89,38 @@ func scopedJobs(all []cron.Job, projectID string, known []projects.Project) []cr
 	return out
 }
 
+// cronStore is the scheduled-task store for one (agent, user), and WHICH FILE it
+// is depends on the harness.
+//
+// picoclaw keeps one jobs.json per container, inside the workspace, and writes it
+// itself. The ganglion has none at all, so the proxy keeps the store above the
+// bind and is its only writer. Reading the wrong one is not a small error: for a
+// ganglion agent config.CronFile names a path nothing ever creates, so every
+// member would be told they have no scheduled tasks.
+func cronStore(cfg *config.Config, harness string, key docker.WorkspaceKey) string {
+	if harness == config.HarnessGanglion {
+		return config.SchedulesFile(cfg.ContainerDataRoot,
+			key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	}
+	return config.CronFile(cfg.ContainerDataRoot,
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+}
+
+// cronFires reports whether the schedules listed for this agent can actually run.
+//
+// Two different facts, because the schedule lives in two different places. A
+// picoclaw schedule is in-process timers, so a stopped container fires nothing and
+// the member has to be told. A ganglion schedule is held by the proxy, which is
+// always up and which STARTS the container to fire a job — so scale-to-zero is
+// precisely what it was designed around, and reporting it as inert would be
+// false.
+func (s *Server) cronFires(agent config.Agent, key docker.WorkspaceKey) bool {
+	if agent.Harness == config.HarnessGanglion {
+		return true
+	}
+	return s.Mgr.ModeFor(agent, key) == config.ModeContinuous
+}
+
 // cronCallerKey resolves the caller for the read-only cron routes.
 //
 // It does NOT refuse a scale-to-zero agent, and that is a correction: refusing
@@ -120,8 +160,7 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	all, err := cron.Load(config.CronFile(s.Cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID))
+	all, err := cron.Load(cronStore(s.Cfg, agent.Harness, key))
 	if err != nil {
 		s.logf("cron: read store failed key=%+v: %v", key, err)
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
@@ -179,13 +218,14 @@ func (s *Server) handleCronTasks(w http.ResponseWriter, r *http.Request) {
 		return a.JobID < b.JobID
 	})
 
-	// Per instance, not per agent: the whole point of the override is that one
-	// member's schedules can run while the rest of the agent still scales to
-	// zero, and this is the field that tells them which they have.
+	// Per instance for picoclaw, where the whole point of the lifecycle override is
+	// that one member's schedules can run while the rest of the agent still scales
+	// to zero. Unconditionally true for the ganglion, whose schedules the proxy
+	// holds. See cronFires.
 	writeJSON(w, http.StatusOK, cronTasksResponse{
 		Tasks:   tasks,
 		Orphans: orphans,
-		Fires:   s.Mgr.ModeFor(agent, key) == config.ModeContinuous,
+		Fires:   s.cronFires(agent, key),
 	})
 }
 

@@ -1,5 +1,7 @@
 github.com/LepistaBioinformatics/mycelium-sdk-go v0.1.0 h1:juNUoBsmdtHvzWJmtWJZRw/dk59p0SOkJjQgeD80Fh8=
 github.com/LepistaBioinformatics/mycelium-sdk-go v0.1.0/go.mod h1:ft89w18orFspf2uPO/I+r913+Z7Kw505EE2Zp0wx4gM=
+github.com/adhocore/gronx v1.20.0 h1:PD13Mo0wekkZ7ZZR9yb1TqeqTfybs7/K3ez9DmjQwEs=
+github.com/adhocore/gronx v1.20.0/go.mod h1:7oUY1WAU8rEJWmAxXR2DN0JaO4gi9khSgKjiRypqteg=
 github.com/coder/websocket v1.8.12 h1:5bUXkEPPIbewrnkU8LTCLVaxi4N4J8ahufH2vlo4NAo=
 github.com/coder/websocket v1.8.12/go.mod h1:LNVeNrXQZfe5qhS9ALED3uA+l5pPqvwXg3CKoDBB2gs=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
