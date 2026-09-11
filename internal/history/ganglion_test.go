@@ -133,3 +133,61 @@ func TestRead_ToleratesAnUnusablePartial(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 }
+
+// A project conversation's session key carries the project prefix
+// identity.ProjectSessionID stamps — "p.<project>.<32-hex>" — and the harness
+// sanitises that into its file name, so the transcript on disk is
+// "p_<project>_<32-hex>.jsonl". Reading the unsanitised name found nothing and
+// answered with an empty history, which the member met as the conversation
+// blanking the moment its turn finished.
+func TestRead_FindsAProjectTranscriptUnderTheHarnessSanitisedName(t *testing.T) {
+	dir := t.TempDir()
+	const key = "p.seedtrial.0123456789abcdef0123456789abcdef"
+	writeGanglion(t, dir, "p_seedtrial_0123456789abcdef0123456789abcdef", []map[string]any{
+		{"role": "user", "content": "oi", "created_at": "2026-09-10T10:00:00Z"},
+		{"role": "assistant", "content": "ola", "created_at": "2026-09-10T10:00:02Z"},
+	})
+
+	got, err := Read(dir, key)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 messages for a project conversation, got %d", len(got))
+	}
+	if got[1].Content != "ola" {
+		t.Fatalf("unexpected answer: %q", got[1].Content)
+	}
+}
+
+// The partial sidecar is named by the same sanitiser, so an interrupted answer in
+// a project has to be found the same way. Without this the fix above would serve
+// the transcript and silently drop the in-flight answer it exists to rescue.
+func TestRead_FindsAProjectPartialUnderTheHarnessSanitisedName(t *testing.T) {
+	dir := t.TempDir()
+	const key = "p.seedtrial.0123456789abcdef0123456789abcdef"
+	const base = "p_seedtrial_0123456789abcdef0123456789abcdef"
+	writeGanglion(t, dir, base, []map[string]any{
+		{"role": "user", "content": "oi", "created_at": "2026-09-10T10:00:00Z"},
+	})
+	partial := map[string]any{
+		"answers_at": "2026-09-10T10:00:01Z",
+		"content":    "meia resposta",
+		"updated_at": "2026-09-10T10:00:03Z",
+	}
+	raw, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, base+".partial.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Read(dir, key)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 2 || got[1].Content != "meia resposta" {
+		t.Fatalf("the in-flight answer was not served: %+v", got)
+	}
+}

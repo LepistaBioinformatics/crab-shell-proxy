@@ -128,18 +128,55 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	// is not reconstructing a mapping the proxy already owns. So the marker
 	// scan below, which is how picoclaw's hashed filenames are found, would
 	// never match it. Try the direct name first; it costs one stat.
-	if existsIn(r, sessionKey+".jsonl") {
-		msgs, err := readMessages(r, "", sessionKey)
+	if base := harnessBasename(sessionKey); existsIn(r, base+".jsonl") {
+		msgs, err := readMessages(r, "", base)
 		if err != nil {
 			return nil, err
 		}
-		return append(msgs, livePartial(r, sessionKey, msgs)...), nil
+		return append(msgs, livePartial(r, base, msgs)...), nil
 	}
 	basename := findSessionFile(r, sessionKey)
 	if basename == "" {
 		return []Message{}, nil
 	}
 	return readMessages(r, "", basename)
+}
+
+// harnessBasename is the name a ganglion transcript actually has on disk.
+//
+// The harness names a transcript after the conversation id, SANITISED: its jsonl
+// store replaces every character outside [A-Za-z0-9_-] with "_"
+// (crab-ganglion-harness, internal/adapter/store/jsonl/jsonl.go, func safe). The
+// window store and the partial sidecar beside it use the same function, so this
+// one rule covers every file the harness writes for a conversation.
+//
+// For a conversation in the agent's own workspace the key is 32 hex characters
+// and the mapping is the identity, which is why this went unnoticed until
+// projects: identity.ProjectSessionID stamps "p.<project>.<32-hex>", and the file
+// on disk is "p_<project>_<32-hex>.jsonl". Asking for the unsanitised name found
+// nothing and returned an EMPTY history for a conversation that plainly exists —
+// which the client cannot tell apart from a conversation with no messages. The
+// member watched a turn stream and then saw the whole thing blank the instant it
+// finished, because the completion painter replaces the live bands with whatever
+// this returns.
+//
+// Deliberately NOT applied to the durable transcript beside it: that file is the
+// proxy's own, written and read here under the key itself, and renaming it would
+// orphan every one already on disk.
+func harnessBasename(sessionKey string) string {
+	out := make([]rune, 0, len(sessionKey))
+	for _, r := range sessionKey {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	if len(out) == 0 {
+		return "_"
+	}
+	return string(out)
 }
 
 // ErrLiveTranscriptMissing means no live transcript carries this conversation's
@@ -270,8 +307,8 @@ type partialFile struct {
 // after the instant it answers. That covers the crash window between the real
 // append and the sidecar's removal, where both exist and showing the partial
 // would repeat the answer.
-func livePartial(r *os.Root, sessionKey string, msgs []Message) []Message {
-	rel := sessionKey + ".partial.json"
+func livePartial(r *os.Root, basename string, msgs []Message) []Message {
+	rel := basename + ".partial.json"
 	if !existsIn(r, rel) {
 		return nil
 	}
