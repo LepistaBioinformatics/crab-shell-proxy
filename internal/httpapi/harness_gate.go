@@ -69,9 +69,16 @@ var picoclawOnly = map[harnessFeature]bool{
 // its subtree under the workspace it already mounts, so a project scopes the
 // transcripts, the window and the files without a second bind — which is what
 // makes it reachable at all for an agent that may have no container running.
+// featureMemoryGraph/ganglion: DF-1 of the harness spec, closed by
+// ganglion-projects slice C. The harness now has an MCP client of its own and
+// the proxy writes the server block into its config.json, so it reaches the same
+// graph a picoclaw container in the same workspace reaches — one server, scoped
+// to the MEMBER and spanning their projects, because the ganglion takes the
+// project as a header rather than being a different agent per project.
 var alsoServedBy = map[harnessFeature]map[string]bool{
 	featurePersonalModel: {config.HarnessGanglion: true},
 	featureProjects:      {config.HarnessGanglion: true},
+	featureMemoryGraph:   {config.HarnessGanglion: true},
 }
 
 // requireHarnessFeature writes a 501 and returns false when this agent's

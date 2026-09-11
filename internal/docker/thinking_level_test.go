@@ -24,7 +24,7 @@ func TestThinkingLevelReachesBothHarnessesFromOneRecord(t *testing.T) {
 	}
 
 	// ganglion, through its own document.
-	b, err := ganglionConfigDoc(registry.Resolution{Primary: m}, nil)
+	b, err := ganglionConfigDoc(registry.Resolution{Primary: m}, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestAModelWithNoLevelWritesNoKey(t *testing.T) {
 	if _, ok := modelListEntry(m)["thinking_level"]; ok {
 		t.Error("picoclaw entry carries an empty thinking_level")
 	}
-	b, _ := ganglionConfigDoc(registry.Resolution{Primary: m}, nil)
+	b, _ := ganglionConfigDoc(registry.Resolution{Primary: m}, nil, "", "")
 	var doc map[string]any
 	_ = json.Unmarshal(b, &doc)
 	if _, ok := doc["model_list"].([]any)[0].(map[string]any)["thinking_level"]; ok {

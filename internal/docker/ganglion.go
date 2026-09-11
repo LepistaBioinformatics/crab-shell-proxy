@@ -347,7 +347,20 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 		return nil, fmt.Errorf("read search provider secrets: %w", err)
 	}
 
-	doc, err := ganglionConfigDoc(res, web)
+	// The memory graph. Minted here rather than in applyMemoryGraphMCP, which is
+	// picoclaw's path: that one MERGES a block into a config file picoclaw also
+	// writes, while this file is rendered whole on every ensure — so there is
+	// nothing to merge into and nothing to leave behind when the secret is
+	// unset.
+	//
+	// A token that cannot be minted is an ERROR, not an empty one, for the reason
+	// memoryGraphToken states: a server that always 401s is harder to diagnose
+	// than no server.
+	mcpToken, err := m.memoryGraphToken(key)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := ganglionConfigDoc(res, web, m.cfg.MCPBaseURL, mcpToken)
 	if err != nil {
 		return nil, err
 	}

@@ -92,7 +92,7 @@ func envSlug(s string) string {
 // visible in one place beside the harness's own reader -- these two files are a
 // wire format between repositories, and a `json:"..."` tag twelve fields down a
 // struct is where such a format drifts.
-func ganglionConfigDoc(res registry.Resolution, web map[string]string) ([]byte, error) {
+func ganglionConfigDoc(res registry.Resolution, web map[string]string, mcpBaseURL, mcpToken string) ([]byte, error) {
 	var list []any
 	seen := map[string]bool{}
 	add := func(m registry.Model) {
@@ -151,10 +151,55 @@ func ganglionConfigDoc(res registry.Resolution, web map[string]string) ([]byte, 
 		"model_list": list,
 		"agents":     map[string]any{"defaults": defaults},
 	}
-	if tools := ganglionWebBlock(web); tools != nil {
-		doc["tools"] = map[string]any{"web": tools}
+	tools := map[string]any{}
+	if web := ganglionWebBlock(web); web != nil {
+		tools["web"] = web
+	}
+	if mcp := ganglionMCPBlock(mcpBaseURL, mcpToken); mcp != nil {
+		tools["mcp"] = mcp
+	}
+	if len(tools) > 0 {
+		doc["tools"] = tools
 	}
 	return json.MarshalIndent(doc, "", "  ")
+}
+
+// ganglionMCPBlock is the memory graph, as the ganglion reads it.
+//
+// EXACTLY ONE SERVER, and that is the difference from picoclaw rather than a
+// simplification. picoclaw gets one entry per project (ProjectMCPServerName)
+// because each project there is a separate AGENT sharing one global
+// tools.mcp.servers map, so a per-project graph can only come from a per-project
+// server the other agents are not allowed to see.
+//
+// The ganglion has one agent and takes the project as a header, so that shape is
+// not merely unnecessary here — it is BROKEN. The harness registers a remote
+// server's tools under their own names, and N+1 servers all offering
+// memory_search would collide; its boot refuses exactly that (FR-C5), so writing
+// picoclaw's shape would stop a ganglion container from starting at all the
+// moment its member created a project.
+//
+// So the token is the member's, unscoped to any project — FR-C6a: the graph is
+// per member and spans that member's projects, and a ganglion container reaches
+// exactly the graph a picoclaw container in the same workspace would.
+//
+// The record itself is picoclaw's, `command: ""` included, because the harness
+// reads that shape (config.loadMCP) and one record serving both is the whole
+// point of copying it.
+func ganglionMCPBlock(baseURL, token string) map[string]any {
+	if token == "" || baseURL == "" {
+		// No secret, or no reachable base url: the feature is off, and the file
+		// is written as it was before this existed. A block with a broken token
+		// would give the agent a memory server that always 401s, which is harder
+		// to diagnose than no memory server at all.
+		return nil
+	}
+	return map[string]any{
+		"enabled": true,
+		"servers": map[string]any{
+			MCPServerName: desiredMCPServer(baseURL, token),
+		},
+	}
 }
 
 // ganglionWebBlock turns the native web.<provider> secret slots an admin has
