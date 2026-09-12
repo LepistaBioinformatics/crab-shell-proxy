@@ -54,11 +54,31 @@ func TestRequireHarnessFeature(t *testing.T) {
 			allowed: true,
 		},
 		{
-			// And the allowlist still refuses everything not declared: the
-			// exemption is per feature, not per harness.
-			name:    "ganglion still does not serve the memory graph",
+			// DF-1, closed by ganglion-projects slice C: the harness has an MCP
+			// client of its own and the proxy writes the server block into its
+			// config.json, so it reaches the same graph picoclaw reaches from
+			// the same workspace. This row was `false` and the change of fact is
+			// the feature.
+			name:    "ganglion now serves the memory graph",
 			agent:   config.Agent{Key: "zcrab-g", Harness: config.HarnessGanglion},
 			feature: featureMemoryGraph,
+			allowed: true,
+		},
+		{
+			// And the allowlist still refuses everything not declared: the
+			// exemption is per (feature, harness) pair, not per harness and not
+			// per feature. A third harness is refused by default, which is the
+			// direction this table was written to fail in -- every row above
+			// records a capability somebody BUILT.
+			name:    "a third harness serves none of it",
+			agent:   config.Agent{Key: "zcrab-x", Harness: "hermes"},
+			feature: featureMemoryGraph,
+			allowed: false,
+		},
+		{
+			name:    "a third harness does not serve projects either",
+			agent:   config.Agent{Key: "zcrab-x", Harness: "hermes"},
+			feature: featureProjects,
 			allowed: false,
 		},
 	} {
@@ -85,7 +105,10 @@ func TestRequireHarnessFeature(t *testing.T) {
 				t.Fatalf("body is not JSON: %s", rec.Body)
 			}
 			msg := strings.ToLower(rec.Body.String())
-			if !strings.Contains(msg, "ganglion") {
+			// The harness from the CASE, not a literal: every refusing row used
+			// to be ganglion, so a hardcoded name passed by coincidence and
+			// would have gone on passing for a harness it never mentioned.
+			if !strings.Contains(msg, strings.ToLower(tc.agent.Harness)) {
 				t.Errorf("the refusal does not name the harness: %s", rec.Body)
 			}
 			if !strings.Contains(msg, tc.agent.Key) {

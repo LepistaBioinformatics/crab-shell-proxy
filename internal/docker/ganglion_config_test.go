@@ -52,7 +52,7 @@ func TestTheDocumentIsPicoclawsShape(t *testing.T) {
 		Chain: []registry.Model{
 			model("backup", "openai", "gpt-5.4", "https://api.openai.com/v1", "sk-2"),
 		},
-	}, nil)
+	}, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestNoKeyIsEverWrittenIntoTheFile(t *testing.T) {
 	b, err := ganglionConfigDoc(registry.Resolution{
 		Primary: model("primary", "deepseek", "deepseek-chat", "https://e/v1", "sk-VERY-SECRET"),
 		Chain:   []registry.Model{model("backup", "openai", "gpt", "https://e/v1", "sk-ALSO-SECRET")},
-	}, map[string]string{"brave": "BSA-SECRET"})
+	}, map[string]string{"brave": "BSA-SECRET"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestNoKeyIsEverWrittenIntoTheFile(t *testing.T) {
 func TestNoChainMeansNoFallbacksKey(t *testing.T) {
 	b, _ := ganglionConfigDoc(registry.Resolution{
 		Primary: model("only", "p", "m", "https://e/v1", "k"),
-	}, nil)
+	}, nil, "", "")
 	defaults := decodeDoc(t, b)["agents"].(map[string]any)["defaults"].(map[string]any)
 	if _, present := defaults["model_fallbacks"]; present {
 		t.Fatalf("model_fallbacks was written with no chain:\n%s", b)
@@ -124,9 +124,9 @@ func TestTheRenderIsStable(t *testing.T) {
 		},
 	}
 	web := map[string]string{"tavily": "t", "brave": "b", "kagi": "k"}
-	first, _ := ganglionConfigDoc(res, web)
+	first, _ := ganglionConfigDoc(res, web, "", "")
 	for i := 0; i < 20; i++ {
-		again, _ := ganglionConfigDoc(res, web)
+		again, _ := ganglionConfigDoc(res, web, "", "")
 		if string(first) != string(again) {
 			t.Fatalf("render %d differed:\n%s\n---\n%s", i, first, again)
 		}
@@ -139,7 +139,7 @@ func TestTheRenderIsStable(t *testing.T) {
 func TestAKeyedSearchProviderIsEnabledInTheFile(t *testing.T) {
 	b, _ := ganglionConfigDoc(registry.Resolution{
 		Primary: model("m", "p", "m", "https://e/v1", "k"),
-	}, map[string]string{"brave": "BSA-key", "tavily": ""})
+	}, map[string]string{"brave": "BSA-key", "tavily": ""}, "", "")
 	doc := decodeDoc(t, b)
 	web := doc["tools"].(map[string]any)["web"].(map[string]any)
 	if brave, ok := web["brave"].(map[string]any); !ok || brave["enabled"] != true {
@@ -153,7 +153,7 @@ func TestAKeyedSearchProviderIsEnabledInTheFile(t *testing.T) {
 func TestNoSearchKeysMeansNoToolsBlock(t *testing.T) {
 	b, _ := ganglionConfigDoc(registry.Resolution{
 		Primary: model("m", "p", "m", "https://e/v1", "k"),
-	}, nil)
+	}, nil, "", "")
 	if _, present := decodeDoc(t, b)["tools"]; present {
 		t.Fatalf("a tools block was written with no provider keyed:\n%s", b)
 	}
