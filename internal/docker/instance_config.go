@@ -200,6 +200,22 @@ func (m *Manager) WriteInstanceConfig(key WorkspaceKey, raw, revision string) (I
 	if err != nil {
 		return InstanceConfig{}, ReapplyResult{}, err
 	}
+	// WHAT CHANGED, recorded where it survives -- for a ganglion workspace only.
+	//
+	// picoclaw's config.json is seeded once and edited in place, so a write is the
+	// whole story. The ganglion's is rendered whole on every ensure, so a write to
+	// the file alone is undone by the next turn and reads to the admin as the proxy
+	// reverting them. The leaf paths that differ become overlay entries, which
+	// ganglionConfigDoc's output is merged with on every render.
+	//
+	// BEFORE the write, so a failure to record leaves the file alone too: an edit
+	// that persisted in one place and not the other is the state neither the admin
+	// nor the next render could reason about.
+	if m.harnessConfigFile(key) == ganglionConfigFile {
+		if err := m.recordGanglionOverlay(key, currentDoc, bytesToWrite); err != nil {
+			return InstanceConfig{}, ReapplyResult{}, err
+		}
+	}
 	if err := writeConfigAtomic(path, bytesToWrite); err != nil {
 		return InstanceConfig{}, ReapplyResult{}, err
 	}
@@ -222,7 +238,28 @@ func (m *Manager) WriteInstanceConfig(key WorkspaceKey, raw, revision string) (I
 
 func (m *Manager) instanceConfigPath(key WorkspaceKey) string {
 	return filepath.Join(config.UserWorkspace(m.cfg.ContainerDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID), "config.json")
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID),
+		m.harnessConfigFile(key))
+}
+
+// harnessConfigFile is the configuration file the agent behind this workspace
+// actually READS.
+//
+// The two harnesses do not share the name, and the editors above were writing
+// picoclaw's unconditionally -- so an admin repairing or bulk-editing a ganglion
+// instance edited a file that agent never opens, and was told it worked. That is
+// the failure harness_gate.go exists to prevent, in a surface that has no gate
+// row.
+//
+// key.Role IS the agent key, which is what makes this resolvable from a workspace
+// alone. An agent that has since been removed from the config falls back to
+// picoclaw's name: it is the older shape and the one a stale workspace is more
+// likely to hold.
+func (m *Manager) harnessConfigFile(key WorkspaceKey) string {
+	if agent, ok := m.cfg.Agents[key.Role]; ok && agent.Harness == config.HarnessGanglion {
+		return ganglionConfigFile
+	}
+	return "config.json"
 }
 
 // writeConfigAtomic writes b through a temp file in the SAME directory and

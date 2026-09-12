@@ -473,6 +473,36 @@ func resolveGanglionEndpoints(res *registry.Resolution, agent config.Agent, ref 
 	return nil
 }
 
+// renderGanglionConfig is the document AS IT WILL BE WRITTEN: what the proxy
+// renders, plus the admin's own edits.
+//
+// The two steps live in one function because they are one answer. Rendering
+// without the overlay produces a document that is correct and not what the admin
+// asked for, and a caller doing the first and forgetting the second would look
+// like the proxy reverting an edit on the next turn -- which is exactly the
+// failure the overlay exists to prevent, arriving by another route.
+//
+// A broken overlay is logged and skipped, not fatal. It holds tuning; refusing to
+// start an agent because somebody stored bad JSON in it would trade the whole
+// workspace for a setting.
+func (m *Manager) renderGanglionConfig(
+	userDir string, res registry.Resolution, web map[string]string, mcpToken, ref string,
+) ([]byte, error) {
+	doc, err := ganglionConfigDoc(res, web, m.cfg.MCPBaseURL, mcpToken)
+	if err != nil {
+		return nil, err
+	}
+	merged, applied, oerr := applyOverlayToDoc(doc, ganglionOverlayPath(userDir))
+	if oerr != nil {
+		m.logf("ganglion %s: config overlay ignored: %v", ref, oerr)
+		return doc, nil
+	}
+	if applied > 0 {
+		return merged, nil
+	}
+	return doc, nil
+}
+
 // materializeGanglion resolves this workspace's model from the inventory, writes
 // the harness's configuration file and seeds the member's project subtrees,
 // returning the credential variables the container needs.
@@ -540,7 +570,7 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 	if err != nil {
 		return nil, err
 	}
-	doc, err := ganglionConfigDoc(res, web, m.cfg.MCPBaseURL, mcpToken)
+	doc, err := m.renderGanglionConfig(userDir, res, web, mcpToken, ref.Key())
 	if err != nil {
 		return nil, err
 	}
