@@ -111,12 +111,27 @@ agents:
     token: { env: "MYC_PICOCLAW_ALPHA_TOKEN" }
     template: "alpha" # <containerDataRoot>/templates/alpha/{config.json,.security.yml}
     # data now lives under <containerDataRoot>/tenants/<t>/subscriptions/<s>/agents/alpha/users/<u>
-    # "continuous" keeps the container running: picoclaw holds each direct session
-    # in an in-memory store (SQLite :memory:) and does NOT reload it on restart —
-    # so a scale-to-zero stop would reset the conversation and overwrite its
-    # transcript on the next turn. Staying up preserves history during use.
-    # (idleTimeout is ignored in continuous mode; kept for a quick switch back.)
-    mode: "continuous" # or "scale-to-zero"
+    # "scale-to-zero", and the reason it could not be is gone.
+    #
+    # It read: picoclaw holds each direct session in an in-memory store (SQLite
+    # :memory:) and does NOT reload it on restart, so a stop would reset the
+    # conversation and overwrite its transcript on the next turn. That was true of
+    # picoclaw and is not true of the harness this agent runs now: the ganglion
+    # writes every turn to the transcript before the model is called, keeps the
+    # context window on disk beside it, and rebuilds a missing window FROM the
+    # transcript -- which is the same path a conversation migrated from picoclaw
+    # takes on its first turn. A stopped container loses nothing.
+    #
+    # The other thing that used to need the container up was scheduled tasks,
+    # whose timers lived inside picoclaw. The proxy holds the ganglion's schedule
+    # and starts the container to fire a job, so scale-to-zero is what that
+    # scheduler was designed around rather than something it tolerates.
+    #
+    # idleTimeout is READ now rather than ignored. 15m is inherited from picoclaw,
+    # whose cold start was expensive; the ganglion's was measured at 0.2s, so this
+    # is far more conservative than it needs to be -- in practice the container
+    # stays up through a working session and stops overnight. Lower it freely.
+    mode: "scale-to-zero" # or "continuous"
     idleTimeout: 15m
     # Pin the picoclaw provider/model and take the API key from the environment.
     # The proxy enables the pico channel, sets provider/model, and writes the key
@@ -147,7 +162,14 @@ agents:
     serviceName: "beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }
     template: "beta"
-    mode: "continuous" # keep alive so picoclaw's in-memory session isn't reset (see alpha)
+    # Kept alive because picoclaw holds each direct session in an in-memory store
+    # (SQLite :memory:) and does not reload it on restart, so a stop would reset
+    # the conversation and overwrite its transcript on the next turn.
+    #
+    # This used to say "see alpha". It cannot any more: alpha runs the ganglion
+    # now and is scale-to-zero precisely because that harness has none of this
+    # problem. The reason lives here, with the agent it is still true of.
+    mode: "continuous"
     idleTimeout: 15m
     model:
       provider: "deepseek"
