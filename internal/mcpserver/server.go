@@ -39,7 +39,21 @@ type Deps struct {
 	// Attributing a guess would be worse than attributing nothing: the member clicks
 	// through and reads a conversation that never said it.
 	SourceFor func(memgraph.Scope) (string, bool)
+	// OwnsProject answers "does this member have a project by this id?".
+	//
+	// Required for the project header to be honoured at all; see projectFor.
+	// Optional in the sense that nil is a valid configuration -- it simply means
+	// no caller can select a project, and a call that tries is refused rather
+	// than quietly served the member's global graph.
+	OwnsProject func(memgraph.Scope, string) (bool, error)
 }
+
+// ProjectHeader is how a caller says which of its own projects a call belongs to.
+//
+// Same name the proxy uses in the other direction (crab-shell-proxy sends
+// X-Ganglion-Project to the harness on a turn), because it is the same fact: the
+// project this work belongs to. One name is easier to grep for than two.
+const ProjectHeader = "X-Ganglion-Project"
 
 // ServerName and ServerVersion identify this server in the MCP handshake. The name
 // is deliberately not "memory" — the picoclaw side already calls the server
@@ -63,10 +77,11 @@ const MaxRequestBytes = 1 << 20
 var errNoScope = errors.New("no authorized workspace for this request")
 
 type server struct {
-	store     *memgraph.Store
-	secret    string
-	logf      func(string, ...any)
-	sourceFor func(memgraph.Scope) (string, bool)
+	store       *memgraph.Store
+	secret      string
+	logf        func(string, ...any)
+	sourceFor   func(memgraph.Scope) (string, bool)
+	ownsProject func(memgraph.Scope, string) (bool, error)
 }
 
 // source resolves the conversation to record on a write, or "" when it cannot be
@@ -101,7 +116,8 @@ func NewHandler(d Deps) http.Handler {
 	if d.Logf == nil {
 		d.Logf = func(string, ...any) {}
 	}
-	s := &server{store: d.Store, secret: d.Secret, logf: d.Logf, sourceFor: d.SourceFor}
+	s := &server{store: d.Store, secret: d.Secret, logf: d.Logf,
+		sourceFor: d.SourceFor, ownsProject: d.OwnsProject}
 
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,
@@ -165,6 +181,59 @@ func (s *server) scope(req *mcp.CallToolRequest) (memgraph.Scope, error) {
 	if !ok {
 		return memgraph.Scope{}, errNoScope
 	}
+	return s.projectFor(sc, req.Extra.Header.Get(ProjectHeader))
+}
+
+// projectFor narrows a scope to one of the caller's own projects.
+//
+// THIS IS A DELIBERATE WIDENING of the rule scopeFromHeader states, and the
+// limits matter more than the feature.
+//
+// The token still carries the whole WORKSPACE -- tenant, subscription, role,
+// user -- and nothing here can change any of it. What the header may select is a
+// project INSIDE that workspace, and only one the workspace actually has, which
+// is why OwnsProject is consulted rather than trusted. So the boundary the token
+// defends (one member's memory against another's) is untouched; what moves is a
+// boundary between a member's own subjects, which memgraph.Scope already
+// describes as context hygiene rather than security.
+//
+// It exists because the ganglion cannot express a project the way picoclaw does.
+// There, each project is a separate AGENT with its own MCP server and its own
+// project-scoped token, so the token alone says everything. The ganglion has ONE
+// agent that takes the project per TURN, and giving it one server per project
+// would collide by tool name and refuse the boot (AD-028). So the project
+// travels per CALL.
+//
+// Three refusals, and each one exists because the alternative is a silent
+// cross-project write -- which is the defect this function was written to fix,
+// and which nobody notices until a project's memory is full of another's:
+//
+//   - a token that already names a project WINS over the header. That is
+//     picoclaw's shape, where the token is the whole truth, and a header must
+//     never be able to move a call out of the project its credential names.
+//   - no OwnsProject wired: the header cannot be validated, so it is refused.
+//     Serving the global graph instead would be the exact bug.
+//   - a project the workspace does not have: refused, for the same reason
+//     workspaceSegmentFor refuses one on every other route.
+func (s *server) projectFor(sc memgraph.Scope, project string) (memgraph.Scope, error) {
+	project = strings.TrimSpace(project)
+	if project == "" || sc.Project != "" {
+		return sc, nil
+	}
+	if s.ownsProject == nil {
+		s.logf("mcp: refusing a project-scoped call: no project resolver is wired")
+		return memgraph.Scope{}, errNoScope
+	}
+	ok, err := s.ownsProject(sc, project)
+	if err != nil {
+		s.logf("mcp: project lookup failed for %s: %v", project, err)
+		return memgraph.Scope{}, errNoScope
+	}
+	if !ok {
+		s.logf("mcp: refusing a call naming project %q, which this workspace does not have", project)
+		return memgraph.Scope{}, errNoScope
+	}
+	sc.Project = project
 	return sc, nil
 }
 

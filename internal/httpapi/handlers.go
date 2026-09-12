@@ -412,6 +412,18 @@ func (s *Server) Handler() http.Handler {
 			// Provenance. Passed as a function so mcpserver stays free of any
 			// dependency on this package — same shape as Store.
 			SourceFor: s.turns.Current,
+			// Project scoping for a harness that takes the project per TURN
+			// rather than per agent. The check is the same one every
+			// project-scoped route makes, so a call can only ever name a project
+			// the member actually has.
+			OwnsProject: func(sc memgraph.Scope, project string) (bool, error) {
+				return s.Mgr.HasProject(docker.WorkspaceKey{
+					TenantID:  sc.TenantID,
+					SubsAccID: sc.SubsAccID,
+					Role:      sc.Role,
+					UserAccID: sc.UserAccID,
+				}, project)
+			},
 		}))
 	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
