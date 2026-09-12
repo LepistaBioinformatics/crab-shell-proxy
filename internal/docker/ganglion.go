@@ -424,6 +424,55 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets [
 	return append(env, secrets...)
 }
 
+// resolveGanglionEndpoints fills in every model's api_base, or says why it cannot.
+//
+// THREE SOURCES THAT COMPLEMENT EACH OTHER rather than compete:
+//
+//  1. the INVENTORY's own api_base, which is final. A custom model is custom
+//     precisely because its endpoint is not its provider's default, so nothing
+//     below may overwrite one the admin entered.
+//  2. the AGENT's baseUrl from config.yaml.
+//  3. the PROVIDER's default, which is what picoclaw resolves internally and
+//     never had to write down (ProviderEndpoint).
+//
+// The third is what makes a migrated agent work at all. picoclaw's configuration
+// answers "which provider"; this harness needs "which address", and until now the
+// answer existed nowhere on the path. The proxy wrote a config it already knew
+// could not work, the harness booted reporting "models: 1 configured", and the
+// member met it as `unsupported protocol scheme ""` in their chat.
+//
+// The FALLBACK CHAIN is filled too: a chain whose primary resolves and whose
+// second entry does not is a chain that works until the day it is needed.
+//
+// A primary with no endpoint is REFUSED here, where an operator can see it. An
+// agent that cannot reach a model is not usable either way; the difference is
+// whether the failure names its cause.
+func resolveGanglionEndpoints(res *registry.Resolution, agent config.Agent, ref string) error {
+	fill := func(model *registry.Model) {
+		if model.APIBase != "" {
+			return
+		}
+		if agent.Model != nil && agent.Model.BaseURL != "" {
+			model.APIBase = agent.Model.BaseURL
+			return
+		}
+		model.APIBase = ProviderEndpoint(model.Provider)
+	}
+	fill(&res.Primary)
+	for i := range res.Chain {
+		fill(&res.Chain[i])
+	}
+	if res.Primary.APIBase == "" {
+		return fmt.Errorf(
+			"ganglion %s: model %q (provider %q) has no api_base and the provider has no known "+
+				"default -- set one on the inventory model, or give the agent a baseUrl in "+
+				"config.yaml. picoclaw resolved a provider to an endpoint itself; this harness "+
+				"needs it written down",
+			ref, res.Primary.ModelName, res.Primary.Provider)
+	}
+	return nil
+}
+
 // materializeGanglion resolves this workspace's model from the inventory, writes
 // the harness's configuration file and seeds the member's project subtrees,
 // returning the credential variables the container needs.
@@ -465,6 +514,9 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 			APIBase:   agent.Model.BaseURL,
 			APIKey:    agent.Model.APIKey,
 		}}
+	}
+	if err := resolveGanglionEndpoints(&res, agent, ref.Key()); err != nil {
+		return nil, err
 	}
 	for _, name := range res.Skipped {
 		m.logf("ganglion %s: fallback %q is not active, skipped", ref.Key(), name)

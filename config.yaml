@@ -130,8 +130,17 @@ agents:
       name: "deepseek-chat"
       apiKeyEnv: "PICOCLAW_ALPHA_API_KEY"
 
-      # Obrigatorio para o ganglion: nao existe registry de provider->endpoint,
-      # e um baseUrl vazio falha como 404 do provedor, nao como erro de config.
+      # Optional now, and kept because being explicit costs nothing.
+      #
+      # It WAS required: the ganglion is given a base url and posts to it, while
+      # picoclaw resolves a provider to an endpoint itself and never had to write
+      # one down -- so an agent migrated from picoclaw had a provider, no endpoint,
+      # and failed on its first turn with `unsupported protocol scheme ""`.
+      #
+      # The proxy now resolves a provider's default from the model catalog, so
+      # `provider: "deepseek"` alone is enough. This line still outranks that
+      # default, which is what an operator running a gateway or a regional
+      # endpoint wants; an inventory model's own api_base outranks both.
       baseUrl: "https://api.deepseek.com/v1"
 
   beta:
