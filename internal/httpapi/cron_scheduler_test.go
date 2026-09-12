@@ -235,7 +235,7 @@ func TestRunScheduledJobWritesARunThePanelFinds(t *testing.T) {
 	// The project's own sessions dir, not the agent's. This is the part picoclaw
 	// structurally cannot do: its one cron store fires into one workspace.
 	sessionsDir := config.SessionsDir(root, tenantT, subsX, "alpha", accAlice,
-		config.GanglionProjectWorkspace("seedtrial"))
+		config.ProjectWorkspace("seedtrial"))
 	runs, err := history.CronRuns(sessionsDir)
 	if err != nil {
 		t.Fatalf("CronRuns: %v", err)

@@ -285,17 +285,22 @@ func splitFrontmatter(doc string) (frontmatter, body string) {
 // Separate from the store delete on purpose: a failed removal must not leave a
 // record pointing at a directory that is half gone.
 //
-// BOTH SHAPES, and it takes no harness to decide between them. The webapp warns
-// the member that deleting a project removes its transcripts and its files, and
-// that warning has to be true whichever harness answered — a ganglion project
-// whose subtree survived would leave a member's conversations on disk after
-// they were told otherwise. Removing a path that was never created is a no-op,
-// so asking which harness wrote it would buy nothing and would be wrong on the
-// one workspace whose agent has changed harness since.
+// BOTH SHAPES, still, and it takes no harness to decide between them.
+//
+// The two harnesses agree on the layout now, so the second path is the LEGACY
+// one: <workspace>/projects/<id>, where the ganglion kept a project for one
+// release. It is removed as well because a workspace whose container has not
+// booted since the change still has its subtree there — the harness migrates on
+// boot, and a project deleted before that boot would otherwise leave a member's
+// conversations on disk after the webapp told them it had removed them.
+//
+// Removing a path that was never created is a no-op, so the second entry costs
+// one syscall and outlives the migration by exactly as long as it takes every
+// container to restart once.
 func removeProjectWorkspace(userDir, projectID string) error {
 	for _, seg := range []string{
 		config.ProjectWorkspace(projectID),
-		config.GanglionProjectWorkspace(projectID),
+		config.LegacyGanglionProjectWorkspace(projectID),
 	} {
 		if err := os.RemoveAll(filepath.Join(userDir, seg)); err != nil {
 			return err

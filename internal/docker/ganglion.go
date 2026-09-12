@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -71,8 +72,30 @@ func ganglionWorkspaceBind(hostDir string) string {
 // exercised where a Docker daemon is needed. A disagreement here does not fail
 // loudly -- it recreates the container on every single turn, which reads as
 // "the harness keeps restarting" with nothing naming the cause.
-func ganglionBinds(cfg *config.Config, key WorkspaceKey, hostDir string) []string {
+func ganglionBinds(cfg *config.Config, key WorkspaceKey, hostDir string, projects []string) []string {
 	binds := []string{ganglionWorkspaceBind(hostDir)}
+	// ONE BIND PER PROJECT, because a project's workspace is a SIBLING of the
+	// main one and the ganglion mounts workspaces, not the directory holding
+	// them. Mounting the parent instead would be one line and would expose
+	// config.json and credential.key, which sit there precisely because the
+	// agent's Landlock root ends below them.
+	//
+	// The cost is that the bind set changes when the project set does, so the
+	// container is recreated -- which ganglionBindDrift already notices. For an
+	// agent running scale-to-zero, the mode this harness exists for, the
+	// container is created per turn anyway.
+	for _, id := range projects {
+		seg := config.ProjectWorkspace(id)
+		binds = append(binds, filepath.Join(hostDir, seg)+":"+ganglionMountDest+"/"+seg)
+		// The admin's shared skills, inside EVERY workspace rather than only the
+		// main one. The agent's Landlock root is the TURN's workspace now, so a
+		// skills root reachable only from the main one would produce an index
+		// pointing at files a project turn cannot open -- the failure
+		// ganglionSkillsDest already records, one layout later. picoclaw mounts
+		// skills into each project agent's workspace for the same reason.
+		binds = append(binds, config.EffectiveSkillsDir(cfg.HostDataRoot, key.TenantID, key.SubsAccID, key.Role)+
+			":"+ganglionMountDest+"/"+seg+"/shared-skills:ro")
+	}
 	if cfg.GanglionKeyFile != "" {
 		binds = append(binds, cfg.GanglionKeyFile+":"+ganglionKeyFileDest+":ro")
 	}
@@ -118,6 +141,27 @@ const ganglionSkillsDest = ganglionMountDest + "/" + config.MainWorkspace + "/sh
 // file the agent can print.
 const ganglionKeyFileDest = ganglionMountDest + "/credential.key"
 
+// ganglionProjectIDs is the member's projects, in store order, for the bind set
+// and the drift check that reads it back. The two MUST agree, which is why they
+// ask the same function rather than each listing for itself.
+//
+// A failure is an empty list rather than an error: the projects store is the
+// proxy's own file, and a workspace that cannot read it has a larger problem
+// than a missing bind -- one this path would report as "recreate the container",
+// forever, on every ensure.
+func (m *Manager) ganglionProjectIDs(key WorkspaceKey) []string {
+	list, err := m.projectStore(key).List()
+	if err != nil {
+		m.logf("ganglion %s/%s: read projects for the bind set: %v", key.Role, key.UserAccID, err)
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, p := range list {
+		out = append(out, p.ID)
+	}
+	return out
+}
+
 // ganglionBindDrift reports whether an existing container's mounts no longer
 // match what createGanglion would build.
 //
@@ -133,8 +177,15 @@ const ganglionKeyFileDest = ganglionMountDest + "/credential.key"
 //
 // Same class of invisible staleness as personaBindDrift and imageDrift, and it
 // sits beside them for that reason.
-func ganglionBindDrift(cfg *config.Config, actual []string) bool {
+//   - the PROJECT SET changing. A project's workspace is a sibling of the main
+//     one and gets a bind of its own, so a project created since this container
+//     started is not visible inside it at all -- the turn would run against a
+//     directory the harness creates locally and the proxy never reads. This is
+//     the cost the sibling layout accepted, and noticing it here is what makes
+//     the cost bounded.
+func ganglionBindDrift(cfg *config.Config, projects []string, actual []string) bool {
 	haveKeyFile, haveConfig, haveSkills := false, false, false
+	mounted := map[string]bool{}
 	for _, b := range actual {
 		_, dest, ok := splitBind(b)
 		if !ok {
@@ -142,6 +193,12 @@ func ganglionBindDrift(cfg *config.Config, actual []string) bool {
 		}
 		if dest == ganglionMountDest {
 			return true
+		}
+		if id, isProject := strings.CutPrefix(dest, ganglionMountDest+"/"+ganglionProjectPrefix); isProject {
+			// The workspace bind, not the shared-skills one nested under it.
+			if !strings.Contains(id, "/") {
+				mounted[id] = true
+			}
 		}
 		switch dest {
 		case ganglionKeyFileDest:
@@ -156,6 +213,14 @@ func ganglionBindDrift(cfg *config.Config, actual []string) bool {
 	// none and must be recreated exactly once to get it.
 	if !haveConfig || !haveSkills {
 		return true
+	}
+	if len(mounted) != len(projects) {
+		return true
+	}
+	for _, id := range projects {
+		if !mounted[identity.SanitizeID(id)] {
+			return true
+		}
 	}
 	return haveKeyFile != (cfg.GanglionKeyFile != "")
 }
@@ -441,19 +506,16 @@ func (m *Manager) seedGanglionProjects(key WorkspaceKey, userDir string) error {
 	if err != nil {
 		return fmt.Errorf("read projects: %w", err)
 	}
-	root := filepath.Join(userDir, config.MainWorkspace)
-	if len(list) == 0 {
-		// NFR-1: a workspace that has never had a project gets no `projects`
-		// directory, so an agent that never had one behaves exactly as today.
-		// But one that HAD projects and no longer does still has orphans to
-		// sweep, so an empty list is not on its own a reason to stop.
-		//
-		// A plain Stat rather than a rooted one: it only decides whether there
-		// is work, and every path that does work goes through the os.Root below.
-		if _, serr := os.Stat(filepath.Join(root, ganglionProjectsDirName)); serr != nil {
-			return nil
-		}
-	}
+	// Anchored at the USER DIR, not the workspace, because a project's workspace
+	// is a sibling of the main one now.
+	//
+	// That is stricter than the old anchor rather than looser: the user dir is
+	// the one directory the agent cannot reach at all (the ganglion binds each
+	// workspace separately and nothing above them), while every path beneath it
+	// that this function creates IS inside a tree the agent can write. The
+	// os.Root is what stops a symlink planted at workspace-<id>/sessions from
+	// redirecting a root-owned MkdirAll.
+	root := userDir
 
 	tree, err := openTree(root)
 	if err != nil {
@@ -466,7 +528,12 @@ func (m *Manager) seedGanglionProjects(key WorkspaceKey, userDir string) error {
 		// workspace prefix the tree is already anchored at. Deriving it twice is
 		// how the seeder and the reader would come to disagree about where a
 		// transcript lives.
-		rel := strings.TrimPrefix(config.GanglionProjectWorkspace(p.ID), config.MainWorkspace+"/")
+		// The SAME helper the segment resolution uses, with no trimming: both
+		// harnesses name a project's workspace identically now, which is the
+		// whole point of the change that made them siblings. Deriving it twice
+		// is how a seeder and a reader come to disagree about where a transcript
+		// lives.
+		rel := config.ProjectWorkspace(p.ID)
 		for _, sub := range ganglionProjectDirs {
 			if err := tree.root.MkdirAll(rel+"/"+sub, 0o700); err != nil {
 				if escaped(err) {
@@ -489,9 +556,11 @@ func (m *Manager) seedGanglionProjects(key WorkspaceKey, userDir string) error {
 	return m.sweepGanglionProjects(key, tree, list)
 }
 
-// ganglionProjectsDirName is the directory holding the per-project subtrees,
-// matching the harness's own domain.ProjectsDirName.
-const ganglionProjectsDirName = "projects"
+// ganglionProjectPrefix is what a project workspace's name starts with,
+// matching the harness's own domain.ProjectWorkspacePrefix and picoclaw's
+// resolveAgentWorkspace. It is how a sweep tells a project's directory from the
+// main workspace beside it -- "workspace" does not start with "workspace-".
+const ganglionProjectPrefix = "workspace-"
 
 // sweepGanglionProjects removes the subtree of a project that no longer exists.
 //
@@ -506,9 +575,10 @@ func (m *Manager) sweepGanglionProjects(key WorkspaceKey, tree *treeRoot, list [
 	for _, p := range list {
 		live[p.ID] = true
 	}
-	// Listed through the Root's own fs.FS, so a symlink planted where `projects`
-	// should be cannot make this enumerate -- and then delete -- somewhere else.
-	entries, err := fs.ReadDir(tree.root.FS(), ganglionProjectsDirName)
+	// Listed through the Root's own fs.FS, so a symlink planted where a project
+	// directory should be cannot make this enumerate -- and then delete --
+	// somewhere else.
+	entries, err := fs.ReadDir(tree.root.FS(), ".")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -516,10 +586,16 @@ func (m *Manager) sweepGanglionProjects(key WorkspaceKey, tree *treeRoot, list [
 		return fmt.Errorf("scan ganglion projects: %w", err)
 	}
 	for _, e := range entries {
-		if !e.IsDir() || live[e.Name()] {
+		// The prefix is what keeps this from touching anything else in the user
+		// dir -- config.json, .schedules.json, and the MAIN workspace, which
+		// does not start with "workspace-". A sweep anchored one level higher
+		// than it used to be has to be that much more careful about what it
+		// claims to own.
+		id, ok := strings.CutPrefix(e.Name(), ganglionProjectPrefix)
+		if !e.IsDir() || !ok || id == "" || live[id] {
 			continue
 		}
-		if err := tree.root.RemoveAll(ganglionProjectsDirName + "/" + e.Name()); err != nil {
+		if err := tree.root.RemoveAll(e.Name()); err != nil {
 			return fmt.Errorf("remove orphaned ganglion project %s: %w", e.Name(), err)
 		}
 		m.logf("workspace %s/%s: removed orphaned ganglion project dir %s",
@@ -607,7 +683,7 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 		// logged "persona file ... no such file or directory" every boot and
 		// ran every member's agent with no identity at all: the env var was
 		// wired to a path nothing created.
-		Binds:   ganglionBinds(m.cfg, key, hostDir),
+		Binds:   ganglionBinds(m.cfg, key, hostDir, m.ganglionProjectIDs(key)),
 		Network: m.cfg.Network,
 		// One process, PID 1, signals handled in main. No supervisor to reap
 		// children for.
@@ -668,7 +744,7 @@ func (m *Manager) ensureGanglionRunning(
 		}
 
 	case personaBindDrift(m.cfg, key, ganglionMountDest, st.Binds) ||
-		ganglionBindDrift(m.cfg, st.Binds) ||
+		ganglionBindDrift(m.cfg, m.ganglionProjectIDs(key), st.Binds) ||
 		ganglionSecretDrift(wantSecrets, st.Env) ||
 		m.imageDrift(ctx, agent, st):
 		// Four drifts, all invisible without this check.

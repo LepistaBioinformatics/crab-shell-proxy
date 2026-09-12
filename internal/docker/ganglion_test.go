@@ -246,31 +246,31 @@ func TestGanglionBindDrift(t *testing.T) {
 	// D-1's shared skills root, also unconditional and also read-only.
 	skillsBind := "/srv/data/effective-skills/t/s/a:" + ganglionSkillsDest + ":ro"
 
-	if ganglionBindDrift(plain, []string{workspaceBind, configBind, skillsBind,
+	if ganglionBindDrift(plain, nil, []string{workspaceBind, configBind, skillsBind,
 		"/srv/persona/AGENT.md:" + persona + ":ro"}) {
 		t.Error("a correctly narrowed container was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind, skillsBind}) {
+	if !ganglionBindDrift(plain, nil, []string{workspaceBind, skillsBind}) {
 		t.Error("a container with no model registry bound was not detected: an admin's model change can never reach it")
 	}
 	// An index that names skill files the container has no mount for would tell
 	// the model a capability exists and then fail to open it.
-	if !ganglionBindDrift(plain, []string{workspaceBind, configBind}) {
+	if !ganglionBindDrift(plain, nil, []string{workspaceBind, configBind}) {
 		t.Error("a container with no shared skills bound was not detected")
 	}
-	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest}) {
+	if !ganglionBindDrift(plain, nil, []string{"/srv/data/u:" + ganglionMountDest}) {
 		t.Error("the old wide bind was not detected: the agent keeps reading proxy state")
 	}
-	if !ganglionBindDrift(plain, []string{"/srv/data/u:" + ganglionMountDest + ":rw"}) {
+	if !ganglionBindDrift(plain, nil, []string{"/srv/data/u:" + ganglionMountDest + ":rw"}) {
 		t.Error("the old wide bind with explicit options was not detected")
 	}
-	if !ganglionBindDrift(encrypted, []string{workspaceBind, configBind, skillsBind}) {
+	if !ganglionBindDrift(encrypted, nil, []string{workspaceBind, configBind, skillsBind}) {
 		t.Error("switching encryption on did not drift a container with no key file bound")
 	}
-	if ganglionBindDrift(encrypted, []string{workspaceBind, configBind, skillsBind, keyBind}) {
+	if ganglionBindDrift(encrypted, nil, []string{workspaceBind, configBind, skillsBind, keyBind}) {
 		t.Error("a container that already has the key file was reported as drifted")
 	}
-	if !ganglionBindDrift(plain, []string{workspaceBind, configBind, skillsBind, keyBind}) {
+	if !ganglionBindDrift(plain, nil, []string{workspaceBind, configBind, skillsBind, keyBind}) {
 		t.Error("switching encryption off left a stale key file bound")
 	}
 }
@@ -323,14 +323,14 @@ func TestGanglionBindsDoNotLookLikeDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binds := ganglionBinds(cfg, key, filepath.Join(root, "u"))
+	binds := ganglionBinds(cfg, key, filepath.Join(root, "u"), nil)
 	if len(binds) < 2 {
 		t.Fatalf("expected the workspace bind plus a persona bind, got %v", binds)
 	}
 	if personaBindDrift(cfg, key, ganglionMountDest, binds) {
 		t.Errorf("a freshly built bind set reports persona drift: every turn would recreate the container\n%v", binds)
 	}
-	if ganglionBindDrift(cfg, binds) {
+	if ganglionBindDrift(cfg, nil, binds) {
 		t.Errorf("a freshly built bind set reports bind drift\n%v", binds)
 	}
 }
@@ -351,7 +351,7 @@ func TestTheCredentialKeyFileIsOutOfTheAgentsReach(t *testing.T) {
 	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
 
 	var keyBind string
-	for _, b := range ganglionBinds(cfg, key, "/srv/data/u") {
+	for _, b := range ganglionBinds(cfg, key, "/srv/data/u", nil) {
 		if _, dest, ok := splitBind(b); ok && dest == ganglionKeyFileDest {
 			keyBind = b
 		}
@@ -390,7 +390,7 @@ func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
 	cfg := &config.Config{ContainerDataRoot: t.TempDir(), HostDataRoot: "/srv/data", GanglionPort: 18800}
 	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
 
-	for _, b := range ganglionBinds(cfg, key, "/srv/data/u") {
+	for _, b := range ganglionBinds(cfg, key, "/srv/data/u", nil) {
 		if strings.Contains(b, "credential.key") {
 			t.Errorf("a key file was bound with none configured: %q", b)
 		}
@@ -462,7 +462,7 @@ func TestSeedingAGanglionProjectCreatesItsSubtreeUnderTheWorkspace(t *testing.T)
 		t.Fatalf("seed: %v", err)
 	}
 
-	root := filepath.Join(userDir, config.GanglionProjectWorkspace(p.ID))
+	root := filepath.Join(userDir, config.ProjectWorkspace(p.ID))
 	for _, sub := range ganglionProjectDirs {
 		if fi, statErr := os.Stat(filepath.Join(root, sub)); statErr != nil || !fi.IsDir() {
 			t.Errorf("%s was not created under the project root: %v", sub, statErr)
@@ -491,7 +491,7 @@ func TestAGanglionProjectFileCarriesTheMembersInstructions(t *testing.T) {
 	}
 
 	raw, err := os.ReadFile(filepath.Join(userDir,
-		config.GanglionProjectWorkspace(p.ID), ganglionProjectFileName))
+		config.ProjectWorkspace(p.ID), ganglionProjectFileName))
 	if err != nil {
 		t.Fatalf("read %s: %v", ganglionProjectFileName, err)
 	}
@@ -518,7 +518,7 @@ func TestSeedingAGanglionProjectRevertsAnAgentEditToTheProjectFile(t *testing.T)
 		t.Fatalf("first seed: %v", err)
 	}
 
-	path := filepath.Join(userDir, config.GanglionProjectWorkspace(p.ID), ganglionProjectFileName)
+	path := filepath.Join(userDir, config.ProjectWorkspace(p.ID), ganglionProjectFileName)
 	if err := os.WriteFile(path, []byte("# Whatever I like\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -567,8 +567,8 @@ func TestSeedingAGanglionProjectIsNotABindChange(t *testing.T) {
 	m, key, userDir := ganglionSeedManager(t)
 	cfg := &config.Config{HostDataRoot: "/host/data"}
 	binds := ganglionBinds(cfg, key, config.UserWorkspace(cfg.HostDataRoot,
-		key.TenantID, key.SubsAccID, key.Role, key.UserAccID))
-	if ganglionBindDrift(cfg, binds) {
+		key.TenantID, key.SubsAccID, key.Role, key.UserAccID), nil)
+	if ganglionBindDrift(cfg, nil, binds) {
 		t.Fatal("the bind set this test starts from already reads as drift")
 	}
 
@@ -579,7 +579,7 @@ func TestSeedingAGanglionProjectIsNotABindChange(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if ganglionBindDrift(cfg, binds) {
+	if ganglionBindDrift(cfg, nil, binds) {
 		t.Error("a project made the bind set look stale; the container would be recreated for a directory")
 	}
 }
@@ -587,14 +587,15 @@ func TestSeedingAGanglionProjectIsNotABindChange(t *testing.T) {
 // The webapp warns a member that deleting a project removes its transcripts and
 // its files. That warning has to be TRUE on whichever harness answered.
 //
-// A ganglion project's subtree lives under workspace/projects/, which
-// removeProjectWorkspace did not touch and which syncProjectWorkspaces never
-// reaches -- the ganglion ensure path returns before it. So a deleted project's
-// conversations stayed on disk after the member was told they were gone.
+// Both harnesses name a project's workspace identically now, so the delete has
+// one path to remove -- plus the LEGACY one, for a container that has not booted
+// since the layout changed and whose subtree is therefore still underneath the
+// workspace. A deleted project's conversations staying on disk after the member
+// was told they were gone is what this has always been about.
 func TestDeletingAProjectRemovesItOnEitherHarness(t *testing.T) {
 	userDir := t.TempDir()
 	pico := filepath.Join(userDir, config.ProjectWorkspace("demo"), "sessions")
-	gang := filepath.Join(userDir, config.GanglionProjectWorkspace("demo"), "sessions")
+	gang := filepath.Join(userDir, config.LegacyGanglionProjectWorkspace("demo"), "sessions")
 	for _, d := range []string{pico, gang} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -625,7 +626,7 @@ func TestDeletingAProjectRemovesItOnEitherHarness(t *testing.T) {
 func TestAnOrphanedGanglionProjectIsSweptOnTheNextEnsure(t *testing.T) {
 	m, key, userDir := ganglionSeedManager(t)
 
-	orphan := filepath.Join(userDir, config.MainWorkspace, "projects", "gone")
+	orphan := filepath.Join(userDir, config.ProjectWorkspace("gone"))
 	if err := os.MkdirAll(filepath.Join(orphan, "sessions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -638,5 +639,109 @@ func TestAnOrphanedGanglionProjectIsSweptOnTheNextEnsure(t *testing.T) {
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatal("a project with no record kept its transcripts")
+	}
+	// And the sweep, which now runs one level up, must not take the MAIN
+	// workspace or anything else in the user dir with it -- the prefix is the
+	// only thing standing between it and config.json.
+	if _, err := os.Stat(filepath.Join(userDir, config.MainWorkspace)); err != nil {
+		t.Fatalf("the sweep removed the main workspace: %v", err)
+	}
+}
+
+// The sweep enumerates the USER DIR now, which holds the proxy's own files. The
+// prefix is what keeps it to the directories it owns, and nothing else here
+// would notice if it stopped.
+func TestTheSweepLeavesTheProxysOwnFilesAlone(t *testing.T) {
+	m, key, userDir := ganglionSeedManager(t)
+
+	// Not .projects.json: the manager owns that one, and writing a stub over it
+	// would make this test fail on a parse error rather than on the thing it
+	// asserts.
+	keep := []string{"config.json", ".schedules.json", ".crab-ganglion.json"}
+	for _, name := range keep {
+		if err := os.WriteFile(filepath.Join(userDir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Join(userDir, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.seedGanglionProjects(key, userDir); err != nil {
+		t.Fatalf("seedGanglionProjects: %v", err)
+	}
+	for _, name := range append(keep, "logs") {
+		if _, err := os.Stat(filepath.Join(userDir, name)); err != nil {
+			t.Errorf("the sweep removed %s: %v", name, err)
+		}
+	}
+}
+
+// A project gets a bind of its own, because its workspace is a SIBLING of the
+// main one and the ganglion mounts workspaces rather than the directory holding
+// them.
+//
+// Mounting the parent instead would be one line, and would put config.json --
+// the model registry, with its api_keys -- and credential.key inside the agent's
+// Landlock root. That is the whole reason this costs a bind per project.
+func TestAProjectGetsItsOwnBind(t *testing.T) {
+	cfg := &config.Config{HostDataRoot: "/host/data"}
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "gamma", UserAccID: "u1"}
+	binds := ganglionBinds(cfg, key, "/srv/data/u", []string{"seedtrial"})
+
+	wantWorkspace := "/srv/data/u/workspace-seedtrial:" + ganglionMountDest + "/workspace-seedtrial"
+	var haveWorkspace, haveSkills, haveParent bool
+	for _, b := range binds {
+		src, dest, ok := splitBind(b)
+		if !ok {
+			continue
+		}
+		if b == wantWorkspace {
+			haveWorkspace = true
+		}
+		if dest == ganglionMountDest+"/workspace-seedtrial/shared-skills" {
+			haveSkills = true
+		}
+		// Nothing may mount the directory that HOLDS the workspaces.
+		if dest == ganglionMountDest && src != "" {
+			haveParent = true
+		}
+	}
+	if !haveWorkspace {
+		t.Errorf("no bind for the project's workspace:\n%v", binds)
+	}
+	// The admin's shared skills inside the project's own workspace: the agent's
+	// Landlock root is the TURN's workspace, so an index pointing at files only
+	// the main workspace can open would be an index of unreachable paths.
+	if !haveSkills {
+		t.Errorf("the project's workspace has no shared-skills mount:\n%v", binds)
+	}
+	if haveParent {
+		t.Error("the directory holding the workspaces was mounted, exposing config.json and credential.key")
+	}
+}
+
+// A project created since the container started is not visible inside it at all,
+// so the bind set changing has to recreate it. Without this the turn would run
+// against a directory the harness makes locally and the proxy never reads.
+func TestBindDriftNoticesTheProjectSet(t *testing.T) {
+	cfg := &config.Config{HostDataRoot: "/host/data"}
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "gamma", UserAccID: "u1"}
+
+	none := ganglionBinds(cfg, key, "/srv/data/u", nil)
+	one := ganglionBinds(cfg, key, "/srv/data/u", []string{"seedtrial"})
+
+	if ganglionBindDrift(cfg, nil, none) {
+		t.Fatal("a container with no projects reads as drift against no projects")
+	}
+	if ganglionBindDrift(cfg, []string{"seedtrial"}, one) {
+		t.Fatal("a container with one project reads as drift against that project")
+	}
+	if !ganglionBindDrift(cfg, []string{"seedtrial"}, none) {
+		t.Error("a project created since the container started was not noticed")
+	}
+	if !ganglionBindDrift(cfg, nil, one) {
+		t.Error("a project deleted since the container started was not noticed")
 	}
 }

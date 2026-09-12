@@ -674,31 +674,33 @@ func ProjectWorkspace(projectID string) string {
 	return "workspace-" + identity.SanitizeID(projectID)
 }
 
-// GanglionProjectWorkspace is the same idea for a ganglion agent, and a
-// DIFFERENT SHAPE, because the two harnesses reach a project by different means.
+// LegacyGanglionProjectWorkspace is where the ganglion kept a project for one
+// release: workspace/projects/<id>, a CHILD of the main workspace.
 //
-// picoclaw needs a sibling directory because each project is a separate picoclaw
-// AGENT, and an agent resolves its own workspace independently. The ganglion has
-// one agent and takes the project as a header, so its projects are children of
-// the workspace it already mounts -- which is what lets a project be created
-// without adding a bind, and therefore without recreating a container that,
-// under scale-to-zero, may not be running.
-//
-// Kept in step with the harness's own domain.ProjectsDirName. If the two ever
-// disagree the proxy reads an empty history for a conversation that exists,
-// which is the failure jsonl.go's header already records once.
-func GanglionProjectWorkspace(projectID string) string {
+// It exists only so the cleanup paths can find a subtree written before the
+// harness migrated itself to the sibling layout, and it may be deleted once
+// every container has booted once. Nothing may create a path with it.
+func LegacyGanglionProjectWorkspace(projectID string) string {
 	return MainWorkspace + "/projects/" + identity.SanitizeID(projectID)
 }
 
 // WorkspaceSegment is the segment for one (harness, project) pair. The empty
-// project is the main workspace for both.
+// project is the main workspace.
+//
+// IT NO LONGER BRANCHES ON THE HARNESS, and that is the point of the change that
+// removed the branch. The ganglion kept projects under the workspace for one
+// release, to spare itself a second bind; the cost was this function being two
+// functions pretending to be one, and every caller of SessionsDir, PublicDir and
+// the media code inheriting the split. A caller that forgot it did not fail --
+// it read a directory that never existed and reported that the member had no
+// history, twice.
+//
+// The harness parameter stays. Callers hold it for other reasons, and a
+// parameter removed today is a parameter re-threaded through thirty call sites
+// the next time the two layouts differ.
 func WorkspaceSegment(harness, projectID string) string {
 	if projectID == "" {
 		return MainWorkspace
-	}
-	if harness == HarnessGanglion {
-		return GanglionProjectWorkspace(projectID)
 	}
 	return ProjectWorkspace(projectID)
 }
