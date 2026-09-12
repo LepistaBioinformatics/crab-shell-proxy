@@ -745,3 +745,78 @@ func TestBindDriftNoticesTheProjectSet(t *testing.T) {
 		t.Error("a project deleted since the container started was not noticed")
 	}
 }
+
+// The mounts the ganglion never got, and each one a member-visible capability.
+//
+// admin-shared-content was silently inert for every ganglion member: an admin
+// publishing a document to a subscription reached picoclaw members and nobody
+// else, which is the failure harness_gate.go exists to prevent, in a feature
+// with no gate row. The managed documents include FILE_DELIVERY.md, which is
+// what tells an agent to write deliverables into public/attachments -- the only
+// place the member's interface lists.
+func TestTheGanglionGetsTheSharedAndManagedMounts(t *testing.T) {
+	cfg := &config.Config{HostDataRoot: "/host/data"}
+	key := WorkspaceKey{TenantID: "t1", SubsAccID: "s1", Role: "gamma", UserAccID: "u1"}
+	binds := ganglionBinds(cfg, key, "/srv/data/u", nil)
+
+	var haveShared, haveManaged bool
+	for _, b := range binds {
+		_, dest, ok := splitBind(b)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(dest, ganglionMountDest+"/"+config.MainWorkspace+"/.shared/") {
+			haveShared = true
+		}
+		if strings.Contains(dest, "/memory/") && strings.HasSuffix(dest, ".md") {
+			haveManaged = true
+		}
+	}
+	if !haveShared {
+		t.Errorf("no shared-content mount:\n%v", binds)
+	}
+	if !haveManaged {
+		t.Errorf("no managed memory mount:\n%v", binds)
+	}
+	// Both must be the SAME destinations picoclaw uses, or the two harnesses
+	// have two layouts again.
+	for _, sm := range sharedFileBinds(cfg, key, ganglionMountDest) {
+		if !hasBind(binds, sm.bind) {
+			t.Errorf("shared bind missing: %s", sm.bind)
+		}
+	}
+	for _, b := range managedContentBinds(config.ManagedSkillsDir(cfg.HostDataRoot),
+		ganglionMountDest, false) {
+		if !hasBind(binds, b) {
+			t.Errorf("managed bind missing: %s", b)
+		}
+	}
+}
+
+// hasBind is exact membership. The package already has a `contains` that does
+// substring matching on one string, which is a different question.
+func hasBind(binds []string, want string) bool {
+	for _, b := range binds {
+		if b == want {
+			return true
+		}
+	}
+	return false
+}
+
+// memory/ and public/ are seeded with the workspace rather than left to whatever
+// creates one first. An agent told to write a deliverable into public/ before
+// anyone had uploaded anything was writing into a directory that did not exist.
+func TestTheGanglionWorkspaceIsSeededWithItsDirectories(t *testing.T) {
+	userDir := t.TempDir()
+	if _, err := provisionGanglion(userDir, ""); err != nil {
+		t.Fatalf("provisionGanglion: %v", err)
+	}
+	for _, dir := range []string{"memory", config.PublicDirName, "sessions", "windows"} {
+		path := filepath.Join(userDir, config.MainWorkspace, dir)
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			t.Errorf("%s was not seeded: %v", dir, err)
+		}
+	}
+}
