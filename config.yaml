@@ -90,6 +90,24 @@ mcpBaseURL: "http://crab-shell-proxy:8080"
 agents:
   alpha:
     serviceName: "alpha" # matches x-mycelium-service-name mycelium injects
+    # THE CUTOVER. This agent ran picoclaw; it runs crab-ganglion-harness now,
+    # against the SAME per-user directories -- same key, so the same
+    # <root>/agents/alpha/users/<u> tree, with its transcripts, its projects and
+    # its files already in it.
+    #
+    # serviceName and token are deliberately unchanged: mycelium routes by the
+    # first and injects the second, so touching either would be a new agent to
+    # every member rather than the same one on a new runtime.
+    #
+    # What makes this safe to do at all is that the harness READS what picoclaw
+    # wrote -- picoclaw's hashed transcript names are found through the chat
+    # marker in their metas, and a conversation with no window is rebuilt from
+    # its transcript. Without both, a member would keep their history on screen
+    # and lose it from the agent's context.
+    #
+    # To go back: delete this line. The picoclaw data was never moved or
+    # rewritten, only read.
+    harness: "ganglion"
     token: { env: "MYC_PICOCLAW_ALPHA_TOKEN" }
     template: "alpha" # <containerDataRoot>/templates/alpha/{config.json,.security.yml}
     # data now lives under <containerDataRoot>/tenants/<t>/subscriptions/<s>/agents/alpha/users/<u>
@@ -112,27 +130,6 @@ agents:
       name: "deepseek-chat"
       apiKeyEnv: "PICOCLAW_ALPHA_API_KEY"
 
-  # TESTE LOCAL — o segundo harness. Entrada NOVA, nao um flip do alpha (D-5):
-  # trocar o harness do unico agente em producao seria cutover, nao coexistencia.
-  # Mesmo provider/modelo do alpha, para isolar o harness como variavel.
-  gamma:
-    serviceName: "gamma"
-    harness: "ganglion"
-    token: { env: "MYC_GANGLION_TOKEN" }
-    template: "alpha"
-    # scale-to-zero, que e o ponto do ganglion. O picoclaw fica continuous por
-    # causa das tarefas agendadas (timers em memoria); este agente nao as
-    # oferece -- /v1/cron/* responde 501 nomeando o modo.
-    mode: "scale-to-zero"
-    # 120s, nao os 15m do picoclaw. Aqueles existem porque o cold start dele era
-    # caro; o do ganglion foi medido em 0,2s. Dois minutos e curto o bastante
-    # para o scale-to-zero valer e longo o bastante para nao recriar container
-    # entre duas mensagens da mesma conversa.
-    idleTimeout: 15s
-    model:
-      provider: "deepseek"
-      name: "deepseek-chat"
-      apiKeyEnv: "GANGLION_API_KEY"
       # Obrigatorio para o ganglion: nao existe registry de provider->endpoint,
       # e um baseUrl vazio falha como 404 do provedor, nao como erro de config.
       baseUrl: "https://api.deepseek.com/v1"
