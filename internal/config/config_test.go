@@ -867,15 +867,19 @@ func TestLoadStillFailsOnAMissingPicoclawToken(t *testing.T) {
 	}
 }
 
-// The two harnesses put a project's files in DIFFERENT places, and this is the
-// one function that says which. picoclaw's projects are siblings of the main
-// workspace because each is a separate agent that resolves its own workspace;
-// the ganglion has one agent and takes the project as a header, so its projects
-// are children of the workspace it already mounts.
+// EVERY harness puts a project's files in the SAME place, and this test replaced
+// one asserting that the ganglion did not.
 //
-// Getting this wrong does not fail: it reads an empty transcript for a
-// conversation that exists, which the member experiences as lost history.
-func TestTheWorkspaceSegmentIsASiblingForPicoclawAndAChildForTheGanglion(t *testing.T) {
+// picoclaw's projects are siblings of the main workspace because each is a
+// separate agent that resolves its own workspace (resolveAgentWorkspace), so the
+// name is a fact about the stack rather than a convention this function is free
+// to restate. The ganglion kept them underneath for one release, to spare itself
+// a second bind; it pays the bind now.
+//
+// The old split did not fail when a caller forgot it. It read an empty
+// transcript for a conversation that exists -- which the member experiences as
+// lost history, and which happened twice before the split was removed.
+func TestTheWorkspaceSegmentIsASiblingOnEveryHarness(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		harness string
@@ -883,9 +887,9 @@ func TestTheWorkspaceSegmentIsASiblingForPicoclawAndAChildForTheGanglion(t *test
 		want    string
 	}{
 		{"picoclaw puts a project beside the main workspace", HarnessPicoclaw, "seedtrial", "workspace-seedtrial"},
-		{"the ganglion puts a project under it", HarnessGanglion, "seedtrial", "workspace/projects/seedtrial"},
+		{"and so does the ganglion", HarnessGanglion, "seedtrial", "workspace-seedtrial"},
 		{"an empty harness is picoclaw", "", "seedtrial", "workspace-seedtrial"},
-		{"an unknown harness keeps the picoclaw shape", "something-new", "seedtrial", "workspace-seedtrial"},
+		{"an unknown harness gets the same shape", "something-new", "seedtrial", "workspace-seedtrial"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := WorkspaceSegment(tc.harness, tc.project); got != tc.want {
