@@ -41,6 +41,39 @@ import (
 // host where the agent cannot reach it.
 const ganglionMountDest = "/data/.ganglion"
 
+// seedGanglionUserFile writes the workspace's USER.md if it has none.
+//
+// ONLY IF IT HAS NONE. It is the one persona file the agent writes back, so
+// overwriting it on every ensure would erase what the agent learned about the
+// member every time their container was recreated -- which for a scale-to-zero
+// agent is every turn.
+func seedGanglionUserFile(cfg *config.Config, key WorkspaceKey, userDir, templateDir string) error {
+	dst := filepath.Join(userDir, config.MainWorkspace, ganglionUserFile)
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+	body := personaSeedSource(cfg, key, templateDir, ganglionUserFile)
+	if body == "" {
+		// Nothing in the cascade provides one. An absent USER.md is the ordinary
+		// state of a workspace whose operator injected nothing, and writing an
+		// empty file would put a heading-less blank in the agent's prompt.
+		return nil
+	}
+	return os.WriteFile(dst, []byte(body), 0o644)
+}
+
+// ganglionUserFile is the persona file the agent writes back rather than reads.
+const ganglionUserFile = "USER.md"
+
+// ganglionWorkspaceDirs are the directories every ganglion workspace has, seeded
+// on provision. "." is the workspace itself.
+//
+// The set is picoclaw's, minus what only picoclaw has: no cron/ (the proxy holds
+// the ganglion's schedules, above the bind) and no .secrets/ (credentials arrive
+// as environment). windows/ is the ganglion's own and has no picoclaw
+// equivalent.
+var ganglionWorkspaceDirs = []string{".", "memory", config.PublicDirName, "sessions", "windows"}
+
 // ganglionTokenFile holds the per-user bearer, in the user directory but
 // DELIBERATELY OUTSIDE what the container mounts (see ganglionWorkspaceBind).
 // Persisted so a returning user reuses the same token instead of having their
@@ -99,6 +132,25 @@ func ganglionBinds(cfg *config.Config, key WorkspaceKey, hostDir string, project
 	if cfg.GanglionKeyFile != "" {
 		binds = append(binds, cfg.GanglionKeyFile+":"+ganglionKeyFileDest+":ro")
 	}
+	// The admin's shared FILES and the operator-managed memory documents, both
+	// built by the same pure helpers picoclaw uses and both landing at
+	// <mount>/workspace/... -- inside the workspace bind above, which Docker
+	// applies first because it sorts by destination depth. The persona binds at
+	// the end of this function already rely on that.
+	//
+	// They were missing, and the cost was not cosmetic. admin-shared-content was
+	// silently inert for every ganglion member -- an admin publishing a document
+	// to a subscription reached picoclaw members and nobody else, which is the
+	// failure harness_gate.go exists to prevent, in a feature with no gate row.
+	// And the managed documents include FILE_DELIVERY.md, which is what tells an
+	// agent to write deliverables into public/attachments -- the only place the
+	// member's interface lists. A ganglion agent had never been told that.
+	for _, sm := range sharedFileBinds(cfg, key, ganglionMountDest) {
+		binds = append(binds, sm.bind)
+	}
+	binds = append(binds, managedContentBinds(
+		config.ManagedSkillsDir(cfg.HostDataRoot), ganglionMountDest,
+		cfg.ResolvedMCPTokenSecret != "")...)
 	// The model registry, READ-ONLY and above the workspace, for the same
 	// reason the key file is: the workspace is the only thing a command can
 	// reach, and a writable model list would let a tool steered by untrusted
@@ -277,8 +329,19 @@ type ganglionState struct {
 // arrives as environment, which is why the generic dotenv secret sink covers it
 // and the picoclaw-only native .security.yml sink is simply unused.
 func provisionGanglion(userDir, user string) (string, error) {
-	if err := os.MkdirAll(filepath.Join(userDir, "workspace"), 0o755); err != nil {
-		return "", fmt.Errorf("ganglion workspace: %w", err)
+	// The workspace's own directories, seeded rather than left to whatever
+	// happens to create one first.
+	//
+	// memory/ is where the managed documents are mounted and where the agent's
+	// own MEMORY.md lives -- picoclaw's path, and now the harness's. public/ is
+	// the only directory the member's interface lists, so an agent told to write
+	// a deliverable there before anyone has uploaded anything was writing into a
+	// directory that did not exist. Both are one MkdirAll and both remove an
+	// ordering dependency nobody would look for.
+	for _, dir := range ganglionWorkspaceDirs {
+		if err := os.MkdirAll(filepath.Join(userDir, config.MainWorkspace, dir), 0o755); err != nil {
+			return "", fmt.Errorf("ganglion workspace %s: %w", dir, err)
+		}
 	}
 	statePath := filepath.Join(userDir, ganglionTokenFile)
 
@@ -640,6 +703,21 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 	if err != nil {
 		return err
 	}
+	// The owner marker, which picoclaw's provision writes and this one did not.
+	// ownerEmail reads it and ListSubscriptionUsers labels a member from it, so
+	// without it every ganglion workspace listed in the admin surface with an
+	// empty email.
+	if err := writeOwnerFile(containerDir, key, ownerEmail(containerDir)); err != nil {
+		return fmt.Errorf("write owner file: %w", err)
+	}
+	// USER.md, SEEDED and not mounted -- the agent accumulates what it learns
+	// about the member there, so a read-only bind would silently disable that
+	// write. picoclaw seeds it from the resolved cascade and the ganglion did
+	// not, so an operator's injection reached one harness and not the other.
+	if err := seedGanglionUserFile(m.cfg, key, containerDir,
+		config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)); err != nil {
+		return fmt.Errorf("seed USER.md: %w", err)
+	}
 	secrets, err := m.materializeGanglion(agent, key, containerDir)
 	if err != nil {
 		return err
@@ -650,6 +728,20 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 	// never populated.
 	if err := m.syncEffectiveSkills(key.TenantID, key.SubsAccID, key.Role); err != nil {
 		return fmt.Errorf("sync effective skills: %w", err)
+	}
+	// The shared-file and managed-content SOURCES, for the same reason: a bind
+	// whose source does not exist is created by the daemon as an empty
+	// root-owned directory the agent cannot even read.
+	for _, sm := range sharedFileBinds(m.cfg, key, ganglionMountDest) {
+		if err := os.MkdirAll(sm.container, 0o700); err != nil {
+			return fmt.Errorf("create shared files dir: %w", err)
+		}
+		if err := chownTree(sm.container, m.cfg.PicoclawUser); err != nil {
+			return fmt.Errorf("chown shared files dir: %w", err)
+		}
+	}
+	if err := m.ensureManagedContent(); err != nil {
+		return err
 	}
 
 	image := m.harnessImage(agent)
