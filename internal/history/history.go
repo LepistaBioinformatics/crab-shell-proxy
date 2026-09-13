@@ -33,6 +33,33 @@ type Message struct {
 	// reasoning_content), when it emitted one. Kept separate from Content so the
 	// client can keep it out of the way; it was previously discarded here.
 	Reasoning string `json:"reasoning,omitempty"`
+	// Events is what the loop DID during the step: the tools it ran and how each
+	// ended, the children it dispatched, the model it fell back to. The live
+	// stream shows the latest of these as progress and then forgets it; this is
+	// the half that survives the turn.
+	//
+	// A message carrying events carries no content -- it is the step's detail,
+	// not a second thing the agent said. The harness writes it as its own entry
+	// because an event can only report how a call ENDED once it has, and the
+	// narration is written before the call runs so it survives a turn that dies
+	// inside one.
+	Events []Event `json:"events,omitempty"`
+}
+
+// Event is one thing the agent's loop did. The vocabulary is the harness's
+// (crab-ganglion-harness internal/domain, TurnEvent) and is passed through
+// rather than re-interpreted: this package decides what is SERVED, not what any
+// of it means.
+//
+// Nothing here is a sentence. The harness has no locale, so every word the
+// member reads is rendered by the client from these fields; Name, Arguments and
+// Detail are data and are shown verbatim in either language.
+type Event struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 // metaFile mirrors the subset of a *.meta.json we match on. picoclaw derives
@@ -76,10 +103,26 @@ type jsonlEntry struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
-	// Only the PRESENCE of tool calls is read — it is what separates the agent
-	// narrating a step from the agent answering. The calls themselves are
-	// picoclaw's business, so they stay raw and unparsed.
-	ToolCalls []json.RawMessage `json:"tool_calls"`
+	// The calls a frame asked for. Their PRESENCE is what separates the agent
+	// narrating a step from the agent answering, and it used to be all that was
+	// read — they were `[]json.RawMessage` and stayed unparsed.
+	//
+	// The name is now read too, so a step can say which tool it asked for. TWO
+	// SPELLINGS because two harnesses write this file: picoclaw nests it under
+	// `function` (OpenAI's own shape), the ganglion writes it flat
+	// (domain.ToolCall). Reading both is what keeps an older transcript, from
+	// either, naming its tools instead of going blank.
+	ToolCalls []struct {
+		Name     string `json:"name"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls"`
+	// Events is the ganglion's per-iteration record of what it DID. Absent from
+	// every picoclaw transcript and from every ganglion one written before the
+	// harness recorded them, which is why nothing downstream may require it.
+	Events []Event `json:"events"`
 	// The model's chain of thought, when the provider returns one. Frequently the
 	// only content of an entry: over half the entries carrying it have an empty
 	// Content, and those used to be dropped whole.
@@ -541,12 +584,32 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 		// TrimSpace, not `!= ""`: an entry whose content is nothing but
 		// whitespace is as empty as one with none, and the client renders a
 		// padded band per message with only the content conditional.
+		//
+		// An entry carrying EVENTS survives it, and that clause is the whole
+		// reason a silent tool call is visible at all: a frame that asked for a
+		// tool and narrated nothing produces exactly this shape, and it used to
+		// be dropped here — so the member saw ten steps for a turn that had run
+		// fourteen tools.
 		reasoning := strings.TrimSpace(e.ReasoningContent)
-		if strings.TrimSpace(e.Content) == "" && reasoning == "" {
+		if strings.TrimSpace(e.Content) == "" && reasoning == "" && len(e.Events) == 0 {
 			return
 		}
-		m := Message{Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt, Reasoning: reasoning}
+		m := Message{
+			Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt,
+			Reasoning: reasoning, Events: e.Events,
+		}
 		if e.Role == "assistant" && len(e.ToolCalls) > 0 {
+			m.Kind = KindStep
+			// The calls a narration frame asked for, as events with no outcome —
+			// it is written BEFORE they run, so there is none yet. This is also
+			// what keeps a transcript written before the harness recorded events
+			// naming its tools: nothing is backfilled and no file is rewritten.
+			m.Events = append(m.Events, callEvents(e)...)
+		}
+		if e.Role == "assistant" && len(m.Events) > 0 {
+			// An events-only entry is narration too. It is never an answer, and
+			// keepAnswerlessTurns cannot promote it into one: `speaks` requires
+			// content, and this has none by construction.
 			m.Kind = KindStep
 		}
 		messages = append(messages, m)
@@ -598,4 +661,27 @@ func keepAnswerlessTurns(messages []Message) {
 	if start < len(messages) {
 		flush(messages[start:])
 	}
+}
+
+// callEvents turns a narration frame's own tool_calls into events.
+//
+// No status: the frame is written before the calls run, so how they ended is not
+// known here and is reported by the iteration's own events entry. An event with
+// no status is a call whose outcome nobody recorded — which is the truth about a
+// turn that died inside one, and about every transcript written before the
+// harness kept events at all.
+func callEvents(e jsonlEntry) []Event {
+	out := make([]Event, 0, len(e.ToolCalls))
+	for _, c := range e.ToolCalls {
+		name := c.Name
+		if name == "" {
+			name = c.Function.Name
+		}
+		if name == "" {
+			// Neither spelling. A row naming nothing is worse than no row.
+			continue
+		}
+		out = append(out, Event{Kind: "tool", Name: name, Arguments: c.Function.Arguments})
+	}
+	return out
 }
