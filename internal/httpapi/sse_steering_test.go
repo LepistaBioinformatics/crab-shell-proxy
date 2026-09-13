@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 )
 
@@ -79,6 +80,47 @@ func TestSecondPostOnALiveConversationIsAnnouncedAsSteering(t *testing.T) {
 		}
 		if ev, _ := raw.(map[string]any); ev["folded"] != true {
 			t.Errorf("x_crab_steering payload = %v, want folded:true", raw)
+		}
+	}
+	if announced != 1 {
+		t.Fatalf("x_crab_steering frames = %d, want exactly 1", announced)
+	}
+}
+
+// THE SAME CONDITION, A DIFFERENT FACT. The ganglion does not fold anything: it
+// serializes per conversation, so the second POST is its own turn waiting for the
+// one ahead, and this stream will carry its own answer rather than someone
+// else's.
+//
+// Saying "folded" here told the member their correction had reached the running
+// turn when it had not -- and before the harness serialized anything, it had in
+// fact started a SECOND concurrent turn that was about to overwrite the first's
+// context window. The announcement asserted a fold over a data-loss bug.
+func TestSecondPostOnAGanglionConversationIsAnnouncedAsQueued(t *testing.T) {
+	bt := &blockingTurner{started: make(chan struct{}, 1), release: make(chan struct{})}
+	s := testServer(scaffoldedOrch(), bt)
+	agent := s.Cfg.Agents["alpha"]
+	agent.Harness = config.HarnessGanglion
+	s.Cfg.Agents["alpha"] = agent
+	defer close(bt.release)
+
+	first := httptest.NewRecorder()
+	go s.Handler().ServeHTTP(first, chatReq(t, streamingBody, goodHeaders(t)))
+	<-bt.started
+
+	second := httptest.NewRecorder()
+	s.Handler().ServeHTTP(second, chatReq(t, streamingBody, goodHeaders(t)))
+
+	var announced int
+	for _, f := range frames(t, second.Body.String()) {
+		raw, ok := f["x_crab_steering"]
+		if !ok {
+			continue
+		}
+		announced++
+		ev, _ := raw.(map[string]any)
+		if ev["folded"] != false || ev["queued"] != true {
+			t.Errorf("x_crab_steering payload = %v, want queued:true folded:false", raw)
 		}
 	}
 	if announced != 1 {

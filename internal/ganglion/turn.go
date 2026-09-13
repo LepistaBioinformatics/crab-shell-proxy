@@ -38,7 +38,18 @@ type Client struct {
 	Logf func(string, ...any)
 
 	mu     sync.Mutex
-	active map[string]context.CancelFunc // sessionID -> cancel
+	nextID int64
+	// sessionID -> every turn in flight on it -> its cancel.
+	//
+	// A MAP PER SESSION, not one cancel per session, and the difference is a bug
+	// this carried until the harness began serializing turns. A single entry was
+	// OVERWRITTEN by a second turn on the same conversation, and then deleted by
+	// whichever of the two finished first -- so Stop cancelled the wrong turn, or
+	// nothing at all.
+	//
+	// Cancelling every turn on the conversation is what Stop means: the member
+	// asked for this chat to stop, not for one of its requests to.
+	active map[string]map[int64]context.CancelFunc
 }
 
 func New(hc *http.Client) *Client {
@@ -48,14 +59,14 @@ func New(hc *http.Client) *Client {
 		// bounds this.
 		hc = &http.Client{}
 	}
-	return &Client{HTTP: hc, active: map[string]context.CancelFunc{}}
+	return &Client{HTTP: hc, active: map[string]map[int64]context.CancelFunc{}}
 }
 
 // RunTurn satisfies httpapi.Turner.
 func (c *Client) RunTurn(ctx context.Context, req turn.Request, sink turn.Sink) (string, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	c.track(req.SessionID, cancel)
-	defer c.untrack(req.SessionID)
+	id := c.track(req.SessionID, cancel)
+	defer c.untrack(req.SessionID, id)
 	defer cancel()
 
 	body, err := json.Marshal(request{
@@ -160,29 +171,51 @@ func (c *Client) consume(r io.Reader, sink turn.Sink) (string, error) {
 
 // Cancel stops the turn running on req.SessionID, if there is one. A session
 // with no active turn is not an error.
+// Cancel stops EVERY turn in flight on the conversation.
+//
+// The member asked for this chat to stop. A second turn exists on it when one
+// was POSTed while another ran -- the harness queues it rather than running it
+// concurrently now, but it still exists, and leaving it to start after a Stop
+// would answer a question the member has already cancelled.
 func (c *Client) Cancel(_ context.Context, req turn.Request) error {
 	c.mu.Lock()
-	cancel := c.active[req.SessionID]
+	// Copied under the lock rather than cancelled under it: each cancel wakes a
+	// RunTurn whose deferred untrack takes this same mutex.
+	cancels := make([]context.CancelFunc, 0, len(c.active[req.SessionID]))
+	for _, cancel := range c.active[req.SessionID] {
+		cancels = append(cancels, cancel)
+	}
 	c.mu.Unlock()
-	if cancel != nil {
+	for _, cancel := range cancels {
 		cancel()
 	}
 	return nil
 }
 
-func (c *Client) track(id string, cancel context.CancelFunc) {
+func (c *Client) track(session string, cancel context.CancelFunc) int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.active == nil {
-		c.active = map[string]context.CancelFunc{}
+		c.active = map[string]map[int64]context.CancelFunc{}
 	}
-	c.active[id] = cancel
+	c.nextID++
+	id := c.nextID
+	if c.active[session] == nil {
+		c.active[session] = map[int64]context.CancelFunc{}
+	}
+	c.active[session][id] = cancel
+	return id
 }
 
-func (c *Client) untrack(id string) {
+func (c *Client) untrack(session string, id int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.active, id)
+	delete(c.active[session], id)
+	// The session's map goes with its last turn, so this holds only what is
+	// running rather than every conversation the container has ever served.
+	if len(c.active[session]) == 0 {
+		delete(c.active, session)
+	}
 }
 
 // --- wire ------------------------------------------------------------------
