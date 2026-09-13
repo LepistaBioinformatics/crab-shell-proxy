@@ -3,6 +3,7 @@ package history
 import (
 	"errors"
 	"os"
+	"reflect"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,10 +49,12 @@ func TestReadFindsAndFiltersTranscript(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2: %+v", len(msgs), msgs)
 	}
-	if msgs[0] != (Message{Role: "user", Content: "hi", CreatedAt: "2026-07-16T19:39:06.983127587Z"}) {
+	// reflect.DeepEqual rather than ==: Message carries a slice of events now, so
+	// the struct is no longer comparable.
+	if !reflect.DeepEqual(msgs[0], Message{Role: "user", Content: "hi", CreatedAt: "2026-07-16T19:39:06.983127587Z"}) {
 		t.Errorf("msg[0] = %+v", msgs[0])
 	}
-	if msgs[1] != (Message{Role: "assistant", Content: "hello there", CreatedAt: "2026-07-16T19:39:08.697371182Z"}) {
+	if !reflect.DeepEqual(msgs[1], Message{Role: "assistant", Content: "hello there", CreatedAt: "2026-07-16T19:39:08.697371182Z"}) {
 		t.Errorf("msg[1] = %+v", msgs[1])
 	}
 }
@@ -180,7 +183,7 @@ func TestSyncDurablePreservesAcrossOverwrite(t *testing.T) {
 		t.Fatalf("got %d messages, want %d: %+v", len(msgs), len(want), msgs)
 	}
 	for i := range want {
-		if msgs[i] != want[i] {
+		if !reflect.DeepEqual(msgs[i], want[i]) {
 			t.Errorf("msg[%d] = %+v, want %+v", i, msgs[i], want[i])
 		}
 	}

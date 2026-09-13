@@ -33,6 +33,33 @@ type Message struct {
 	// reasoning_content), when it emitted one. Kept separate from Content so the
 	// client can keep it out of the way; it was previously discarded here.
 	Reasoning string `json:"reasoning,omitempty"`
+	// Events is what the loop DID during the step: the tools it ran and how each
+	// ended, the children it dispatched, the model it fell back to. The live
+	// stream shows the latest of these as progress and then forgets it; this is
+	// the half that survives the turn.
+	//
+	// A message carrying events carries no content -- it is the step's detail,
+	// not a second thing the agent said. The harness writes it as its own entry
+	// because an event can only report how a call ENDED once it has, and the
+	// narration is written before the call runs so it survives a turn that dies
+	// inside one.
+	Events []Event `json:"events,omitempty"`
+}
+
+// Event is one thing the agent's loop did. The vocabulary is the harness's
+// (crab-ganglion-harness internal/domain, TurnEvent) and is passed through
+// rather than re-interpreted: this package decides what is SERVED, not what any
+// of it means.
+//
+// Nothing here is a sentence. The harness has no locale, so every word the
+// member reads is rendered by the client from these fields; Name, Arguments and
+// Detail are data and are shown verbatim in either language.
+type Event struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 // metaFile mirrors the subset of a *.meta.json we match on. picoclaw derives
@@ -76,10 +103,26 @@ type jsonlEntry struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
-	// Only the PRESENCE of tool calls is read — it is what separates the agent
-	// narrating a step from the agent answering. The calls themselves are
-	// picoclaw's business, so they stay raw and unparsed.
-	ToolCalls []json.RawMessage `json:"tool_calls"`
+	// The calls a frame asked for. Their PRESENCE is what separates the agent
+	// narrating a step from the agent answering, and it used to be all that was
+	// read — they were `[]json.RawMessage` and stayed unparsed.
+	//
+	// The name is now read too, so a step can say which tool it asked for. TWO
+	// SPELLINGS because two harnesses write this file: picoclaw nests it under
+	// `function` (OpenAI's own shape), the ganglion writes it flat
+	// (domain.ToolCall). Reading both is what keeps an older transcript, from
+	// either, naming its tools instead of going blank.
+	ToolCalls []struct {
+		Name     string `json:"name"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls"`
+	// Events is the ganglion's per-iteration record of what it DID. Absent from
+	// every picoclaw transcript and from every ganglion one written before the
+	// harness recorded them, which is why nothing downstream may require it.
+	Events []Event `json:"events"`
 	// The model's chain of thought, when the provider returns one. Frequently the
 	// only content of an entry: over half the entries carrying it have an empty
 	// Content, and those used to be dropped whole.
@@ -527,6 +570,10 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 		rel = dir + "/" + rel
 	}
 	messages := []Message{}
+	// Tool names derived from a narration frame's own tool_calls, kept BESIDE the
+	// messages rather than on them. Whether they are used at all depends on
+	// something no single line can answer -- see legacyCallEvents.
+	synth := [][]Event{}
 	err := eachLine(r, rel, func(line string) {
 		var e jsonlEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
@@ -541,21 +588,87 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 		// TrimSpace, not `!= ""`: an entry whose content is nothing but
 		// whitespace is as empty as one with none, and the client renders a
 		// padded band per message with only the content conditional.
+		//
+		// An entry carrying EVENTS survives it, and that clause is the whole
+		// reason a silent tool call is visible at all: a frame that asked for a
+		// tool and narrated nothing produces exactly this shape, and it used to
+		// be dropped here — so the member saw ten steps for a turn that had run
+		// fourteen tools.
 		reasoning := strings.TrimSpace(e.ReasoningContent)
-		if strings.TrimSpace(e.Content) == "" && reasoning == "" {
+		if strings.TrimSpace(e.Content) == "" && reasoning == "" && len(e.Events) == 0 {
 			return
 		}
-		m := Message{Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt, Reasoning: reasoning}
+		m := Message{
+			Role: e.Role, Content: e.Content, CreatedAt: e.CreatedAt,
+			Reasoning: reasoning, Events: e.Events,
+		}
 		if e.Role == "assistant" && len(e.ToolCalls) > 0 {
 			m.Kind = KindStep
 		}
+		if e.Role == "assistant" && len(m.Events) > 0 {
+			// An events-only entry is narration too. It is never an answer, and
+			// keepAnswerlessTurns cannot promote it into one: `speaks` requires
+			// content, and this has none by construction.
+			m.Kind = KindStep
+		}
 		messages = append(messages, m)
+		// Held, not applied. A frame that already carries real events needs no
+		// stand-in for them.
+		if e.Role == "assistant" && len(e.Events) == 0 {
+			synth = append(synth, callEvents(e))
+		} else {
+			synth = append(synth, nil)
+		}
 	})
 	if err != nil {
 		return messages, err
 	}
+	legacyCallEvents(messages, synth)
 	keepAnswerlessTurns(messages)
 	return messages, nil
+}
+
+// legacyCallEvents names a turn's tools from its narration frames' own
+// tool_calls -- but ONLY when the turn recorded no events of its own.
+//
+// THE DUPLICATE THIS PREVENTS is the whole reason it is a second pass. A
+// harness that records events writes the iteration TWICE: the narration with
+// its tool_calls before the tools run, and the events after, with how each
+// ended. Deriving from both puts every call on screen twice -- once with its
+// outcome and once saying nobody recorded one.
+//
+// So the stand-in applies per TURN, which is the span the question can actually
+// be answered over: a turn either recorded events or it did not. That keeps the
+// upgrade boundary right as well -- in a conversation that spans it, the older
+// turns keep their tool names and the newer ones keep their outcomes.
+func legacyCallEvents(messages []Message, synth [][]Event) {
+	apply := func(turn []Message, from [][]Event) {
+		for _, m := range turn {
+			if len(m.Events) > 0 {
+				return // the turn recorded its own; no stand-in is wanted
+			}
+		}
+		for i := range turn {
+			if len(from[i]) > 0 {
+				turn[i].Events = from[i]
+			}
+		}
+	}
+	// Turns are the spans between user messages -- the same walk
+	// keepAnswerlessTurns makes, for the same reason.
+	start := 0
+	for i, m := range messages {
+		if m.Role != "user" {
+			continue
+		}
+		if i > start {
+			apply(messages[start:i], synth[start:i])
+		}
+		start = i
+	}
+	if start < len(messages) {
+		apply(messages[start:], synth[start:])
+	}
 }
 
 // keepAnswerlessTurns un-marks narration in any turn that has no plain answer
@@ -598,4 +711,27 @@ func keepAnswerlessTurns(messages []Message) {
 	if start < len(messages) {
 		flush(messages[start:])
 	}
+}
+
+// callEvents turns a narration frame's own tool_calls into events.
+//
+// No status: the frame is written before the calls run, so how they ended is not
+// known here. It is a STAND-IN for a turn that recorded nothing of its own --
+// every transcript written before the harness kept events -- and legacyCallEvents
+// is what decides whether it is wanted. Used unconditionally it would list every
+// call twice.
+func callEvents(e jsonlEntry) []Event {
+	out := make([]Event, 0, len(e.ToolCalls))
+	for _, c := range e.ToolCalls {
+		name := c.Name
+		if name == "" {
+			name = c.Function.Name
+		}
+		if name == "" {
+			// Neither spelling. A row naming nothing is worse than no row.
+			continue
+		}
+		out = append(out, Event{Kind: "tool", Name: name, Arguments: c.Function.Arguments})
+	}
+	return out
 }
