@@ -107,9 +107,14 @@ const durableDir = "durable"
 
 // Read returns the plain user/assistant turns for the conversation whose
 // session key is sessionKey (the sha256(email::session_id)[:32] value), located
-// under sessionsDir (<per-user-data>/workspace/sessions). It prefers the durable
-// transcript (which survives picoclaw's live-file rewrites) and falls back to
-// the live file. Missing dir or file yields an empty slice, never an error.
+// under sessionsDir (<per-user-data>/workspace/sessions).
+//
+// A conversation can be spread over more than one file, and the rule is
+// CONCATENATION, not preference: the durable transcript (which survives
+// picoclaw's live-file rewrites) holds everything up to a migration, the
+// harness's own file holds everything after it, and the conversation is both.
+// Only when neither is present does the marker scan look for picoclaw's hashed
+// live filename. Missing dir or file yields an empty slice, never an error.
 func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	r, err := openSessions(sessionsDir)
 	if err != nil {
@@ -120,8 +125,26 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	}
 	defer r.Close()
 
+	// BOTH, when both exist, and in this order.
+	//
+	// A conversation that was migrated from picoclaw and then continued under the
+	// ganglion has its history in TWO files: the durable one, frozen at the moment of
+	// the move, and the harness's own, holding everything since. They are disjoint --
+	// on the volume this was found on, the durable file ends 2026-08-18 and the
+	// harness file begins 2026-09-12 -- so the conversation is their concatenation and
+	// nothing is repeated by reading both.
+	//
+	// This used to `return` on the durable file, which meant the frozen half won and
+	// every turn taken after the migration was INVISIBLE in served history. The member
+	// saw a conversation that stopped on the day they moved, with their own later
+	// messages missing from it, and nothing said so.
+	var msgs []Message
 	if existsIn(r, durableDir+"/"+sessionKey+".jsonl") {
-		return readMessages(r, durableDir, sessionKey)
+		durable, err := readMessages(r, durableDir, sessionKey)
+		if err != nil {
+			return nil, err
+		}
+		msgs = durable
 	}
 	// crab-ganglion-harness names its transcript after the session key
 	// directly, and writes no *.meta.json -- it has no reason to, because it
@@ -129,11 +152,18 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	// scan below, which is how picoclaw's hashed filenames are found, would
 	// never match it. Try the direct name first; it costs one stat.
 	if base := harnessBasename(sessionKey); existsIn(r, base+".jsonl") {
-		msgs, err := readMessages(r, "", base)
+		harness, err := readMessages(r, "", base)
 		if err != nil {
 			return nil, err
 		}
+		msgs = append(msgs, harness...)
+		// The partial is checked against the WHOLE list: its supersession rule reads
+		// the newest assistant message, and that is not necessarily in the half it
+		// sits beside.
 		return append(msgs, livePartial(r, base, msgs)...), nil
+	}
+	if msgs != nil {
+		return msgs, nil
 	}
 	basename := findSessionFile(r, sessionKey)
 	if basename == "" {

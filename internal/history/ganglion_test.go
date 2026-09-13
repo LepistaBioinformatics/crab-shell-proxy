@@ -191,3 +191,77 @@ func TestRead_FindsAProjectPartialUnderTheHarnessSanitisedName(t *testing.T) {
 		t.Fatalf("the in-flight answer was not served: %+v", got)
 	}
 }
+
+// A conversation MIGRATED from picoclaw and then continued under the ganglion.
+//
+// Its history is in two files: the durable one, frozen at the moment of the
+// move, and the harness's own, holding everything since. Read used to return on
+// the durable file, so the frozen half won and every turn taken after the
+// migration was invisible — the member saw their conversation stop on the day
+// they moved, with their own later messages missing and nothing saying so.
+//
+// Found on a live volume: 38 durable lines ending 2026-08-18, 3 harness lines
+// beginning 2026-09-12. Disjoint, so the conversation is their concatenation.
+func TestRead_AMigratedConversationKeepsBothHalves(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, durableDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONL(t, filepath.Join(dir, durableDir, "sk1.jsonl"), []map[string]any{
+		{"role": "user", "content": "before the move", "created_at": "2026-08-18T13:04:58Z"},
+		{"role": "assistant", "content": "answered then", "created_at": "2026-08-18T13:05:00Z"},
+	})
+	writeGanglion(t, dir, "sk1", []map[string]any{
+		{"role": "user", "content": "after the move", "created_at": "2026-09-12T22:51:34Z"},
+		{"role": "assistant", "content": "answered now", "created_at": "2026-09-12T22:51:36Z"},
+	})
+
+	got, err := Read(dir, "sk1")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("expected both halves, got %d: %+v", len(got), got)
+	}
+	want := []string{"before the move", "answered then", "after the move", "answered now"}
+	for i, w := range want {
+		if got[i].Content != w {
+			t.Fatalf("at %d: got %q, want %q (full: %+v)", i, got[i].Content, w, got)
+		}
+	}
+}
+
+// The durable file alone must still be served. Concatenation is the rule when
+// both exist; it must not become "only the harness file counts".
+func TestRead_ADurableTranscriptAloneIsStillServed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, durableDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONL(t, filepath.Join(dir, durableDir, "sk1.jsonl"), []map[string]any{
+		{"role": "user", "content": "only half", "created_at": "2026-08-18T13:04:58Z"},
+	})
+
+	got, err := Read(dir, "sk1")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 1 || got[0].Content != "only half" {
+		t.Fatalf("got %d messages: %+v", len(got), got)
+	}
+}
+
+func writeJSONL(t *testing.T, path string, msgs []map[string]any) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, m := range msgs {
+		if err := enc.Encode(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
