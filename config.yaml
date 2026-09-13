@@ -136,7 +136,7 @@ agents:
     # practice the container stays up through a working session and stops
     # overnight. Lower it freely.
     mode: "scale-to-zero" # or "continuous"
-    idleTimeout: 15m
+    idleTimeout: 30s
     # Pin the picoclaw provider/model and take the API key from the environment.
     # The proxy enables the pico channel, sets provider/model, and writes the key
     # (read from apiKeyEnv) into each user's .security.yml at provisioning time,
