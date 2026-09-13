@@ -116,3 +116,54 @@ func TestRead_ATranscriptWithNoEventsIsUnchanged(t *testing.T) {
 		t.Errorf("msgs = %+v, want an ordinary question and answer", msgs)
 	}
 }
+
+// THE DUPLICATE. A harness that records events writes the iteration twice -- the
+// narration with its tool_calls before the tools run, the events after, with how
+// each ended. Deriving tool rows from both puts every call on screen twice: once
+// with its outcome and once saying nobody recorded one.
+func TestRead_AToolIsNotListedTwiceWhenTheTurnRecordedItsOwnEvents(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"oi"}
+{"role":"assistant","content":"vou ver","tool_calls":[{"name":"sh","function":{"arguments":"{}"}}]}
+{"role":"assistant","content":"","events":[{"kind":"tool","name":"sh","status":"ok"}]}
+{"role":"assistant","content":"pronto"}
+`)
+	var all []Event
+	for _, m := range msgs {
+		all = append(all, m.Events...)
+	}
+	if len(all) != 1 {
+		t.Fatalf("events = %+v, want the one the turn recorded", all)
+	}
+	if all[0].Status != "ok" {
+		t.Errorf("status = %q; the recorded outcome is the one that survives", all[0].Status)
+	}
+}
+
+// The stand-in applies per TURN, so a conversation that spans the upgrade keeps
+// both halves right: the older turn keeps its tool names, the newer keeps its
+// outcomes.
+func TestRead_TheStandInAppliesPerTurn(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"antes"}
+{"role":"assistant","content":"vou ver","tool_calls":[{"name":"web_search","function":{"arguments":"{}"}}]}
+{"role":"assistant","content":"achei"}
+{"role":"user","content":"depois"}
+{"role":"assistant","content":"vou ver de novo","tool_calls":[{"name":"sh","function":{"arguments":"{}"}}]}
+{"role":"assistant","content":"","events":[{"kind":"tool","name":"sh","status":"failed"}]}
+{"role":"assistant","content":"pronto"}
+`)
+	// The old turn: named, with no outcome, because none was ever written.
+	if len(msgs[1].Events) != 1 || msgs[1].Events[0].Name != "web_search" {
+		t.Fatalf("the older turn lost its tool name: %+v", msgs[1].Events)
+	}
+	if msgs[1].Events[0].Status != "" {
+		t.Errorf("status = %q, want none for a turn that recorded none", msgs[1].Events[0].Status)
+	}
+	// The new turn: once, with its outcome.
+	var after []Event
+	for _, m := range msgs[4:] {
+		after = append(after, m.Events...)
+	}
+	if len(after) != 1 || after[0].Status != "failed" {
+		t.Errorf("the newer turn = %+v, want its one recorded call", after)
+	}
+}

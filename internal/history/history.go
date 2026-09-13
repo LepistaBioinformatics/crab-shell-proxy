@@ -570,6 +570,10 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 		rel = dir + "/" + rel
 	}
 	messages := []Message{}
+	// Tool names derived from a narration frame's own tool_calls, kept BESIDE the
+	// messages rather than on them. Whether they are used at all depends on
+	// something no single line can answer -- see legacyCallEvents.
+	synth := [][]Event{}
 	err := eachLine(r, rel, func(line string) {
 		var e jsonlEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
@@ -600,11 +604,6 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 		}
 		if e.Role == "assistant" && len(e.ToolCalls) > 0 {
 			m.Kind = KindStep
-			// The calls a narration frame asked for, as events with no outcome —
-			// it is written BEFORE they run, so there is none yet. This is also
-			// what keeps a transcript written before the harness recorded events
-			// naming its tools: nothing is backfilled and no file is rewritten.
-			m.Events = append(m.Events, callEvents(e)...)
 		}
 		if e.Role == "assistant" && len(m.Events) > 0 {
 			// An events-only entry is narration too. It is never an answer, and
@@ -613,12 +612,63 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 			m.Kind = KindStep
 		}
 		messages = append(messages, m)
+		// Held, not applied. A frame that already carries real events needs no
+		// stand-in for them.
+		if e.Role == "assistant" && len(e.Events) == 0 {
+			synth = append(synth, callEvents(e))
+		} else {
+			synth = append(synth, nil)
+		}
 	})
 	if err != nil {
 		return messages, err
 	}
+	legacyCallEvents(messages, synth)
 	keepAnswerlessTurns(messages)
 	return messages, nil
+}
+
+// legacyCallEvents names a turn's tools from its narration frames' own
+// tool_calls -- but ONLY when the turn recorded no events of its own.
+//
+// THE DUPLICATE THIS PREVENTS is the whole reason it is a second pass. A
+// harness that records events writes the iteration TWICE: the narration with
+// its tool_calls before the tools run, and the events after, with how each
+// ended. Deriving from both puts every call on screen twice -- once with its
+// outcome and once saying nobody recorded one.
+//
+// So the stand-in applies per TURN, which is the span the question can actually
+// be answered over: a turn either recorded events or it did not. That keeps the
+// upgrade boundary right as well -- in a conversation that spans it, the older
+// turns keep their tool names and the newer ones keep their outcomes.
+func legacyCallEvents(messages []Message, synth [][]Event) {
+	apply := func(turn []Message, from [][]Event) {
+		for _, m := range turn {
+			if len(m.Events) > 0 {
+				return // the turn recorded its own; no stand-in is wanted
+			}
+		}
+		for i := range turn {
+			if len(from[i]) > 0 {
+				turn[i].Events = from[i]
+			}
+		}
+	}
+	// Turns are the spans between user messages -- the same walk
+	// keepAnswerlessTurns makes, for the same reason.
+	start := 0
+	for i, m := range messages {
+		if m.Role != "user" {
+			continue
+		}
+		if i > start {
+			apply(messages[start:i], synth[start:i])
+		}
+		start = i
+	}
+	if start < len(messages) {
+		apply(messages[start:], synth[start:])
+	}
 }
 
 // keepAnswerlessTurns un-marks narration in any turn that has no plain answer
@@ -666,10 +716,10 @@ func keepAnswerlessTurns(messages []Message) {
 // callEvents turns a narration frame's own tool_calls into events.
 //
 // No status: the frame is written before the calls run, so how they ended is not
-// known here and is reported by the iteration's own events entry. An event with
-// no status is a call whose outcome nobody recorded — which is the truth about a
-// turn that died inside one, and about every transcript written before the
-// harness kept events at all.
+// known here. It is a STAND-IN for a turn that recorded nothing of its own --
+// every transcript written before the harness kept events -- and legacyCallEvents
+// is what decides whether it is wanted. Used unconditionally it would list every
+// call twice.
 func callEvents(e jsonlEntry) []Event {
 	out := make([]Event, 0, len(e.ToolCalls))
 	for _, c := range e.ToolCalls {
