@@ -68,12 +68,16 @@ type fakeOrch struct {
 	bulkCatalog      docker.TemplateCatalog
 	bulkCatalogErr   error
 	bulkCatalogNames []string
-	bulkTemplate     docker.TemplateResult
-	bulkTemplateErr  error
-	bulkTemplateArgs []bulkTemplateCall
-	bulkOverlay      docker.OverlayResult
-	bulkOverlayErr   error
-	bulkOverlayArgs  []bulkOverlayCall
+	// Recorded beside the names rather than folded into them: the handler has to
+	// forward the agent's HARNESS as well as its template, and a combined string
+	// would make a wrong harness look like a wrong template.
+	bulkCatalogHarnesses []string
+	bulkTemplate         docker.TemplateResult
+	bulkTemplateErr      error
+	bulkTemplateArgs     []bulkTemplateCall
+	bulkOverlay          docker.OverlayResult
+	bulkOverlayErr       error
+	bulkOverlayArgs      []bulkOverlayCall
 
 	// admin-shared-content recording + canned results.
 	sharedFiles   []docker.FileMeta
@@ -377,8 +381,9 @@ func (f *fakeOrch) ApplyScopeConfigKey(scope docker.Scope, ch docker.ScopeConfig
 	return f.bulkResult, nil
 }
 
-func (f *fakeOrch) TemplateConfigKeys(template string) (docker.TemplateCatalog, error) {
+func (f *fakeOrch) TemplateConfigKeys(template, harness string) (docker.TemplateCatalog, error) {
 	f.bulkCatalogNames = append(f.bulkCatalogNames, template)
+	f.bulkCatalogHarnesses = append(f.bulkCatalogHarnesses, harness)
 	if f.bulkCatalogErr != nil {
 		return docker.TemplateCatalog{}, f.bulkCatalogErr
 	}

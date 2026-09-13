@@ -25,26 +25,78 @@ import (
 //
 // Writing the template reaches every subscription of the agent, which is why the
 // write is opt-in, revision-gated, and recorded.
+//
+// ONLY A PICOCLAW AGENT HAS ONE.
+//
+// The reasoning above is picoclaw's throughout, and the template file is
+// picoclaw's document -- agents.defaults.allow_read_outside_workspace,
+// restrict_to_workspace, steering_mode, channels, clawhub, bridge_url. A
+// ganglion agent reads none of it. Offering that catalog for one was offering an
+// admin a list of keys the runtime does not have, with nothing on the screen
+// saying so, and the resulting write landed in a file nothing reads.
+//
+// So the catalog resolves by harness. For a ganglion agent it comes from
+// ganglionConfigDoc (ganglion_config.go), which stands in the same relation to a
+// ganglion instance as this file does to a picoclaw one: it is the only thing
+// that describes every key such an instance can have. See ganglionCatalogKeys.
 
 // TemplateKey is one dotted leaf of the template document.
 type TemplateKey struct {
 	Key string `json:"key"`
 	// Value is the leaf as raw JSON, so a null stays a null and an array or an
 	// empty object arrives at the picker in the shape it has on disk.
-	Value json.RawMessage `json:"value"`
+	//
+	// ABSENT, not null, when there is no disk to read it from. A ganglion agent's
+	// document is generated per member at ensure time, so the exemplar this
+	// catalog is flattened from rendered a shape and not a default anybody holds
+	// -- and one of its leaves is that member's own memory-graph bearer token. A
+	// null here would say "this key's default is null", which is a different and
+	// false claim; omitempty keeps the two apart, since a real JSON null leaf
+	// encodes to four bytes and an unset one to none.
+	Value json.RawMessage `json:"value,omitempty"`
 	// Managed keys are INCLUDED and flagged, not filtered: the picker renders them
 	// disabled and explains why. Dropping them would leave the admin hunting for a
 	// key that is present in the file but simply not editable.
+	//
+	// It is ManagedConfigPaths for BOTH harnesses, which is a narrower claim than
+	// "the proxy wrote this". Everything in a ganglion agent's document is
+	// proxy-written, so the wider claim would flag every key and leave a picker
+	// with nothing to pick. What this flag has to keep predicting is the refusal:
+	// ValidateConfigKey/IsManagedConfigPath is what the apply verbs enforce, so a
+	// flag computed any other way would disagree with the 400 the admin gets.
+	// That the whole document is generated is a fact about the DOCUMENT, and it
+	// belongs beside the catalog rather than on every row of it.
 	Managed bool `json:"managed"`
+	// Harness names the runtime whose document this key came from.
+	//
+	// On the key and not only on the catalog. The two harnesses' documents share
+	// names -- model_list, agents.defaults.model_name, tools.web -- while meaning
+	// different files, so a client that labels a suggestion has to be able to
+	// label it per row. A catalog-level field would be right exactly until the
+	// first list that mixes them.
+	Harness string `json:"harness"`
 }
 
 type TemplateCatalog struct {
 	// Template is the template NAME, which config.yaml declares per agent and is
 	// not the agent key: two agents may share one template, and a write here
 	// reaches every agent that does.
-	Template         string        `json:"template"`
-	Keys             []TemplateKey `json:"keys"`
-	TemplateRevision string        `json:"templateRevision"`
+	//
+	// EMPTY for a harness with no template file, along with TemplateRevision.
+	Template string        `json:"template"`
+	Keys     []TemplateKey `json:"keys"`
+	// TemplateRevision gates the opt-in "also write the template" apply, and has
+	// no meaning without a file to write.
+	TemplateRevision string `json:"templateRevision"`
+	// TemplateWritable says whether that apply has a target at all.
+	//
+	// A field of its own rather than an empty TemplateRevision the client has to
+	// interpret. The two failures an empty string invites are both silent: a
+	// client that does not know the convention offers a write with nowhere to
+	// land, and one that reads the emptiness cannot tell "this agent has no
+	// template" from "the revision was dropped on the way here". Stated, it is
+	// neither.
+	TemplateWritable bool `json:"templateWritable"`
 }
 
 // TemplateResult reports the template write separately from an error because the
@@ -59,19 +111,42 @@ type TemplateResult struct {
 	Migration string `json:"migration,omitempty"`
 }
 
-// TemplateConfigKeys returns every dotted leaf of one agent template.
+// TemplateConfigKeys returns every dotted leaf an instance of one agent can have.
+//
+// It takes the harness alongside the template name because the two harnesses
+// keep that list in different places, and the template name is meaningless for
+// one of them. An empty harness is picoclaw, matching config.Load's own default
+// -- a config.yaml written before the field existed describes a picoclaw agent.
 //
 // Unlike ReadInstanceConfig, an unparseable document is a hard error here: an
 // instance's broken config.json is the thing being repaired, but a broken
 // template yields no catalog to offer and nothing to pick from.
-func (m *Manager) TemplateConfigKeys(template string) (TemplateCatalog, error) {
+func (m *Manager) TemplateConfigKeys(template, harness string) (TemplateCatalog, error) {
+	if harness == config.HarnessGanglion {
+		keys, err := ganglionCatalogKeys()
+		if err != nil {
+			return TemplateCatalog{}, err
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
+		return TemplateCatalog{
+			// No Template and no TemplateRevision. The agent does still declare a
+			// template in config.yaml, but nothing of it ever reaches a ganglion
+			// workspace: ensureTarget skips ensurePicoclawTemplate for this harness
+			// precisely so a config.json and a .security.yml nothing reads are not
+			// seeded beside it. Naming the template here would point the "also write
+			// the template" apply at a file this agent is never provisioned from.
+			Keys:             keys,
+			TemplateWritable: false,
+		}, nil
+	}
+
 	raw, doc, err := m.readTemplateConfig(template)
 	if err != nil {
 		return TemplateCatalog{}, err
 	}
 
 	keys := make([]TemplateKey, 0, len(doc))
-	keys = appendTemplateLeaves(keys, doc, "")
+	keys = appendTemplateLeaves(keys, doc, "", config.HarnessPicoclaw)
 	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
 
 	return TemplateCatalog{
@@ -80,6 +155,7 @@ func (m *Manager) TemplateConfigKeys(template string) (TemplateCatalog, error) {
 		// Over the bytes AS READ, so it is the same token ApplyTemplateConfigKey
 		// compares the file against.
 		TemplateRevision: revisionOf(raw),
+		TemplateWritable: true,
 	}, nil
 }
 
@@ -216,7 +292,12 @@ func (m *Manager) readTemplateConfig(template string) ([]byte, map[string]any, e
 // path, because ValidateConfigKey splits on dots and would let a name that
 // CONTAINS one through — "my.key" passes as two legal segments while describing
 // a nested path the document does not have.
-func appendTemplateLeaves(out []TemplateKey, doc map[string]any, prefix string) []TemplateKey {
+//
+// harness is stamped on every row rather than derived from the document, because
+// nothing in the bytes says which runtime they describe -- the ganglion's
+// generated document is deliberately picoclaw-SHAPED (ganglion_config.go, "why
+// the shape is picoclaw's"), so the two are indistinguishable by inspection.
+func appendTemplateLeaves(out []TemplateKey, doc map[string]any, prefix, harness string) []TemplateKey {
 	for name, v := range doc {
 		if !configKeySegmentRe.MatchString(name) {
 			continue
@@ -226,12 +307,17 @@ func appendTemplateLeaves(out []TemplateKey, doc map[string]any, prefix string) 
 			key = prefix + "." + name
 		}
 		if child, ok := v.(map[string]any); ok && len(child) > 0 {
-			out = appendTemplateLeaves(out, child, key)
+			out = appendTemplateLeaves(out, child, key, harness)
 			continue
 		}
 		// v came out of json.Unmarshal, so it always encodes.
 		enc, _ := json.Marshal(v)
-		out = append(out, TemplateKey{Key: key, Value: enc, Managed: IsManagedConfigPath(key)})
+		out = append(out, TemplateKey{
+			Key:     key,
+			Value:   enc,
+			Managed: IsManagedConfigPath(key),
+			Harness: harness,
+		})
 	}
 	return out
 }

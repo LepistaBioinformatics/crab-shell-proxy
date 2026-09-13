@@ -275,3 +275,64 @@ func TestTheRenderIsUnchangedWithoutAnOverlay(t *testing.T) {
 		t.Fatalf("the render differs with no overlay:\n%s\n---\n%s", want, got)
 	}
 }
+
+// The render must be byte-stable WITH an overlay, not only without one.
+//
+// This is the failure a single render cannot show. writeGanglionConfig decides
+// whether anything changed by comparing the rendered bytes against the file, and a
+// changed file recreates the container -- so a merge that produced the same
+// document with different bytes on each pass would recreate the container on every
+// ensure, which for a scale-to-zero agent is every turn. The agent would appear to
+// restart constantly with nothing in the logs naming a cause.
+//
+// It holds today because applyOverlayToDoc re-encodes through a map and
+// encoding/json sorts map keys, which is determinism by a property of the encoder
+// rather than by intent. This pins it: an ordered encoder, a merge that appends,
+// or a switch to json.Encoder with SetEscapeHTML would each break it silently.
+//
+// agents.defaults.max_tool_iterations is the worked example on purpose -- it is the
+// first key this whole path exists for (crab-ganglion-harness reads it as the
+// per-turn tool budget) and it sits UNDER a branch the renderer also writes, which
+// is the case where a merge is most likely to reorder something.
+func TestTheRenderIsByteStableWithAnOverlay(t *testing.T) {
+	m, _, userDir := overlayManager(t, config.HarnessGanglion)
+	path := ganglionOverlayPath(userDir)
+	// Two entries, and one of them nests a branch the renderer does not produce, so
+	// the merge has to both descend into agents.defaults and create a subtree.
+	for key, value := range map[string]json.RawMessage{
+		"agents.defaults.max_tool_iterations": json.RawMessage("40"),
+		"agents.defaults.subturn.max_depth":   json.RawMessage("3"),
+	} {
+		if err := upsertConfigOverlay(path, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := m.renderGanglionConfig(userDir, resolutionFor("deepseek"), nil, "", "alpha")
+	if err != nil {
+		t.Fatalf("renderGanglionConfig: %v", err)
+	}
+	// The overlay really did land, so a stable render of an UNMERGED document
+	// cannot pass this test by doing nothing.
+	var parsed map[string]any
+	if err := json.Unmarshal(first, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	defaults := parsed["agents"].(map[string]any)["defaults"].(map[string]any)
+	if defaults["max_tool_iterations"] != float64(40) {
+		t.Fatalf("the overlay did not reach the rendered document: %s", first)
+	}
+
+	// Ten passes rather than two: an instability that depends on map iteration
+	// order shows up probabilistically, and a single repeat would pass most runs.
+	for i := 0; i < 10; i++ {
+		again, err := m.renderGanglionConfig(userDir, resolutionFor("deepseek"), nil, "", "alpha")
+		if err != nil {
+			t.Fatalf("renderGanglionConfig on pass %d: %v", i+2, err)
+		}
+		if string(again) != string(first) {
+			t.Fatalf("the render is not byte-stable on pass %d: every ensure would recreate the container\n%s\n---\n%s",
+				i+2, first, again)
+		}
+	}
+}

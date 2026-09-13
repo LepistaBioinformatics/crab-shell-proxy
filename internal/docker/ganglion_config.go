@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
@@ -162,6 +163,64 @@ func ganglionConfigDoc(res registry.Resolution, web map[string]string, mcpBaseUR
 		doc["tools"] = tools
 	}
 	return json.MarshalIndent(doc, "", "  ")
+}
+
+// ganglionCatalogKeys is what the agent template is to picoclaw: the list of
+// every key an instance of a ganglion agent can carry.
+//
+// THE GANGLION HAS NO TEMPLATE FILE. Its configuration is not seeded from
+// <dataRoot>/templates/<agent>/config.json and never was -- that document is
+// picoclaw's, and the bulk key picker was reading it for ganglion agents too,
+// offering allow_read_outside_workspace, restrict_to_workspace, steering_mode,
+// channels, clawhub and bridge_url for a runtime that reads none of them. An
+// admin who picked one wrote a field nothing ever reads.
+//
+// So the catalog comes from ganglionConfigDoc, the function that GENERATES the
+// real file, rather than from a list maintained beside it. A hand-written list
+// is a second thing to keep in step, and the first key added to the generator
+// and forgotten here would put the picker straight back to describing a document
+// the runtime does not have.
+//
+// EVERY OPTIONAL BRANCH IS LIT DELIBERATELY. ganglionConfigDoc omits
+// model_fallbacks when there is no chain, tools.web when no provider is keyed
+// and tools.mcp when there is no memory token -- so an exemplar built from a
+// bare resolution would describe an instance that HAS none of those rather than
+// one that CAN have them, and the picker would silently lose the only keys an
+// admin may legitimately set. The exemplar therefore carries a fallback, every
+// provider in webProviders, and an MCP endpoint.
+//
+// The exemplar's values never leave this function; see TemplateKey.Value.
+func ganglionCatalogKeys() ([]TemplateKey, error) {
+	web := make(map[string]string, len(webProviders))
+	for provider := range webProviders {
+		// Any non-empty string. ganglionWebBlock keys off presence, not content,
+		// and these stand in for credentials that are not read here.
+		web[provider] = "x"
+	}
+	exemplar := registry.Resolution{
+		Primary: registry.Model{ModelName: "primary"},
+		// One entry, because model_fallbacks is a flat list of names and the
+		// flattener stops at it: a second would describe nothing a first does not.
+		Chain: []registry.Model{{ModelName: "fallback"}},
+	}
+	raw, err := ganglionConfigDoc(exemplar, web, "https://ganglion.invalid", "x")
+	if err != nil {
+		return nil, fmt.Errorf("ganglion config catalog: %w", err)
+	}
+	doc, err := parseConfigObject(raw)
+	if err != nil {
+		// Unreachable short of a bug in ganglionConfigDoc, and reported rather
+		// than ignored for exactly that reason: the one thing that could put us
+		// here is the generator having stopped producing a JSON object, which is
+		// a far larger fault than a missing key picker.
+		return nil, fmt.Errorf("ganglion config catalog: %w", err)
+	}
+
+	keys := appendTemplateLeaves(nil, doc, "", config.HarnessGanglion)
+	for i := range keys {
+		keys[i].Value = nil
+	}
+	return keys, nil
 }
 
 // ganglionMCPBlock is the memory graph, as the ganglion reads it.

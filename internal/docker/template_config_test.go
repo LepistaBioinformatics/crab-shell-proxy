@@ -121,7 +121,7 @@ var wantTemplateConfigLeaves = []string{
 func TestTemplateConfigKeysFlattensLeafShapes(t *testing.T) {
 	m, _ := templateConfigManager(t, sampleTemplateConfig)
 
-	cat, err := m.TemplateConfigKeys("picoclaw")
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
 	if err != nil {
 		t.Fatalf("TemplateConfigKeys: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestTemplateConfigKeysFlattensLeafShapes(t *testing.T) {
 func TestTemplateConfigKeysMarksManagedWithoutHidingThem(t *testing.T) {
 	m, _ := templateConfigManager(t, sampleTemplateConfig)
 
-	cat, err := m.TemplateConfigKeys("picoclaw")
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
 	if err != nil {
 		t.Fatalf("TemplateConfigKeys: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestTemplateConfigKeysMarksManagedWithoutHidingThem(t *testing.T) {
 func TestTemplateConfigKeysAreSortedAndRevisionTracksTheFile(t *testing.T) {
 	m, root := templateConfigManager(t, sampleTemplateConfig)
 
-	cat, err := m.TemplateConfigKeys("picoclaw")
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
 	if err != nil {
 		t.Fatalf("TemplateConfigKeys: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestTemplateConfigKeysAreSortedAndRevisionTracksTheFile(t *testing.T) {
 		t.Fatalf("ApplyTemplateConfigKey: %v (result %+v)", err, res)
 	}
 
-	after, err := m.TemplateConfigKeys("picoclaw")
+	after, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
 	if err != nil {
 		t.Fatalf("TemplateConfigKeys after write: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestTemplateConfigKeysOmitsKeysNoDottedPathCanAddress(t *testing.T) {
   "version": 3
 }`)
 
-	cat, err := m.TemplateConfigKeys("picoclaw")
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
 	if err != nil {
 		t.Fatalf("TemplateConfigKeys: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestTemplateConfigKeysMissingTemplateIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := m.TemplateConfigKeys("picoclaw"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("err = %v, want it to wrap os.ErrNotExist", err)
 	}
 }
@@ -275,13 +275,13 @@ func TestTemplateConfigKeysMissingTemplateIsAnError(t *testing.T) {
 func TestTemplateConfigKeysUnusableTemplateIsAnError(t *testing.T) {
 	t.Run("syntax error", func(t *testing.T) {
 		m, _ := templateConfigManager(t, `{"version": 3,`)
-		if _, err := m.TemplateConfigKeys("picoclaw"); err == nil {
+		if _, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw); err == nil {
 			t.Fatal("err = nil, want a parse failure")
 		}
 	})
 	t.Run("json array", func(t *testing.T) {
 		m, _ := templateConfigManager(t, `[{"version": 3}]`)
-		if _, err := m.TemplateConfigKeys("picoclaw"); !errors.Is(err, ErrConfigNotObject) {
+		if _, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw); !errors.Is(err, ErrConfigNotObject) {
 			t.Fatalf("err = %v, want ErrConfigNotObject", err)
 		}
 	})
@@ -388,7 +388,7 @@ func TestApplyTemplateConfigKeySetsOnlyTheTargetedLeaf(t *testing.T) {
 	}
 	// The loop above cannot see an ADDED key, and setPath creates intermediate
 	// objects on its way to a leaf — so the key set has to be pinned too.
-	cat, err := m.TemplateConfigKeys("picoclaw")
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
 	if err != nil {
 		t.Fatalf("TemplateConfigKeys after write: %v", err)
 	}
@@ -657,4 +657,217 @@ func ownedByCurrentUser(path string) error {
 			"to the container user", st.Uid, os.Getuid())
 	}
 	return nil
+}
+
+// --- the ganglion half: a catalog with no template file behind it ---
+
+// The bug this closes: a ganglion agent was offered picoclaw's template keys.
+// The template file is still on disk here — templateConfigManager wrote one —
+// and the catalog must not contain a single leaf of it.
+func TestTemplateConfigKeysForGanglionIgnoresTheTemplateFile(t *testing.T) {
+	m, _ := templateConfigManager(t, sampleTemplateConfig)
+
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessGanglion)
+	if err != nil {
+		t.Fatalf("TemplateConfigKeys: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, k := range cat.Keys {
+		got[k.Key] = true
+	}
+	// Four leaves the sample template has and the ganglion's document does not.
+	// Every one of them was on offer before this change, and writing any of them
+	// for a ganglion agent sets a field nothing reads.
+	for _, key := range []string{"allowed_hosts", "isolation", "persona", "version"} {
+		if got[key] {
+			t.Errorf("catalog offers %q, which is picoclaw's template and not the ganglion's document", key)
+		}
+	}
+	// And the keys the generated document really does have.
+	for _, key := range []string{"model_list", "agents.defaults.model_name", "tools.web.brave.enabled"} {
+		if !got[key] {
+			t.Errorf("catalog is missing %q, which ganglionConfigDoc writes", key)
+		}
+	}
+}
+
+// TemplateRevision gates the "also write the template" apply, and a ganglion
+// agent has no template for that apply to land in. TemplateWritable says so in
+// as many words, because an empty revision is something a client has to GUESS
+// the meaning of.
+func TestTemplateConfigKeysForGanglionOffersNoTemplateToWrite(t *testing.T) {
+	m, _ := templateConfigManager(t, sampleTemplateConfig)
+
+	cat, err := m.TemplateConfigKeys("picoclaw", config.HarnessGanglion)
+	if err != nil {
+		t.Fatalf("TemplateConfigKeys: %v", err)
+	}
+	if cat.TemplateWritable {
+		t.Error("TemplateWritable = true — a ganglion agent has no template file to write")
+	}
+	if cat.TemplateRevision != "" {
+		t.Errorf("TemplateRevision = %q, want empty — it would gate a write with no target", cat.TemplateRevision)
+	}
+	if cat.Template != "" {
+		t.Errorf("Template = %q, want empty — naming it would point the write at a document these keys did not come from",
+			cat.Template)
+	}
+
+	// The picoclaw side keeps saying yes, which is the half a back-compat mistake
+	// in a client would break first.
+	pico, err := m.TemplateConfigKeys("picoclaw", config.HarnessPicoclaw)
+	if err != nil {
+		t.Fatalf("TemplateConfigKeys: %v", err)
+	}
+	if !pico.TemplateWritable {
+		t.Error("TemplateWritable = false for a picoclaw agent — the template write is its whole point")
+	}
+}
+
+// An empty harness is picoclaw, matching config.Load: a config.yaml written
+// before the field existed describes a picoclaw agent, and reading it as an
+// unknown harness would strand every agent in it.
+func TestTemplateConfigKeysTreatsAnAbsentHarnessAsPicoclaw(t *testing.T) {
+	m, _ := templateConfigManager(t, sampleTemplateConfig)
+
+	cat, err := m.TemplateConfigKeys("picoclaw", "")
+	if err != nil {
+		t.Fatalf("TemplateConfigKeys: %v", err)
+	}
+	if got := templateConfigKeyNames(cat); !reflect.DeepEqual(got, wantTemplateConfigLeaves) {
+		t.Fatalf("keys =\n%v\nwant the template's own leaves\n%v", got, wantTemplateConfigLeaves)
+	}
+}
+
+// The label the picker renders. It is per KEY rather than per catalog because
+// the two documents share names — model_list and agents.defaults.model_name
+// exist in both — so a row cannot be attributed from its key alone.
+func TestTemplateConfigKeysLabelEveryKeyWithItsHarness(t *testing.T) {
+	m, _ := templateConfigManager(t, sampleTemplateConfig)
+
+	for _, tc := range []struct{ harness, want string }{
+		{config.HarnessPicoclaw, config.HarnessPicoclaw},
+		{config.HarnessGanglion, config.HarnessGanglion},
+		{"", config.HarnessPicoclaw},
+	} {
+		cat, err := m.TemplateConfigKeys("picoclaw", tc.harness)
+		if err != nil {
+			t.Fatalf("TemplateConfigKeys(%q): %v", tc.harness, err)
+		}
+		if len(cat.Keys) == 0 {
+			t.Fatalf("TemplateConfigKeys(%q) returned no keys", tc.harness)
+		}
+		for _, k := range cat.Keys {
+			if k.Harness != tc.want {
+				t.Errorf("harness %q: key %q labelled %q, want %q", tc.harness, k.Key, k.Harness, tc.want)
+			}
+		}
+	}
+}
+
+// ganglionConfigDoc DROPS model_fallbacks, tools.web and tools.mcp when their
+// inputs are empty, so the exemplar has to light all three. Without this the
+// catalog would quietly describe an instance that has none of them — and
+// tools.web is the only family an admin can edit at all.
+func TestGanglionCatalogLightsEveryOptionalBranch(t *testing.T) {
+	keys, err := ganglionCatalogKeys()
+	if err != nil {
+		t.Fatalf("ganglionCatalogKeys: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, k := range keys {
+		got[k.Key] = true
+	}
+	for _, key := range []string{
+		"agents.defaults.model_fallbacks",
+		"tools.mcp.enabled",
+		"tools.mcp.servers." + MCPServerName + ".url",
+	} {
+		if !got[key] {
+			t.Errorf("%q missing — the exemplar left an optional branch of ganglionConfigDoc unlit", key)
+		}
+	}
+	// Every native search slot, not merely the one an exemplar happened to name:
+	// which providers a member has keyed is not knowable here, so the catalog
+	// offers the whole enum.
+	for provider := range webProviders {
+		if !got["tools.web."+provider+".enabled"] {
+			t.Errorf("tools.web.%s.enabled missing — the catalog must offer every native web slot", provider)
+		}
+	}
+}
+
+// Managed is ManagedConfigPaths for BOTH harnesses, which is deliberately
+// narrower than "the proxy wrote this". The ganglion's whole document is
+// proxy-written, so the wider reading would flag every row and leave a picker
+// with nothing pickable; what the flag has to keep predicting is the refusal the
+// apply verbs actually return.
+func TestGanglionCatalogManagedMatchesWhatTheApplyRefuses(t *testing.T) {
+	keys, err := ganglionCatalogKeys()
+	if err != nil {
+		t.Fatalf("ganglionCatalogKeys: %v", err)
+	}
+
+	pickable := 0
+	for _, k := range keys {
+		if k.Managed != IsManagedConfigPath(k.Key) {
+			t.Errorf("%q managed = %t, but IsManagedConfigPath says %t — the flag would disagree with the 400",
+				k.Key, k.Managed, IsManagedConfigPath(k.Key))
+		}
+		if !k.Managed {
+			pickable++
+		}
+	}
+	if pickable == 0 {
+		t.Fatal("every ganglion key is managed — the picker would have nothing to pick")
+	}
+	if pickable == len(keys) {
+		t.Fatal("no ganglion key is managed — the picker would invite an admin to fight the generator")
+	}
+
+	// The split as it stands: the registry-fed and memory-graph keys are the
+	// proxy's, the native search slots are the admin's.
+	managed := map[string]bool{}
+	for _, k := range keys {
+		managed[k.Key] = k.Managed
+	}
+	for _, key := range []string{"model_list", "agents.defaults.model_name", "tools.mcp.enabled"} {
+		if !managed[key] {
+			t.Errorf("%q managed = false, want true", key)
+		}
+	}
+	if managed["tools.web.brave.enabled"] {
+		t.Error("tools.web.brave.enabled managed = true, want false — it is the family an admin may set")
+	}
+}
+
+// A ganglion key carries no Value. The exemplar rendered a SHAPE, not a default
+// anybody holds — nothing is on disk until a container is ensured — and one of
+// its leaves is the member's own memory-graph bearer token, which must not be
+// published as a stand-in.
+func TestGanglionCatalogReportsNoValues(t *testing.T) {
+	keys, err := ganglionCatalogKeys()
+	if err != nil {
+		t.Fatalf("ganglionCatalogKeys: %v", err)
+	}
+	for _, k := range keys {
+		if k.Value != nil {
+			t.Errorf("%q carries a value (%s) — the exemplar's values are not defaults", k.Key, k.Value)
+		}
+	}
+
+	// Absent on the wire, and distinguishable from a picoclaw leaf whose value
+	// really is null.
+	body, err := json.Marshal(TemplateCatalog{Keys: keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"value"`) {
+		t.Errorf("encoded catalog carries a value field: %s", body)
+	}
+	if strings.Contains(string(body), "ganglion.invalid") {
+		t.Errorf("encoded catalog leaks the exemplar's endpoint: %s", body)
+	}
 }

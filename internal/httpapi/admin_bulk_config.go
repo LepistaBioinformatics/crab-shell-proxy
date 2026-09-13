@@ -115,11 +115,16 @@ func (s *Server) writeBulkConfigError(w http.ResponseWriter, err error) {
 	}
 }
 
-// handleAdminScopeConfigKeys returns the agent template's dotted leaf paths, which
-// is what the key picker offers. It is a suggestion list, not a whitelist: the
-// inspect and apply verbs accept any syntactically valid dotted path, because a
-// newer picoclaw's field or one added by an earlier repair is legitimately absent
-// from the template.
+// handleAdminScopeConfigKeys returns the dotted leaf paths of the document this
+// agent's harness reads, which is what the key picker offers. It is a suggestion
+// list, not a whitelist: the inspect and apply verbs accept any syntactically
+// valid dotted path, because a newer picoclaw's field or one added by an earlier
+// repair is legitimately absent from the template.
+//
+// Harness-resolved (TemplateConfigKeys) rather than always the template file. Not
+// harness-GATED, though: the route is absent from picoclawOnly on purpose, because
+// both harnesses have a configuration document and the answer for a ganglion agent
+// is a real catalog rather than a 501.
 func (s *Server) handleAdminScopeConfigKeys(w http.ResponseWriter, r *http.Request) {
 	_, ident, ok := s.resolveSecretCaller(w, r)
 	if !ok {
@@ -130,7 +135,7 @@ func (s *Server) handleAdminScopeConfigKeys(w http.ResponseWriter, r *http.Reque
 		s.logBulkConfigRefusal(ident, r, "rejected")
 		return
 	}
-	cat, err := s.Mgr.TemplateConfigKeys(agent.Template)
+	cat, err := s.Mgr.TemplateConfigKeys(agent.Template, agent.Harness)
 	if err != nil {
 		s.writeBulkConfigError(w, err)
 		return
