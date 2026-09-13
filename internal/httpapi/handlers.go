@@ -183,10 +183,13 @@ type Orchestrator interface {
 	// reports a per-instance outcome. The batch never fails wholesale: one member
 	// with a corrupt config.json must not block a policy change for the rest.
 	ApplyScopeConfigKey(scope docker.Scope, ch docker.ScopeConfigChange) (docker.ScopeConfigResult, error)
-	// TemplateConfigKeys flattens an agent TEMPLATE's config.json into dotted leaf
-	// paths, which is what the key picker offers. Takes a template NAME, not an
-	// agent key — config.yaml declares them separately and two agents may share one.
-	TemplateConfigKeys(template string) (docker.TemplateCatalog, error)
+	// TemplateConfigKeys flattens the document an instance of one agent can have
+	// into dotted leaf paths, which is what the key picker offers. Takes a template
+	// NAME, not an agent key — config.yaml declares them separately and two agents
+	// may share one — and the HARNESS, because only picoclaw's list comes from the
+	// template file at all: a ganglion agent's comes from the document the proxy
+	// generates for it, and its catalog reports no template to write to.
+	TemplateConfigKeys(template, harness string) (docker.TemplateCatalog, error)
 	// ApplyTemplateConfigKey optionally writes the same key into the template, so
 	// members provisioned LATER inherit it: a workspace's config.json is seeded from
 	// the template once and never re-seeded.

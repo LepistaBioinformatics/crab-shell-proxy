@@ -27,6 +27,12 @@ func bulkConfigServer(orch Orchestrator, logs *[]string) *Server {
 				Template: "alpha-tpl", Mode: config.ModeScaleToZero},
 			"beta": {Key: "beta", ServiceName: "picoclaw-beta", ResolvedToken: "bearer",
 				Template: "shared-tpl", Mode: config.ModeScaleToZero},
+			// A ganglion agent that still DECLARES a template, because that is the
+			// real config.yaml: the template seeds a picoclaw-shaped config.json
+			// beside its workspace whatever runtime it goes on to run. A fixture
+			// without one would let a handler that forgets the harness look right.
+			"gamma": {Key: "gamma", ServiceName: "ganglion-gamma", ResolvedToken: "bearer",
+				Template: "gamma-tpl", Harness: config.HarnessGanglion, Mode: config.ModeScaleToZero},
 		},
 	}
 	s := &Server{Cfg: cfg, Resolver: identity.NewSDKResolver(), Mgr: orch, Pico: &fakeTurner{}}
@@ -69,6 +75,27 @@ func TestScopeConfigKeysPassesTheTemplateNotTheAgentKey(t *testing.T) {
 	if len(orch.bulkCatalogNames) != 1 || orch.bulkCatalogNames[0] != "alpha-tpl" {
 		t.Errorf("catalog asked for %v, want [alpha-tpl] — the agent's TEMPLATE, not its key",
 			orch.bulkCatalogNames)
+	}
+}
+
+// The agent's HARNESS travels with its template, because only picoclaw's catalog
+// comes from the template file: for a ganglion agent the keys come from the
+// document the proxy generates, and passing the template alone is exactly what
+// put picoclaw's keys in front of a ganglion admin.
+func TestScopeConfigKeysPassesTheAgentHarness(t *testing.T) {
+	orch := newFakeOrch()
+	s := bulkConfigServer(orch, nil)
+
+	for agent, want := range map[string]string{"gamma": config.HarnessGanglion, "alpha": ""} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, adminReq(t, http.MethodGet, bulkPath("/keys", agent, ""), adminHeaders(t)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200 (%s)", agent, w.Code, w.Body.String())
+		}
+		got := orch.bulkCatalogHarnesses[len(orch.bulkCatalogHarnesses)-1]
+		if got != want {
+			t.Errorf("%s: harness passed = %q, want %q", agent, got, want)
+		}
 	}
 }
 
