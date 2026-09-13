@@ -152,9 +152,10 @@ func TestCronIsNotHarnessGated(t *testing.T) {
 // a slow terminal answer and a fast native one look alike for the first
 // second. The header states it.
 //
-// The webapp's reveal driver depends on this: it exists only because picoclaw
-// does not stream, and run over a harness that does, two mechanisms paint the
-// same text and the reply visibly rewrites itself.
+// The webapp's reveal driver depends on this: it exists only because a harness
+// that answers in one frame has nothing to animate the reply with, and run over
+// a harness that does stream, two mechanisms paint the same text and the reply
+// visibly rewrites itself.
 func TestStreamingModeFor(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -163,7 +164,12 @@ func TestStreamingModeFor(t *testing.T) {
 	}{
 		{"picoclaw answers in one frame", config.Agent{Harness: config.HarnessPicoclaw}, streamingTerminal},
 		{"an empty harness is picoclaw", config.Agent{}, streamingTerminal},
-		{"ganglion streams deltas", config.Agent{Harness: config.HarnessGanglion}, streamingNative},
+		// The ganglion USED to stream, and the answer changed with its visible
+		// steps: it holds a frame's content until the frame ends, because until
+		// then there is no telling whether that text is narration or the answer.
+		// So it answers in one piece, like picoclaw, and a header still saying
+		// native made the webapp paint a whole reply in a single patch.
+		{"the ganglion answers in one frame too", config.Agent{Harness: config.HarnessGanglion}, streamingTerminal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := streamingModeFor(tc.agent); got != tc.want {
