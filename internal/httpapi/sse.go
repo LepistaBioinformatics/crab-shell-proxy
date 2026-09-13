@@ -40,7 +40,7 @@ const streamingModeHeader = "X-Crab-Streaming"
 
 const (
 	// streamingNative: content arrives as incremental deltas, as the model
-	// produces them.
+	// produces them. NOTHING ANSWERS THIS TODAY -- see streamingModeFor.
 	streamingNative = "native"
 	// streamingTerminal: the whole answer arrives in one frame at the end.
 	// picoclaw, measured: typing.start, 51 seconds of silence, then the reply.
@@ -48,10 +48,24 @@ const (
 )
 
 // streamingModeFor reports how this agent's harness delivers content.
+//
+// BOTH HARNESSES ARE TERMINAL, and the ganglion has not always been.
+//
+// It was native when this was written: it forwarded the provider's deltas as they
+// arrived. Its visible steps changed that. An iteration's text is NARRATION when the
+// frame ends in tool calls and the ANSWER when it does not, and nothing says which
+// until the frame ends -- so the harness holds a frame's content and emits the answer
+// in one piece (crab-ganglion-harness internal/runtime/loop.go, `complete`, and the
+// single `content` delta its httpsse sink writes).
+//
+// This header states a FACT about the transport, so it has to follow. Left saying
+// native, it told the webapp to paint the one delta straight onto the screen, and a
+// whole reply appeared at once with no typing -- the reveal driver, which exists
+// precisely for a harness that answers in one frame, was branched around.
+//
+// streamingNative is kept rather than deleted: it is the answer for any harness that
+// does stream, and the question this header asks is not going away.
 func streamingModeFor(agent config.Agent) string {
-	if agent.Harness == config.HarnessGanglion {
-		return streamingNative
-	}
 	return streamingTerminal
 }
 
