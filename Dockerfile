@@ -11,7 +11,7 @@
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
 
-# No committed go.sum (no host Go toolchain in this project); resolve + record
+# go.sum IS committed, but `go mod tidy` below still re-resolves + records
 # module hashes at build time. -mod=mod lets go.sum be written as needed.
 ENV GOFLAGS=-mod=mod
 ENV CGO_ENABLED=0
