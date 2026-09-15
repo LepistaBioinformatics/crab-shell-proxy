@@ -25,12 +25,14 @@ startupDeadline: 30s
 turnIdleTimeout: 90s
 agents:
   alpha:
+    harness: picoclaw
     serviceName: "picoclaw-alpha"
     token: { env: "TOK_ALPHA" }
     template: "alpha"
     mode: "scale-to-zero"
     idleTimeout: 15m
   gamma:
+    harness: picoclaw
     serviceName: "picoclaw-gamma"
     token: "inline-token"
     template: "gamma"
@@ -139,6 +141,7 @@ hostDataRoot: "/d"
 network: "n"
 agents:
   alpha:
+    harness: picoclaw
     serviceName: "picoclaw-alpha"
     token: { env: "TOK_ALPHA" }
     template: "alpha"
@@ -288,6 +291,7 @@ hostDataRoot: "/host/data"
 network: "net"
 agents:
   alpha:
+    harness: picoclaw
     serviceName: "picoclaw-alpha"
     token: { env: "TOK_ALPHA" }
     template: "alpha"
@@ -446,6 +450,7 @@ hostDataRoot: "/host/data"
 network: "net"
 agents:
   alpha:
+    harness: picoclaw
     serviceName: "picoclaw-alpha"
     token: { env: "TOK_ALPHA" }
     template: "alpha"
@@ -458,23 +463,98 @@ agents:
     mode: "continuous"
 `
 
-// TestHarnessAcceptsPicoclawAndDefaultsWhenOmitted pins the two legal spellings.
-// An omitted harness must keep defaulting to picoclaw: every shipped agent block
-// omits it, so requiring it would break all of them.
-func TestHarnessAcceptsPicoclawAndDefaultsWhenOmitted(t *testing.T) {
+// One agent declares nothing, the other declares the deprecated harness. This
+// is the shape of a config written before the harness key existed and half
+// migrated since, which is the shape most real ones have.
+const defaultHarnessSample = `
+listen: ":9000"
+hostDataRoot: "/host/data"
+network: "net"
+agents:
+  alpha:
+    serviceName: "picoclaw-alpha"
+    token: { env: "TOK_ALPHA" }
+    template: "alpha"
+    mode: "continuous"
+  beta:
+    harness: picoclaw
+    serviceName: "picoclaw-beta"
+    token: { env: "TOK_BETA" }
+    template: "beta"
+    mode: "continuous"
+`
+
+// TestAnOmittedHarnessTakesTheDefaultAndADeclaredOneIsKept pins both spellings
+// and the default between them. alpha declares nothing and must come out as
+// DefaultHarness; beta declares picoclaw and must be left alone, because the
+// deprecated harness is still fully served and declaring it is how an operator
+// asks for it.
+func TestAnOmittedHarnessTakesTheDefaultAndADeclaredOneIsKept(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "x")
 	t.Setenv("TOK_BETA", "y")
-	cfg, err := Load(writeConfig(t, harnessSample))
+	withImage := defaultHarnessSample +
+		"\nganglionImage: \"ghcr.io/lepistabioinformatics/crab-ganglion@sha256:abc\"\n"
+	cfg, err := Load(writeConfig(t, withImage))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, key := range []string{"alpha", "beta"} {
-		a, ok := cfg.Agents[key]
-		if !ok {
-			t.Fatalf("agent %q should be registered", key)
+	alpha, ok := cfg.Agents["alpha"]
+	if !ok {
+		t.Fatalf("agent alpha should be registered, disabled: %+v", cfg.DisabledAgents)
+	}
+	if alpha.Harness != DefaultHarness {
+		t.Errorf("omitted harness = %q, want the %q default", alpha.Harness, DefaultHarness)
+	}
+	if !alpha.HarnessImplicit {
+		t.Error("alpha declared no harness, so HarnessImplicit should say so")
+	}
+	beta, ok := cfg.Agents["beta"]
+	if !ok {
+		t.Fatal("agent beta should be registered")
+	}
+	if beta.Harness != HarnessPicoclaw {
+		t.Errorf("declared harness = %q, want %q", beta.Harness, HarnessPicoclaw)
+	}
+	if beta.HarnessImplicit {
+		t.Error("beta declared its harness; HarnessImplicit should be false")
+	}
+}
+
+// THE UPGRADE HAZARD, pinned. Moving DefaultHarness does not switch an agent
+// from one runtime to another: an agent that declared nothing becomes a
+// ganglion agent, and a ganglion agent with no image is DISABLED -- its routes
+// answer 404. That is the correct behaviour (FR-18: one unprovisioned agent
+// must not take the proxy down) but it is invisible unless the reason says what
+// happened, to an operator who never typed the word ganglion in their life.
+//
+// Both ways out have to be in the message, because which one is right depends
+// on what they meant: provision the image, or pin the old runtime.
+func TestAnImplicitGanglionAgentSaysWhyItWasDisabled(t *testing.T) {
+	t.Setenv("TOK_ALPHA", "x")
+	t.Setenv("TOK_BETA", "y")
+	cfg, err := Load(writeConfig(t, defaultHarnessSample))
+	if err != nil {
+		t.Fatalf("Load should not fail for one unprovisioned agent: %v", err)
+	}
+	if _, ok := cfg.Agents["beta"]; !ok {
+		t.Error("beta declares picoclaw and must be untouched by any of this")
+	}
+	if _, ok := cfg.Agents["alpha"]; ok {
+		t.Fatal("alpha has no image and should have been disabled")
+	}
+	var reason string
+	for _, d := range cfg.DisabledAgents {
+		if d.Key == "alpha" {
+			reason = d.Reason
 		}
-		if a.Harness != HarnessPicoclaw {
-			t.Errorf("agent %q harness = %q, want %q", key, a.Harness, HarnessPicoclaw)
+	}
+	if reason == "" {
+		t.Fatalf("alpha was dropped with no reason: %+v", cfg.DisabledAgents)
+	}
+	for _, want := range []string{"CRAB_GANGLION_IMAGE", "declares no harness", HarnessPicoclaw} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the reason does not mention %q, so the operator cannot act on it: %s",
+				want, reason)
 		}
 	}
 }
@@ -695,7 +775,7 @@ func TestLoadParsesTurnIdleTimeout(t *testing.T) {
 // naming the variable -- not to fail FATALLY.
 func TestLoadDisablesAGanglionAgentWithNoImage(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "resolved-alpha")
-	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
+	body := strings.Replace(sample, "    harness: picoclaw\n", "    harness: ganglion\n", 1)
 
 	cfg, err := Load(writeConfig(t, body))
 	if err != nil {
@@ -741,7 +821,7 @@ func TestLoadKeepsWorkingAgentsWhenOneGanglionAgentIsUnprovisioned(t *testing.T)
 // onto the parsed agent.
 func TestLoadAcceptsAGanglionAgentWithAnImage(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "resolved-alpha")
-	body := strings.Replace(sample, "  alpha:\n", "  alpha:\n    harness: ganglion\n", 1)
+	body := strings.Replace(sample, "    harness: picoclaw\n", "    harness: ganglion\n", 1)
 	body += "\nganglionImage: \"ghcr.io/lepistabioinformatics/crab-ganglion@sha256:abc\"\n"
 
 	cfg, err := Load(writeConfig(t, body))
@@ -765,8 +845,8 @@ func TestLoadDisablesAGanglionAgentWhoseKeyIsUnset(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "resolved-alpha")
 	t.Setenv("GANGLION_KEY", "") // declared, not provisioned here
 
-	body := strings.Replace(sample, "  alpha:\n",
-		"  alpha:\n    harness: ganglion\n    model:\n      provider: deepseek\n"+
+	body := strings.Replace(sample, "    harness: picoclaw\n",
+		"    harness: ganglion\n    model:\n      provider: deepseek\n"+
 			"      name: deepseek-chat\n      apiKeyEnv: GANGLION_KEY\n", 1)
 	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
 
@@ -792,8 +872,8 @@ func TestLoadKeepsAGanglionAgentWhoseKeyIsSet(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "resolved-alpha")
 	t.Setenv("GANGLION_KEY", "provisioned")
 
-	body := strings.Replace(sample, "  alpha:\n",
-		"  alpha:\n    harness: ganglion\n    model:\n      provider: deepseek\n"+
+	body := strings.Replace(sample, "    harness: picoclaw\n",
+		"    harness: ganglion\n    model:\n      provider: deepseek\n"+
 			"      name: deepseek-chat\n      apiKeyEnv: GANGLION_KEY\n", 1)
 	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
 
@@ -836,7 +916,11 @@ func TestLoadDisablesAGanglionAgentWhoseTokenIsUnset(t *testing.T) {
 	t.Setenv("TOK_ALPHA", "resolved-alpha")
 	t.Setenv("TOK_BETA", "") // declared, not provisioned here
 
-	body := strings.Replace(harnessSample, "harness: picoclaw", "harness: ganglion", 1)
+	// Anchored on beta rather than on the first match: both agents now declare
+	// picoclaw, and it is beta's token this test leaves unset.
+	body := strings.Replace(harnessSample,
+		"    harness: picoclaw\n    serviceName: \"picoclaw-beta\"",
+		"    harness: ganglion\n    serviceName: \"picoclaw-beta\"", 1)
 	body += "\nganglionImage: \"ghcr.io/x/crab-ganglion@sha256:abc\"\n"
 
 	cfg, err := Load(writeConfig(t, body))

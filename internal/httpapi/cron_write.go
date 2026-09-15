@@ -79,7 +79,7 @@ func (s *Server) cronWriteScope(
 
 func harnessName(agent config.Agent) string {
 	if agent.Harness == "" {
-		return config.HarnessPicoclaw
+		return config.DefaultHarness
 	}
 	return agent.Harness
 }

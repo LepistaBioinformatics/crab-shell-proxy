@@ -163,6 +163,12 @@ agents:
       baseUrl: "https://api.deepseek.com/v1"
 
   beta:
+    # Declared rather than omitted, and that is now load-bearing: an omitted
+    # harness resolves to the ganglion (config.DefaultHarness), so leaving this
+    # blank would not move beta to a new runtime -- it would disable beta
+    # entirely on any host without CRAB_GANGLION_IMAGE. This line is what makes
+    # the default flip a no-op for this deployment.
+    harness: "picoclaw"
     serviceName: "beta"
     token: { env: "MYC_PICOCLAW_BETA_TOKEN" }
     template: "beta"

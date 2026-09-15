@@ -45,14 +45,32 @@ const (
 
 // Harness kinds select the agent runtime an agent orchestrates.
 const (
-	// HarnessPicoclaw is the default: a picoclaw container spoken to over the
-	// Pico Protocol WebSocket.
+	// HarnessPicoclaw is a picoclaw container spoken to over the Pico Protocol
+	// WebSocket. It was the default until DefaultHarness moved, and it is the
+	// harness being deprecated -- still fully served, still the right value to
+	// declare for an agent that needs it, but no longer what an omitted key
+	// means.
 	HarnessPicoclaw = "picoclaw"
 	// HarnessGanglion is crab-ganglion-harness: this project's own runtime,
-	// spoken to over native HTTP with SSE. It is an ALTERNATIVE to picoclaw,
-	// not a replacement -- picoclaw stays the default until the exit criteria
-	// in .specs/features/crab-ganglion-harness/spec.md are met.
+	// spoken to over native HTTP with SSE.
 	HarnessGanglion = "ganglion"
+
+	// DefaultHarness is what an agent gets when it declares no harness.
+	//
+	// It is the ganglion, and the flip is deliberate rather than incidental:
+	// the exit criteria in .specs/features/crab-ganglion-harness/spec.md are
+	// met, every feature the gate once reserved for picoclaw is served here
+	// (internal/httpapi/harness_gate.go's alsoServedBy), and the documentation
+	// teaches this harness. A default that disagreed with the documentation is
+	// the kind of contradiction that costs somebody an afternoon.
+	//
+	// Consequence an operator must know about: an agent that declared nothing
+	// used to be a picoclaw agent and is now a ganglion one, so it needs
+	// CRAB_GANGLION_IMAGE. Every agent in this repository's own config.yaml
+	// declares its harness explicitly for exactly that reason -- a config
+	// upgrade should not change a runtime by omission. A deployment carrying
+	// its own config.yaml has to do the same.
+	DefaultHarness = HarnessGanglion
 )
 
 // secret is a value sourced either inline or from an environment variable
@@ -111,11 +129,18 @@ type ModelConfig struct {
 type Agent struct {
 	// Key is the catalog key (map key), e.g. "alpha".
 	Key string `yaml:"-"`
-	// Harness selects the agent runtime kind. HarnessPicoclaw is the only accepted
-	// value; empty defaults to it at Load, so existing configs are unchanged. The
-	// field is retained because the admin API publishes it and clients branch on
-	// it to decide which per-agent surfaces an agent offers.
+	// Harness selects the agent runtime kind: HarnessPicoclaw or HarnessGanglion.
+	// Empty resolves to DefaultHarness in applyDefaults, before validate runs, so
+	// nothing downstream of Load ever sees an empty value. The field is published
+	// by the admin API and clients branch on it to decide which per-agent surfaces
+	// an agent offers.
 	Harness string `yaml:"harness"`
+	// HarnessImplicit records that the config named no harness and this agent
+	// took DefaultHarness. Nothing branches on the runtime behaviour of it --
+	// it exists so that a disabled agent can say WHY it is a ganglion agent,
+	// because "set CRAB_GANGLION_IMAGE" is bewildering advice to an operator
+	// who never wrote the word ganglion anywhere.
+	HarnessImplicit bool `yaml:"-"`
 	// ServiceName matches the value mycelium injects as x-mycelium-service-name
 	// (e.g. "picoclaw-alpha"). Requests are routed to an agent by this value.
 	ServiceName string `yaml:"serviceName"`
@@ -157,8 +182,19 @@ func ganglionUnprovisioned(c Config, a Agent) string {
 		return ""
 	}
 	if c.GanglionImage == "" {
-		return "ganglionImage (or CRAB_GANGLION_IMAGE) is unset; it has no default on purpose -- " +
+		reason := "ganglionImage (or CRAB_GANGLION_IMAGE) is unset; it has no default on purpose -- " +
 			"set it to an immutable reference, not a moving tag"
+		if a.HarnessImplicit {
+			// The upgrade path, spelled out. This agent declares no harness, so
+			// it used to be a picoclaw agent and is now a ganglion one by
+			// default, and the operator who is reading this never typed either
+			// word. Both ways out are named, because which one is right depends
+			// on what they meant.
+			reason += " (this agent declares no harness, so it took the " +
+				DefaultHarness + " default; declare harness: " + HarnessPicoclaw +
+				" to keep it on the previous runtime)"
+		}
+		return reason
 	}
 	if a.Model != nil && a.Model.APIKeyEnv != "" && a.Model.APIKey == "" {
 		// Named, not described. An operator reading "an API key is unset" for
@@ -380,9 +416,6 @@ func Load(path string) (*Config, error) {
 	// Resolve secrets and stamp the map key onto each agent.
 	for key, agent := range cfg.Agents {
 		agent.Key = key
-		if agent.Harness == "" {
-			agent.Harness = HarnessPicoclaw
-		}
 		tok, err := agent.Token.resolve()
 		if err != nil {
 			// For picoclaw this stays fatal: every deployment that exists today
@@ -551,6 +584,17 @@ func (c *Config) applyDefaults() {
 	if c.MediaMaxBytes == 0 {
 		c.MediaMaxBytes = 10 << 20 // 10 MiB
 	}
+	// The harness is resolved HERE rather than after validate, because validate
+	// branches on it: a ganglion agent with no image is disabled, a picoclaw one
+	// is not. Resolving afterwards meant an omitted key took the picoclaw path
+	// through validation and the ganglion path everywhere else.
+	for key, agent := range c.Agents {
+		if agent.Harness == "" {
+			agent.Harness = DefaultHarness
+			agent.HarnessImplicit = true
+			c.Agents[key] = agent
+		}
+	}
 }
 
 func (c *Config) validate() error {
@@ -574,8 +618,8 @@ func (c *Config) validate() error {
 		// naming a runtime this proxy no longer orchestrates would otherwise hand a
 		// user a picoclaw container under a role provisioned for something else.
 		switch agent.Harness {
-		case "", HarnessPicoclaw:
-		case HarnessGanglion:
+		case HarnessPicoclaw:
+		case "", HarnessGanglion:
 			// A missing image does NOT fail the load. It disables the agent, the
 			// same way a missing provider key does -- see the DisabledAgents
 			// block below.
