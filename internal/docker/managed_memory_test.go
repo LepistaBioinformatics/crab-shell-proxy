@@ -3,6 +3,8 @@ package docker
 import (
 	"strings"
 	"testing"
+
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
 
 // The operator-managed content the platform mounts read-only into every picoclaw
@@ -12,7 +14,7 @@ import (
 
 func TestManagedContentBindsAreReadOnly(t *testing.T) {
 	t.Parallel()
-	for _, b := range managedContentBinds("/host/managed", "/data/.picoclaw", true) {
+	for _, b := range managedContentBinds("/host/managed", "/data/.picoclaw", config.HarnessPicoclaw, true) {
 		if !strings.HasSuffix(b, ":ro") {
 			t.Errorf("bind %q is not read-only; the agent could alter operator content", b)
 		}
@@ -24,7 +26,7 @@ func TestManagedContentBindsAreReadOnly(t *testing.T) {
 
 func TestManagedContentBindsPlaceEachFileInTheWorkspace(t *testing.T) {
 	t.Parallel()
-	binds := managedContentBinds("/host/managed", "/data/.picoclaw", true)
+	binds := managedContentBinds("/host/managed", "/data/.picoclaw", config.HarnessPicoclaw, true)
 	want := map[string]string{
 		managedSkillRel:   "/host/managed/skills/shared-content:/data/.picoclaw/workspace/skills/shared-content:ro",
 		managedMemoryRel:  "/host/managed/memory/CONTEXT_RECOVERY.md:/data/.picoclaw/workspace/memory/CONTEXT_RECOVERY.md:ro",
@@ -48,18 +50,57 @@ func TestManagedContentBindsPlaceEachFileInTheWorkspace(t *testing.T) {
 // that is conditional; the other two apply regardless.
 func TestTheRoutingNoteIsMountedOnlyWhenTheMemoryGraphIsOn(t *testing.T) {
 	t.Parallel()
-	off := managedContentBinds("/host/managed", "/data/.picoclaw", false)
+	off := managedContentBinds("/host/managed", "/data/.picoclaw", config.HarnessPicoclaw, false)
 	for _, b := range off {
 		if strings.Contains(b, "MEMORY_ROUTING.md") {
 			t.Errorf("the routing note was mounted with the memory graph switched off: %q", b)
 		}
 	}
-	if len(off) != 3 {
-		t.Errorf("binds with the graph off = %d, want 3 (skill + context recovery + file delivery)", len(off))
+	if len(off) != 4 {
+		t.Errorf("binds with the graph off = %d, want 4 (two skills + context recovery + file delivery)", len(off))
 	}
 
-	if on := managedContentBinds("/host/managed", "/data/.picoclaw", true); len(on) != 4 {
-		t.Errorf("binds with the graph on = %d, want 4 (the delivery rule is unconditional)", len(on))
+	if on := managedContentBinds("/host/managed", "/data/.picoclaw", config.HarnessPicoclaw, true); len(on) != 5 {
+		t.Errorf("binds with the graph on = %d, want 5 (the delivery rule is unconditional)", len(on))
+	}
+}
+
+// The second gate, and it is the same principle one level up: a file describing an
+// alpine image with busybox and a shell confined to the turn's workspace is a
+// description of the WRONG MACHINE for a picoclaw agent.
+func TestTheHarnessNoteIsMountedOnlyForTheHarnessItDescribes(t *testing.T) {
+	t.Parallel()
+	for _, b := range managedContentBinds("/m", "/d", config.HarnessPicoclaw, true) {
+		if strings.Contains(b, "ganglion-workspace") {
+			t.Errorf("the ganglion note was mounted into a picoclaw container: %q", b)
+		}
+	}
+
+	found := false
+	for _, b := range managedContentBinds("/m", "/d", config.HarnessGanglion, true) {
+		if b == "/m/skills/ganglion-workspace:/d/workspace/skills/ganglion-workspace:ro" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the ganglion note is not mounted into a ganglion container")
+	}
+}
+
+// Both harnesses read the same SKILL.md format -- crab-ganglion-harness's own
+// `internal/skillfile` package says so -- so the skill about writing one is not gated.
+func TestTheSkillCreatorReachesBothHarnesses(t *testing.T) {
+	t.Parallel()
+	for _, harness := range []string{config.HarnessPicoclaw, config.HarnessGanglion} {
+		found := false
+		for _, b := range managedContentBinds("/m", "/d", harness, false) {
+			if strings.Contains(b, "/workspace/skills/skill-creator:ro") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("skill-creator is not mounted for %s", harness)
+		}
 	}
 }
 
@@ -67,9 +108,9 @@ func TestTheRoutingNoteIsMountedOnlyWhenTheMemoryGraphIsOn(t *testing.T) {
 // comparing them would otherwise read that as drift.
 func TestManagedContentBindOrderIsStable(t *testing.T) {
 	t.Parallel()
-	first := managedContentBinds("/m", "/d", true)
+	first := managedContentBinds("/m", "/d", config.HarnessPicoclaw, true)
 	for i := 0; i < 5; i++ {
-		again := managedContentBinds("/m", "/d", true)
+		again := managedContentBinds("/m", "/d", config.HarnessPicoclaw, true)
 		for j := range first {
 			if first[j] != again[j] {
 				t.Fatalf("bind order changed between calls: %v vs %v", first, again)
@@ -83,13 +124,94 @@ func TestManagedContentBindOrderIsStable(t *testing.T) {
 // an empty memory note rather than as an error.
 func TestEveryManagedRelExistsInTheEmbeddedTree(t *testing.T) {
 	t.Parallel()
-	for _, rel := range []string{managedSkillRel, managedMemoryRel, managedRoutingRel} {
+	for _, rel := range []string{
+		managedSkillRel, managedSkillCreatorRel, managedGanglionRel,
+		managedMemoryRel, managedRoutingRel, managedDeliveryRel,
+	} {
 		if _, err := managedFS.ReadDir("managed/" + rel); err == nil {
 			continue // a directory, fine
 		}
 		if _, err := managedFS.ReadFile("managed/" + rel); err != nil {
 			t.Errorf("managed/%s is mounted but not embedded: %v", rel, err)
 		}
+	}
+}
+
+// THE CONTRADICTION THIS SUITE DID NOT CATCH. `shared-content` told the agent to write
+// deliverables to `uploads/attachments`, while FILE_DELIVERY.md -- bound into the same
+// workspace, and read every turn -- says `public/attachments` and explicitly says not to
+// create an `uploads/` folder. `uploads` is LegacyPublicDirName: the one-time migration
+// is the only thing that should still name it, and a file written there is invisible to
+// the member on both harnesses.
+//
+// Asserted against config.PublicDirName rather than the literal, so a second rename
+// cannot leave these documents behind again.
+func TestTheShippedSkillsNameTheDirectoryTheMemberCanSee(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{managedSkillRel, managedDeliveryRel, managedGanglionRel} {
+		body := readManaged(t, rel)
+		if !strings.Contains(body, config.PublicDirName+"/attachments") {
+			t.Errorf("managed/%s never names %s/attachments", rel, config.PublicDirName)
+		}
+		for _, line := range strings.Split(body, "\n") {
+			// The delivery rule has a section explaining that `uploads/` is the OLD
+			// name, so the word itself is allowed -- telling the agent to WRITE there
+			// is not.
+			if strings.Contains(line, config.LegacyPublicDirName+"/attachments") &&
+				!strings.Contains(line, "old") && !strings.Contains(line, "not create") {
+				t.Errorf("managed/%s still points a write at the legacy directory: %q", rel, line)
+			}
+		}
+	}
+}
+
+// A skill is found by its description and nothing else: only name and description reach
+// a turn's prompt, and a body nobody opens is a body nobody reads. An empty description
+// is a skill that has been written and cannot be found.
+func TestEveryShippedSkillDeclaresNameAndDescription(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{managedSkillRel, managedSkillCreatorRel, managedGanglionRel} {
+		body := readManaged(t, rel+"/SKILL.md")
+		name := strings.TrimPrefix(rel, "skills/")
+		if !strings.Contains(body, "name: "+name) {
+			t.Errorf("managed/%s does not declare `name: %s`; the format requires it to "+
+				"match the directory", rel, name)
+		}
+		if !strings.Contains(body, "description:") {
+			t.Errorf("managed/%s has no description, so nothing will ever open it", rel)
+		}
+	}
+}
+
+// Reads either a managed file or the SKILL.md inside a managed directory.
+func readManaged(t *testing.T, rel string) string {
+	t.Helper()
+	body, err := managedFS.ReadFile("managed/" + rel)
+	if err != nil {
+		body, err = managedFS.ReadFile("managed/" + rel + "/SKILL.md")
+	}
+	if err != nil {
+		t.Fatalf("read embedded managed/%s: %v", rel, err)
+	}
+	return string(body)
+}
+
+// A GANGLION WORKSPACE HAS NO `.secrets/`: credentials reach that harness as
+// environment variables, and ganglionWorkspaceDirs says so. The first draft of this
+// skill listed the directory anyway -- carried over from `shared-content`, which was
+// written for the other harness -- which is exactly the failure the file's own closing
+// paragraph warns about: acting on a capability a document named rather than one the
+// machine has.
+func TestTheGanglionNoteDoesNotInventASecretsDirectory(t *testing.T) {
+	t.Parallel()
+	for _, dir := range ganglionWorkspaceDirs {
+		if dir == ".secrets" {
+			t.Fatal("a ganglion workspace now HAS .secrets/; the skill has to say so")
+		}
+	}
+	body := readManaged(t, managedGanglionRel)
+	if !strings.Contains(body, "no `.secrets/` here") {
+		t.Error("the ganglion note no longer says the secrets directory is absent")
 	}
 }
 

@@ -45,16 +45,16 @@ between turns. So:
 - It's a plain markdown file you read like any other; distinct from the agent's
   own `memory/` files.
 
-## Giving a file to the user (`workspace/uploads/`)
+## Giving a file to the user (`workspace/public/`)
 
-`uploads/` is the one folder this workspace SHARES with the person you are talking
+`public/` is the one folder this workspace SHARES with the person you are talking
 to: it is what their Files panel lists, and clicking an entry there downloads it.
 Anywhere else you write is invisible to them.
 
 So when the user asks for a file — a report, an export, a spreadsheet, an archive:
 
-1. `mkdir -p uploads/attachments` and write it there, under a name a human
-   recognizes (`uploads/attachments/vendas-q1.xlsx`, not `out.bin`).
+1. `mkdir -p public/attachments` and write it there, under a name a human
+   recognizes (`public/attachments/vendas-q1.xlsx`, not `out.bin`).
 2. Say in your reply, in the user's language, that the file is ready **and give the
    path**. That sentence is part of the conversation, so it is still there when they
    reload the page — which is exactly when someone goes looking for a file again.
@@ -62,13 +62,24 @@ So when the user asks for a file — a report, an export, a spreadsheet, an arch
    failed.
 
 Do not paste a file's bytes into the chat, and keep large intermediates out of
-`uploads/` — copy in only the finished deliverable.
+`public/` — copy in only the finished deliverable.
+
+`workspace/memory/FILE_DELIVERY.md` states the same rule, and it is the one that
+is read on every turn. This section exists because a skill consulted for shared
+files is also where somebody looks for "how do I hand this over".
 
 ## Secrets
 
-All secrets live under `workspace/.secrets/` (read-only sinks): `.env`
-(`NAME=value` lines), `secrets.json` (`{ "NAME": "value" }`), and `native.yml`
-(picoclaw config slots). Load the one your task needs.
+**Where they are depends on the runtime you are in**, and there are two shapes:
+
+- **As files**, under `workspace/.secrets/` (read-only sinks): `.env`
+  (`NAME=value` lines), `secrets.json` (`{ "NAME": "value" }`), and `native.yml`
+  (picoclaw config slots). Load the one your task needs.
+- **As environment variables**, with no `.secrets/` directory at all. If that
+  directory is not there, this is the runtime you are in — read them from the
+  environment and do not go looking for a file that does not exist.
+
+Everything below applies either way.
 
 This directory already merges, for you, the **shared** secrets provisioned by
 your tenant and subscription managers with **your own** secrets — your own value

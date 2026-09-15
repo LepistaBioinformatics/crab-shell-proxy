@@ -150,7 +150,7 @@ func ganglionBinds(cfg *config.Config, key WorkspaceKey, hostDir string, project
 	}
 	binds = append(binds, managedContentBinds(
 		config.ManagedSkillsDir(cfg.HostDataRoot), ganglionMountDest,
-		cfg.ResolvedMCPTokenSecret != "")...)
+		config.HarnessGanglion, cfg.ResolvedMCPTokenSecret != "")...)
 	// The model registry, READ-ONLY and above the workspace, for the same
 	// reason the key file is: the workspace is the only thing a command can
 	// reach, and a writable model list would let a tool steered by untrusted

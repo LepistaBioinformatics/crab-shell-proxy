@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 )
 
 // Operator-managed workspace content, bind-mounted read-only into every
@@ -14,8 +16,24 @@ import (
 //	skills/<managedSkillName>/  -> workspace/skills/<managedSkillName> (guidance)
 //	memory/<managedMemoryFile>  -> workspace/memory/<managedMemoryFile> (recovery)
 const (
-	managedSkillRel  = "skills/shared-content"
-	managedMemoryRel = "memory/CONTEXT_RECOVERY.md"
+	managedSkillRel = "skills/shared-content"
+	// The SKILL.md format and the two roots it is read from. Both harnesses run
+	// the same format — crab-ganglion-harness's `internal/skillfile` says so in
+	// its own package comment — so this ships to both, unconditionally: a
+	// workspace always has a skills directory and an agent can always write one.
+	managedSkillCreatorRel = "skills/skill-creator"
+	// GANGLION ONLY, and the one entry in this list that is. It describes an
+	// alpine image with busybox and a shell confined to the turn's workspace,
+	// which is a description of the WRONG MACHINE for a picoclaw agent — and the
+	// file's own closing paragraph is that an agent must act on the tools it has
+	// rather than on the ones a document named.
+	//
+	// It stands in for picoclaw's `picoclaw-agent`, which is bundled in that
+	// harness's workspace template. A ganglion agent is provisioned with no
+	// template at all (manager.go skips it deliberately), so the managed tree is
+	// the only place a harness-specific default can come from.
+	managedGanglionRel = "skills/ganglion-workspace"
+	managedMemoryRel   = "memory/CONTEXT_RECOVERY.md"
 	// managedRoutingRel tells the agent WHICH memory to write to — the knowledge
 	// graph for facts, MEMORY.md for its own notes — and forbids claiming a save it
 	// did not make.
@@ -51,15 +69,23 @@ var managedFS embed.FS
 // managedContentBinds are the read-only bind specs for the operator-managed content, in
 // a stable order.
 //
-// A pure function of the two paths and one flag, so it is testable without a container
+// A pure function of its arguments, so it is testable without a container
 // and without root: the TestCreate* family cannot run here (chown needs privileges),
 // which is exactly why the mount list is built somewhere a test can reach it.
 //
 // The routing note is included ONLY when the memory graph is switched on. With no
 // CRAB_MCP_TOKEN_SECRET the agent has no mcp_memory_* tools at all, and a file
 // instructing it to prefer them would be actively wrong — worse than silent.
-func managedContentBinds(managedBase, mountDest string, memoryGraphEnabled bool) []string {
-	rels := []string{managedSkillRel, managedMemoryRel, managedDeliveryRel}
+//
+// `harness` gates on the same principle one level up: a file describing this
+// container's shell, its image and its layout is a description of the wrong machine
+// for the other harness, and the failure it would produce is the same one — an
+// agent acting on a capability it was told about rather than one it has.
+func managedContentBinds(managedBase, mountDest, harness string, memoryGraphEnabled bool) []string {
+	rels := []string{managedSkillRel, managedSkillCreatorRel, managedMemoryRel, managedDeliveryRel}
+	if harness == config.HarnessGanglion {
+		rels = append(rels, managedGanglionRel)
+	}
 	if memoryGraphEnabled {
 		rels = append(rels, managedRoutingRel)
 	}

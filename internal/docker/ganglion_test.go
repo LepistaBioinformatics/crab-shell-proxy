@@ -786,7 +786,7 @@ func TestTheGanglionGetsTheSharedAndManagedMounts(t *testing.T) {
 		}
 	}
 	for _, b := range managedContentBinds(config.ManagedSkillsDir(cfg.HostDataRoot),
-		ganglionMountDest, false) {
+		ganglionMountDest, config.HarnessGanglion, false) {
 		if !hasBind(binds, b) {
 			t.Errorf("managed bind missing: %s", b)
 		}

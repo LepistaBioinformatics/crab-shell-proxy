@@ -467,7 +467,7 @@ func (m *Manager) create(ctx context.Context, agent config.Agent, key WorkspaceK
 	// Built by a pure helper so the list is assertable without a container: the memory
 	// routing note joins it only when the memory graph is switched on.
 	managedMounts := managedContentBinds(
-		managedBase, mountDest, m.cfg.ResolvedMCPTokenSecret != "")
+		managedBase, mountDest, config.HarnessPicoclaw, m.cfg.ResolvedMCPTokenSecret != "")
 	// Cascade admin shared skills: materialize the (tenant, subscription)
 	// effective-skills dir and mount it whole READ-ONLY at picoclaw's global
 	// skills root. New/edited/removed skills reach picoclaw on the next
