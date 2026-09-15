@@ -134,8 +134,9 @@ func (m *Manager) stampRestart(key WorkspaceKey) {
 }
 
 // ContainerName is the deterministic name for one workspace's container:
-// <prefix>-<role>-<subsAccId>-<userAccId>. subsAccId is a globally-unique
-// mycelium account UUID, so the triple is unique without the tenant id.
+// <prefix>-<role>-<hash>, where the hash covers the isolation tuple. The body
+// explains why it is a hash rather than the ids themselves; this comment used
+// to name the ids and disagreed with the two lines under it.
 func (m *Manager) ContainerName(key WorkspaceKey) string {
 	// <prefix>-<role>-<hash>. The full tuple has two UUIDs (~88 chars), which
 	// exceeds the 63-char DNS label limit and makes the container unresolvable
