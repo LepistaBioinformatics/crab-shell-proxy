@@ -63,7 +63,7 @@ var inventoryGoverned = map[string]bool{
 func rejectUngovernedAgent(w http.ResponseWriter, agent config.Agent) bool {
 	harness := agent.Harness
 	if harness == "" {
-		harness = config.HarnessPicoclaw
+		harness = config.DefaultHarness
 	}
 	if inventoryGoverned[harness] {
 		return false

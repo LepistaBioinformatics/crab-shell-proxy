@@ -39,13 +39,16 @@ const attachmentFetchTimeout = 60 * time.Second
 const maxAttachmentBytes = 64 << 20
 
 // storeTurnAttachment fetches one delivered file from the harness and stores it
-// under uploads/attachments/.
+// under <public>/attachments/, which is what the member's interface lists.
 // project scopes the store to the workspace of the agent that produced the file:
-// a turn answered by a project agent delivers into that project's uploads, not
-// into the main workspace where its own agent could never open it again.
-// harness says how that project's workspace is SHAPED — a sibling directory for
-// picoclaw, a child of the workspace for the ganglion — so the two travel
-// together everywhere a project does.
+// a turn answered by a project agent delivers into that project's public
+// directory, not into the main workspace where its own agent could never open it
+// again.
+// harness travels with it because the two are looked up together, NOT because
+// the shape differs: a project workspace is `workspace-<id>`, a sibling of the
+// main one, under both harnesses. WorkspaceSegment says so in capitals and
+// .claude/rules/harness-layout.md is the rule behind it. This comment claimed a
+// per-harness shape that has not been true since the layout was unified.
 func (s *Server) storeTurnAttachment(
 	ctx context.Context, key docker.WorkspaceKey, harness, project string, a turn.Attachment,
 ) (docker.StoredMedia, error) {

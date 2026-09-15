@@ -1,125 +1,136 @@
 # crab-shell-proxy 🦀🐚
 
-> **One real container per user for your AI agents.**
-> Not a shared process with a hope and a hash.
+The orchestrator of the zombie-crab stack: a small Go service that sits behind
+the [Mycelium](https://github.com/LepistaBioinformatics/mycelium) gateway, reads
+which agent a request is for and which member made it, and makes sure that
+member's own agent container is running before relaying the conversation to it.
 
-`crab-shell-proxy` is a small Go service that sits behind a [Mycelium](https://github.com/LepistaBioinformatics/mycelium) API gateway and gives **every user their own isolated [picoclaw](https://github.com/sipeed/picoclaw) agent** — spun up on demand, torn down when idle, and reachable through an OpenAI-compatible API. It presents `/v1/chat/completions` (streaming and not), `/v1/models`, and `/v1/sessions/history`, while transparently managing the container lifecycle underneath.
+It is the component that holds the Docker socket, and it runs as root. The
+`Dockerfile`'s runtime stage says why in as many words: it has to reach the
+socket (`root:docker`, mode 0660), read root-owned template files, and write the
+per-user data directories a container then reads. That makes it the trusted
+control plane of the stack, and the agents it spawns the sandboxed part.
 
----
+The unit it orchestrates is one container per `(tenant, subscription, agent,
+user)`. The agent comes from the `x-mycelium-service-name` header the gateway
+injects (`config.AgentByServiceName`); the member comes from the profile header's
+`accId`, never the e-mail, because an e-mail is mutable and an account id is not.
+The container is named `<containerPrefix>-<role>-<hash>` — `crabshell` by default,
+the agent key, and sixteen hex characters of a SHA-256 over
+`tenant::subscription::user`, since the full tuple is two UUIDs and would break
+the 63-character DNS label limit that lets a container resolve itself on the
+Docker network (`internal/docker/manager.go`). Identity is therefore *not* in the
+name: it is in the `crab-shell.*` labels and the `.crab-owner.json` marker.
 
-## Why this exists: isolation you can actually trust
+Each agent declares which runtime answers for it, and one that declares no
+`harness:` key gets the **ganglion** — `config.DefaultHarness` is
+`config.HarnessGanglion`, filled in before validation runs. picoclaw is the one
+being deprecated: still fully served, no longer what an omitted key means. An
+agent inheriting the default needs `CRAB_GANGLION_IMAGE`, which is why every
+agent in this repository's `config.yaml` declares its harness explicitly.
 
-Most "multi-tenant" agent setups run **one shared process** for everybody and separate users with a key in a map — a session id, an email hash, a row filter. It looks isolated. It isn't.
+## What it is not responsible for
 
-AI agents read and write files, run tools, execute code, keep long-lived memory, and are steered by untrusted natural language. In a shared process, a single prompt-injection, a path-traversal bug, a tool that opens the wrong file, or one leaky library is enough for **user A to read user B's conversations, files, and secrets**. "Soft" isolation is a data breach waiting for a bad day.
+It does not authenticate anyone. Identity arrives already verified from the
+gateway, and the job here is to trust that header, not to reproduce the check.
 
-`crab-shell-proxy` refuses that trade-off. Each user gets a **real** boundary:
+It does not run the agent loop. Which tool to call, when to stop, and what the
+answer is belong to the harness —
+[crab-ganglion-harness](https://github.com/LepistaBioinformatics/crab-ganglion-harness)
+or [picoclaw](https://github.com/sipeed/picoclaw). Where a harness genuinely
+cannot serve a feature, `internal/httpapi/harness_gate.go` answers `501` naming
+the harness rather than quietly succeeding; the file records the incident that
+produced the rule.
 
-| | Shared process + hash key | **crab-shell-proxy** |
-|---|---|---|
-| Process isolation | ❌ same process | ✅ separate container (PID/mount/net namespaces) |
-| Filesystem | ⚠️ shared, filtered by code | ✅ separate per-user volume |
-| Memory / sessions / cron | ⚠️ one DB, keyed rows | ✅ per-user store on that user's volume |
-| Blast radius of a compromised agent | 💥 everyone | 🛡️ that one user |
-| Runs as | often root | ✅ non-root (uid 1000) |
-| Identity | app-level string | ✅ gateway-verified account id (unforgeable) |
+It does not render anything. The member-facing UI is
+[crab-exoskeleton-webapp](https://github.com/LepistaBioinformatics/crab-exoskeleton-webapp),
+which reaches this service through the gateway and never talks to an agent
+container directly.
 
-**If one user's agent is fully compromised, it still cannot reach another user's data.** Different container, different volume, non-root, no shared surface. That is the difference between *"isolated"* and isolated.
+## Building and testing
 
----
-
-## How it works
-
-```
-   Client ── HTTPS + JWT ──▶  Mycelium gateway
-                                 │  verifies the token, injects the account
-                                 │  profile (x-mycelium-profile) + service name
-                                 ▼
-                        ┌──────────────────────────┐
-                        │      crab-shell-proxy      │   ── Docker API (unix socket)
-                        │  agent  ← service-name     │
-                        │  user   ← profile accId    │
-                        │  ensure container is up    │
-                        │  OpenAI HTTP ⇄ Pico WS     │
-                        └───────────┬────────────────┘
-                                    ▼   (spawned on demand, non-root)
-                        picoclaw-<agent>-<accId>
-                        /data/.picoclaw  ←  per-user volume
-                        (native connectors dial OUT: Telegram, Teams, …)
-```
-
-- **Identity is the account, not the email.** The user key is the Mycelium profile's `accId` (a stable, unique account id the gateway injects and the caller *cannot forge*). Emails change and are mutable; `accId` doesn't. The email is kept only as a human-readable marker (`.crab-owner.json`) so operators can find who owns a container.
-- **On-demand + scale-to-zero.** A user's first request cold-starts their container; after a configurable idle window it's `docker stop`ped to free RAM, and the next request brings it back with all data intact.
-- **Continuous mode.** picoclaw's native connectors (Telegram, MS Teams, …) dial *out* from inside the container and never traverse the proxy — so instances that use them run `continuous` (never auto-stopped) instead of scale-to-zero.
-- **Non-root by design.** Containers run as a non-root uid with a relocated `$HOME`; the proxy chowns each user's volume accordingly.
-
----
-
-## Features
-
-- 🔒 **Real per-`(agent, user)` isolation** — one container + one volume each, non-root.
-- 🔌 **OpenAI-compatible** — drop-in `/v1/chat/completions` (SSE streaming + JSON), `/v1/models`, `/v1/sessions/history`.
-- ⚡ **Scale-to-zero or continuous** lifecycle, per agent, with single-flight cold start and health-gated readiness.
-- 🧩 **Config-driven agent catalog** — declare agents, models, and lifecycle in one YAML.
-- 🔑 **Per-instance API keys from the environment** — each agent sources its own LLM key by env-var name; keys never live in config or images.
-- 🪶 **Tiny** — Go, talks to Docker over the socket via raw HTTP, three dependencies.
-
----
-
-## Quick start
-
-`crab-shell-proxy` is meant to run behind Mycelium (which verifies identity and injects the profile). Configure agents in `config.yaml`:
-
-```yaml
-listen: ":8080"
-hostDataRoot: "/abs/host/path/data/agents"   # bind-mount source (host path)
-containerDataRoot: "/data/agents"
-network: "your_docker_network"
-picoclawUser: "1000:1000"                     # non-root
-picoclawHome: "/data"
-agents:
-  alpha:
-    serviceName: "picoclaw-alpha"             # matches x-mycelium-service-name
-    token: { env: "MYC_PICOCLAW_ALPHA_TOKEN" }
-    template: "alpha"
-    mode: "scale-to-zero"                     # or "continuous"
-    idleTimeout: 15m
-    model:
-      provider: "deepseek"
-      name: "deepseek-chat"
-      apiKeyEnv: "PICOCLAW_ALPHA_API_KEY"     # key read from env, per instance
-```
-
-Build and run it as a sibling-container orchestrator (mount the Docker socket and the data root):
+**The build is the test gate.** The `Dockerfile`'s build stage runs `go mod tidy`,
+`go vet ./...` and `go test ./...` before it links the binary, so a failing test
+means no image. But **no workflow runs on a pull request**:
+`.github/workflows/release-image.yml` is the only workflow here, and it triggers
+on a push to `main`, a `v*` tag, or `workflow_dispatch`. The gate therefore fires
+*after* a merge, which makes running it yourself the whole pre-merge check:
 
 ```bash
-docker run -d --name crab-shell-proxy \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$PWD/data/agents":/data/agents \
-  -e CRAB_HOST_DATA_ROOT="$PWD/data/agents" \
-  -e PICOCLAW_ALPHA_API_KEY="$YOUR_KEY" \
-  crab-shell-proxy
+go vet ./... && go test ./...
 ```
 
-See [`config.yaml`](./config.yaml) for the full set of options and env overrides
-(`CRAB_HOST_DATA_ROOT`, `CRAB_NETWORK`, `CRAB_PICOCLAW_USER`, …).
+A second suite talks to a real Docker daemon — it creates and destroys a
+throwaway `alpine` container to prove the hand-written Engine API encoding
+round-trips, and needs no LLM key. It is behind `//go:build integration`, so it
+runs in neither the command above nor the image build, and must be asked for:
 
----
+```bash
+go test -tags integration ./internal/docker -run TestIntegration -v
+```
+
+The binary reads `CRAB_CONFIG` (default `/etc/crab-shell-proxy/config.yaml`,
+where the image bakes it) and `DOCKER_SOCKET` (default `/var/run/docker.sock`).
+[`config.yaml`](./config.yaml) documents every field and its `CRAB_*` override,
+and holds environment-variable *names* rather than values so one image serves
+every deployment. Deploying the stack is the book's job, not this file's.
+
+## How the code is laid out
+
+`cmd/crab-shell-proxy/main.go` is the entry point; everything else is under
+`internal/`.
+
+| Package | What lives there |
+|---|---|
+| `config` | the agent catalog, defaults and validation, the harness constants, and the path helpers for the data root (`templates/<template>` and `tenants/<t>/subscriptions/<s>/agents/<role>/users/<u>`) |
+| `httpapi` | every route — the OpenAI-shaped member surface, `/v1/admin/...`, `GET /healthz`, `GET /doc/openapi.json` — plus the harness feature gate |
+| `docker` | the hand-written Docker Engine API client spoken as raw HTTP over the socket, and everything done *to* a container or its volume |
+| `pico`, `ganglion`, `turn` | running one turn against picoclaw (its WebSocket protocol) or against crab-ganglion-harness (HTTP with SSE), plus the harness-neutral request shape both share |
+| `registry` | the proxy-level model inventory: the single source of truth for which model a workspace uses |
+| `history` | reading a conversation's transcript back out of a member's directory |
+| `memgraph`, `mcpserver`, `mcptoken` | the knowledge-graph memory, the MCP endpoint a container reaches it through, and the bearer token that scopes that access |
+| `cron`, `projects`, `restart`, `authz`, `identity` | scheduled tasks, a member's projects, restart-notice state, the caller's administrative tier, and resolving the account from the profile header |
+
+`internal/docker` is by a wide margin the largest package, and that is a fair
+signal of where the work is. Specs live under [`.specs/`](./.specs), one folder
+per feature.
 
 ## Security notes
 
-- **The proxy holds the Docker socket** and runs as root — it is the most privileged component in the stack (it can control the host daemon) and must be treated as such. The *agents* it spawns are non-root and sandboxed; the proxy is the trusted control plane. Harden accordingly for production (restricted socket proxy, dedicated host, etc.).
-- **Per-user keys stay in the environment**, sourced by env-var name at provisioning time; they are written into each user's `.security.yml` (0600, on that user's volume) and never committed to config, templates, or images.
+- **The proxy holds the Docker socket and runs as root.** It can control the host
+  daemon, which makes it the most privileged component in the stack and the one
+  worth hardening first — a restricted socket proxy, a dedicated host.
+- **`telemetryToken` is not an agent token.** `GET /v1/instances` is the read-only
+  inventory a watcher reads to attribute a container to its tenant, and it takes a
+  credential of its own: the profile header is decoded and never verified, so an
+  agent token is what stops a caller on the container network from asserting any
+  `accId` it likes. It gates chatting as any member, and monitoring must not hold
+  it (`internal/httpapi/instances.go`).
+- **Spawned containers run as `picoclawUser`**, shipped as `1000:1000`, with a
+  relocated `$HOME`; the proxy chowns each per-user directory to that uid. Setting
+  the field to `""` runs them as root instead.
+- **Secrets stay in the environment.** An agent's LLM key is named by `apiKeyEnv`
+  and resolved from this process's environment at provisioning time, then written
+  into that member's own store (mode 0600, on their volume) — never into
+  `config.yaml`, a template, or an image.
+- **Two secrets are optional and fail closed when unset.** No `mcpTokenSecret`
+  disables the memory graph and unregisters `/v1/mcp`; no `telemetryToken`
+  unregisters `GET /v1/instances` entirely — a 404, not a 401. A deployment that
+  forgot one gets no endpoint rather than an unauthenticated one.
 
----
+## Documentation
 
-## Status
+The book at <https://lepistabioinformatics.github.io/zombie-crab-project/> is
+canonical for everything about the stack beyond this checkout:
 
-Actively developed as part of a Mycelium + picoclaw stack. The core — per-user
-isolation, lifecycle, OpenAI surface, non-root, per-instance keys — is
-implemented and covered by unit tests plus real-daemon integration tests.
-
----
+- [crab-shell-proxy](https://lepistabioinformatics.github.io/zombie-crab-project/50-crab-shell-proxy.html)
+  — this component in the context of the stack.
+- [Harnesses](https://lepistabioinformatics.github.io/zombie-crab-project/11-harnesses.html)
+  — the two runtimes, and how one is chosen.
+- [Agents, workspaces and projects](https://lepistabioinformatics.github.io/zombie-crab-project/12-agents-and-workspaces.html)
+  — the directory layout this service reads and writes.
+- [Deployment](https://lepistabioinformatics.github.io/zombie-crab-project/40-deployment.html)
+  — running the stack, which this file deliberately does not cover.
 
 ## License
 

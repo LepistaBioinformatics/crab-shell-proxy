@@ -86,7 +86,7 @@ var alsoServedBy = map[harnessFeature]map[string]bool{
 func requireHarnessFeature(w http.ResponseWriter, agent config.Agent, f harnessFeature) bool {
 	harness := agent.Harness
 	if harness == "" {
-		harness = config.HarnessPicoclaw
+		harness = config.DefaultHarness
 	}
 	if harness == config.HarnessPicoclaw || !picoclawOnly[f] || alsoServedBy[f][harness] {
 		return true

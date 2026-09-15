@@ -2,9 +2,10 @@
 // own agent runtime.
 //
 // It is the second implementation of httpapi.Turner, selected by
-// config.HarnessGanglion. internal/pico stays live and untouched: ganglion is
-// an ALTERNATIVE to picoclaw, not a replacement, and picoclaw remains the
-// default until the exit criteria in the spec are met.
+// config.HarnessGanglion -- and by config.DefaultHarness, so an agent that
+// declares no harness lands here. internal/pico stays live and untouched:
+// picoclaw is still fully served for any agent that asks for it by name, it is
+// simply no longer what an omitted key means.
 //
 // This runner is markedly simpler than internal/pico, and the reason is worth
 // stating: there is no protocol translation. The harness serves SSE natively
