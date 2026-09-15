@@ -178,7 +178,7 @@ func TestPersonaBindsCoverTheGanglionMountDest(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "AGENT.md"), []byte("sou a eva"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "AGENT.md"), []byte("persona instructions"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
