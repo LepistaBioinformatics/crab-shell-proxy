@@ -119,7 +119,31 @@ type Job struct {
 	// what selects the sessions directory a run is written into, and deriving that
 	// from a string the member can influence is a worse idea than storing it.
 	Project string `json:"project,omitempty"`
+	// CreatedBy says who authored this task: CreatedByAgent when the agent asked
+	// for it and a member approved, empty for everything else.
+	//
+	// EMPTY MEANS THE MEMBER, and that is why the field is omitempty rather than
+	// defaulted to a string. Every record written before agent scheduling existed
+	// was typed by a member, so absence is not "unknown" -- it is the answer. A
+	// default of "member" would have had to be backfilled into files this process
+	// does not own the only copy of.
+	//
+	// Written by the proxy from what it established. The agent asks for a
+	// schedule and a message; it does not get to say who authored the result.
+	CreatedBy string `json:"createdBy,omitempty"`
+	// ApprovedBy is the account id of the member who allowed an agent-created
+	// task. Empty unless CreatedBy is CreatedByAgent.
+	//
+	// The pair is what makes the panel honest: a member looking at a task they
+	// never typed can see that they agreed to it, and when.
+	ApprovedBy string `json:"approvedBy,omitempty"`
 }
+
+// CreatedByAgent marks a task the agent asked for and a member approved.
+//
+// One constant rather than an enum of two, for the reason CreatedBy documents:
+// the other value is absence.
+const CreatedByAgent = "agent"
 
 type store struct {
 	Version int   `json:"version"`

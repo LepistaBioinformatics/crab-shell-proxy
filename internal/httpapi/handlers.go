@@ -314,6 +314,12 @@ type Server struct {
 	// one member cannot spend the instance's outbound budget while another waits.
 	probes *probeLimiter
 
+	// Approvals holds the tool calls blocked on a member's answer. Exported
+	// because approvals.go reads it from handlers on both sides of the same
+	// exchange -- the container's request and the member's reply -- and both are
+	// methods on this type.
+	Approvals *approvalStore
+
 	// heartbeatEvery overrides the SSE keep-alive cadence. Zero means
 	// heartbeatInterval, which is what production always uses -- this exists ONLY so
 	// a test can shorten a ten-second wait, and it is a FIELD rather than a package
@@ -334,6 +340,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.probes == nil {
 		s.probes = newProbeLimiter()
+	}
+	if s.Approvals == nil {
+		s.Approvals = newApprovalStore()
 	}
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/chat/cancel", s.handleChatCancel)
@@ -378,6 +387,13 @@ func (s *Server) Handler() http.Handler {
 	// is the scheduler for that harness, so it is also the only thing that can
 	// accept a schedule; picoclaw's own routes above stay read-only. See
 	// cron_write.go.
+	// ganglion-approval-endpoint: the answering half of the harness's approver
+	// port. The container's request is authenticated by a scoped token in the
+	// query (see approvals.go); the member's two routes authenticate the way
+	// every other member-facing route does.
+	mux.HandleFunc("POST /v1/approvals", s.handleApprovalRequest)
+	mux.HandleFunc("GET /v1/approvals/pending", s.handleApprovalsPending)
+	mux.HandleFunc("POST /v1/approvals/answer", s.handleApprovalsAnswer)
 	mux.HandleFunc("POST /v1/cron/tasks", s.handleCronTaskCreate)
 	mux.HandleFunc("PATCH /v1/cron/tasks", s.handleCronTaskUpdate)
 	mux.HandleFunc("DELETE /v1/cron/tasks", s.handleCronTaskDelete)
@@ -427,6 +443,10 @@ func (s *Server) Handler() http.Handler {
 					UserAccID: sc.UserAccID,
 				}, project)
 			},
+			// The agent's own scheduled tasks. Registered only when there is a
+			// store to write into: with no Schedules the three tools are not
+			// offered at all, rather than offered and refusing.
+			Schedules: agentScheduleStore(s),
 		}))
 	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via

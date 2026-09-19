@@ -37,8 +37,11 @@ variables, not as files — so read them from the environment and do not go look
 for a secrets directory. (The `shared-content` skill describes one; that part of it
 is about the other harness this platform runs.)
 
-There is no `cron/` either: your scheduled work is held outside this tree, where you
-cannot reach it.
+There is no `cron/` either. Your scheduled work is held outside this tree and you
+cannot read or write it as a file — but you can manage it through the
+`schedule_create`, `schedule_list` and `schedule_delete` tools, and the
+`scheduled-tasks` skill explains when to. The store staying out of reach is the
+point: creating one asks the member first, and a file you could write would not.
 
 **A project is a workspace of its own, beside this one, not inside it.** A turn in
 a project starts in that project's directory and cannot reach the main workspace or

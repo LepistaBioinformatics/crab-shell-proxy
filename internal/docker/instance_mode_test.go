@@ -22,7 +22,30 @@ func modeManager(t *testing.T, idle time.Duration) (*Manager, config.Agent, Work
 		},
 		keys: map[string]*keyState{},
 		logf: func(string, ...any) {},
+		// A DOCKER CLIENT, even though nothing here calls it.
+		//
+		// These tests arm real idle timers, and an armed timer's only act is to
+		// STOP a container -- through this field. With it nil the timer fired
+		// into a nil dereference, in a goroutine, killing the whole test binary.
+		//
+		// It never showed up locally because the package finishes in about five
+		// seconds and the timers are armed for a minute. It showed up inside the
+		// image build, where the package ran for ninety seconds under load: the
+		// timer came due while other tests were still running.
+		docker: newFakeDocker(),
 	}
+	// AND NO TIMER OUTLIVES ITS TEST. The line above fixes today's crash; this
+	// fixes the class, because the next test to build a manager here will arm
+	// one too and will not be thinking about what happens a minute later.
+	t.Cleanup(func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, ks := range m.keys {
+			ks.mu.Lock()
+			m.disarmLocked(ks)
+			ks.mu.Unlock()
+		}
+	})
 	key := WorkspaceKey{TenantID: "t", SubsAccID: "s", Role: "gamma", UserAccID: "u"}
 	if err := os.MkdirAll(config.UserWorkspace(root, key.TenantID, key.SubsAccID, key.Role, key.UserAccID), 0o755); err != nil {
 		t.Fatal(err)

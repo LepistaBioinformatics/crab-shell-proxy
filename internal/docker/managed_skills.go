@@ -33,6 +33,17 @@ const (
 	// template at all (manager.go skips it deliberately), so the managed tree is
 	// the only place a harness-specific default can come from.
 	managedGanglionRel = "skills/ganglion-workspace"
+
+	// managedScheduleRel tells the agent how to schedule work for itself: what a
+	// scheduled run is and is not, that the member approves each one, and the
+	// limits it will be refused by.
+	//
+	// GANGLION ONLY, and only when the schedule tools actually exist. The tools
+	// are registered on the MCP server, which is not registered at all without a
+	// token secret -- and a skill describing tools the model cannot see is worse
+	// than no skill: it will keep reaching for them and reading the refusal as
+	// something it did wrong.
+	managedScheduleRel = "skills/scheduled-tasks"
 	managedMemoryRel   = "memory/CONTEXT_RECOVERY.md"
 	// managedRoutingRel tells the agent WHICH memory to write to — the knowledge
 	// graph for facts, MEMORY.md for its own notes — and forbids claiming a save it
@@ -85,6 +96,11 @@ func managedContentBinds(managedBase, mountDest, harness string, memoryGraphEnab
 	rels := []string{managedSkillRel, managedSkillCreatorRel, managedMemoryRel, managedDeliveryRel}
 	if harness == config.HarnessGanglion {
 		rels = append(rels, managedGanglionRel)
+		// The schedule tools live on the MCP server, which does not exist
+		// without a secret to verify its tokens with.
+		if memoryGraphEnabled {
+			rels = append(rels, managedScheduleRel)
+		}
 	}
 	if memoryGraphEnabled {
 		rels = append(rels, managedRoutingRel)

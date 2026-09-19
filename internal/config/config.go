@@ -788,6 +788,25 @@ func SchedulesFile(root, tenantID, subsAccID, role, userAccID string) string {
 		".schedules.json")
 }
 
+// ApprovalsFile is the PROXY-OWNED record of answered approval requests,
+// UserWorkspace/.approvals.jsonl — beside .schedules.json and, like it, ABOVE
+// workspace/.
+//
+// Append-only, one JSON object per line. It answers "what did I approve", which
+// is a question a member can only ask later, about a decision they made in
+// seconds while a turn was blocked on them.
+//
+// Above the bind for the same reason the schedule store is: the agent asking for
+// permission must not be able to read back, or edit, the record of what it was
+// granted. A tampered record here would not grant anything by itself — the
+// decision is made live and never replayed from disk — but it is the only place
+// a member can audit the answers, and an auditable record the audited party can
+// rewrite is not one.
+func ApprovalsFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		".approvals.jsonl")
+}
+
 // SessionsDir is the path to a user's picoclaw session transcripts (used by
 // /v1/sessions/history), under UserWorkspace/<segment>/sessions.
 //
