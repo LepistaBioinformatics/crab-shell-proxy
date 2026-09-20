@@ -220,7 +220,59 @@ func ganglionCatalogKeys() ([]TemplateKey, error) {
 	for i := range keys {
 		keys[i].Value = nil
 	}
-	return keys, nil
+	return append(keys, ganglionTunableKeys()...), nil
+}
+
+// The harness's tuning numbers: what one turn may spend, and what it may spawn.
+//
+// THE GENERATOR DOES NOT EMIT THESE, and must not. crab-ganglion resolves the
+// turn's cap file-first -- agents.defaults.max_tool_iterations, then
+// GANGLION_MAX_ITERATIONS, then its own 12 -- so a key the generator wrote into
+// every rendered document would outrank the variable this proxy sets from
+// config.yaml's per-agent maxIterations, for every agent, whatever the operator
+// put there. The one lever an operator has today would stop working, silently,
+// and the symptom (an agent that stops mid-task) reads as a model problem rather
+// than as a configuration one.
+//
+// They are catalog rows instead. The apply verbs already accept any valid
+// non-managed dotted path, and the write already survives: for a ganglion
+// workspace WriteInstanceConfig records every changed leaf into
+// .ganglion-overlay.json and renderGanglionConfig merges it back on every ensure.
+// So the mechanism was complete and only the picker was blind -- an admin had to
+// know the path by heart and type it. Listing them is the whole change.
+//
+// ABSENT IS NOT ZERO for any of them: the harness reads each as a pointer, so an
+// unset key means "the binary's default" and a written 0 means zero. That is why
+// the rows carry no Value -- there is no default here to show, and claiming one
+// would be claiming a number this proxy does not own.
+//
+// The sub-agent block is spelled as crab-ganglion spells it
+// (internal/config/file.go, Subturn), which is picoclaw's spelling for the three
+// keys picoclaw also has. A key invented here would land in the overlay, survive
+// every render, and do nothing.
+func ganglionTunableKeys() []TemplateKey {
+	paths := []string{
+		"agents.defaults.max_tool_iterations",
+		"agents.defaults.subturn.max_depth",
+		"agents.defaults.subturn.max_concurrent",
+		"agents.defaults.subturn.max_children_per_turn",
+		"agents.defaults.subturn.max_child_iterations",
+		"agents.defaults.subturn.default_timeout_minutes",
+		"tools.subagent.enabled",
+	}
+	out := make([]TemplateKey, 0, len(paths))
+	for _, key := range paths {
+		out = append(out, TemplateKey{
+			Key: key,
+			// Computed, not asserted. These paths are not in ManagedConfigPaths
+			// today; if one is ever added, the row has to agree with the 400 the
+			// apply verb would return rather than keep offering it.
+			Managed: IsManagedConfigPath(key),
+			Harness: config.HarnessGanglion,
+			Tunable: true,
+		})
+	}
+	return out
 }
 
 // ganglionMCPBlock is the memory graph, as the ganglion reads it.
