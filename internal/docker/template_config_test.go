@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
 
 // A deliberately small template that still carries every leaf shape the
@@ -869,5 +870,68 @@ func TestGanglionCatalogReportsNoValues(t *testing.T) {
 	}
 	if strings.Contains(string(body), "ganglion.invalid") {
 		t.Errorf("encoded catalog leaks the exemplar's endpoint: %s", body)
+	}
+}
+
+// The tuning keys are OFFERED but not GENERATED, and the gap is the whole point.
+//
+// crab-ganglion resolves the turn's cap file-first, so a key the generator wrote
+// into every rendered document would outrank GANGLION_MAX_ITERATIONS — the
+// variable this proxy sets from config.yaml's per-agent maxIterations — for every
+// agent, and the operator's only lever would stop working with no error anywhere.
+// The catalog row is what makes the key discoverable; the generator's silence is
+// what keeps the variable meaningful until an admin actually writes one.
+func TestGanglionTuningKeysAreOfferedButNotGenerated(t *testing.T) {
+	keys, err := ganglionCatalogKeys()
+	if err != nil {
+		t.Fatalf("ganglionCatalogKeys: %v", err)
+	}
+
+	offered := map[string]TemplateKey{}
+	for _, k := range keys {
+		offered[k.Key] = k
+	}
+	for _, key := range []string{
+		"agents.defaults.max_tool_iterations",
+		"agents.defaults.subturn.max_depth",
+		"agents.defaults.subturn.max_concurrent",
+		"agents.defaults.subturn.max_children_per_turn",
+		"agents.defaults.subturn.max_child_iterations",
+		"agents.defaults.subturn.default_timeout_minutes",
+		"tools.subagent.enabled",
+	} {
+		k, ok := offered[key]
+		if !ok {
+			t.Errorf("%q not offered — an admin would have to type the path from memory", key)
+			continue
+		}
+		if !k.Tunable {
+			t.Errorf("%q tunable = false: the client would claim the generated document holds it", key)
+		}
+		if k.Managed {
+			t.Errorf("%q managed = true — the picker would offer a key the apply refuses", key)
+		}
+	}
+
+	// The other half, and the one that regresses silently. Read the generator's
+	// own output rather than the catalog, because the catalog is the generator's
+	// output PLUS these rows and could not tell the two apart.
+	raw, err := ganglionConfigDoc(
+		registry.Resolution{Primary: registry.Model{ModelName: "primary"}},
+		map[string]string{"brave": "x"}, "https://ganglion.invalid", "x")
+	if err != nil {
+		t.Fatalf("ganglionConfigDoc: %v", err)
+	}
+	doc, err := parseConfigObject(raw)
+	if err != nil {
+		t.Fatalf("parseConfigObject: %v", err)
+	}
+	for _, k := range keys {
+		if !k.Tunable {
+			continue
+		}
+		if _, state := lookupPath(doc, k.Key); state == pathFound {
+			t.Errorf("the generator emits %q: every rendered document would now outrank GANGLION_MAX_ITERATIONS", k.Key)
+		}
 	}
 }

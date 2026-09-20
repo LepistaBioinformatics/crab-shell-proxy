@@ -99,9 +99,6 @@ func TestInspectScopeConfigKeyRefusesABadKeyBeforeTouchingDisk(t *testing.T) {
 		{"empty", "", ErrInvalidConfigKey},
 		{"empty segment", "tools..web", ErrInvalidConfigKey},
 		{"traversal", "../etc/passwd", ErrInvalidConfigKey},
-		{"managed leaf", "channel_list.pico.enabled", ErrManagedConfigPath},
-		{"managed subtree", "model_list.deepseek-chat.api_keys", ErrManagedConfigPath},
-		{"prefix of a managed path", "agents", ErrManagedConfigPath},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := m.InspectScopeConfigKey(subsScope("alpha"), tc.key)
@@ -112,6 +109,102 @@ func TestInspectScopeConfigKeyRefusesABadKeyBeforeTouchingDisk(t *testing.T) {
 				t.Errorf("refused inspection returned %+v, want the zero value", got)
 			}
 		})
+	}
+}
+
+// A managed key INSPECTS, and says so. The histogram is the read-only preview of
+// what the proxy put in the members' documents; the flag is what stops a client
+// offering a write for it. Refusing the read instead left an admin opening each
+// instance's raw editor one at a time to see the same bytes.
+func TestInspectScopeConfigKeyPreviewsAManagedKey(t *testing.T) {
+	m, _, root := testManagerWithRegistry(t)
+	m.cfg.ContainerDataRoot = filepath.Join(root, "does-not-exist")
+
+	for _, key := range []string{
+		"channel_list.pico.enabled",
+		"model_list.deepseek-chat.api_keys",
+		// A PREFIX of a managed path. The apply refuses it because writing here
+		// would replace the subtree; reading it is still a legitimate question.
+		"agents",
+	} {
+		got, err := m.InspectScopeConfigKey(subsScope("alpha"), key)
+		if err != nil {
+			t.Fatalf("%q: err = %v, want an inspection", key, err)
+		}
+		if !got.Managed {
+			t.Errorf("%q: managed = false — a client would offer a write the apply refuses", key)
+		}
+		if got.Key != key {
+			t.Errorf("%q: key = %q", key, got.Key)
+		}
+		// And the write is still refused, by the guard that actually governs it.
+		_, err = m.ApplyScopeConfigKey(subsScope("alpha"),
+			ScopeConfigChange{Key: key, Value: json.RawMessage("true")})
+		if !errors.Is(err, ErrManagedConfigPath) {
+			t.Errorf("%q: apply err = %v, want %v", key, err, ErrManagedConfigPath)
+		}
+	}
+}
+
+// The preview must not become a way to read credentials. ReadInstanceConfig masks
+// model_list[*].api_keys and every tools.mcp.servers.*.headers value, and the
+// inspection buckets those already-masked bytes -- so a managed key that carries a
+// secret hands back the placeholder, never the token.
+func TestInspectScopeConfigKeyNeverServesACredential(t *testing.T) {
+	m, _, root := testManagerWithRegistry(t)
+	// BOTH model_list shapes, because redactModelKeys walks both and the one on disk
+	// is the array: materializeModels writes a list of entries, while the object form
+	// is what a legacy document carries. A test that proved only one would be proving
+	// the shape that is not at risk.
+	seedConfigWorkspace(t, root, wk("u1"), `{
+	  "model_list": [{"model_name": "a", "api_keys": ["sk-live-must-not-leak"]}],
+	  "tools": {"mcp": {"servers": {"memory": {
+	    "headers": {"Authorization": "Bearer must-not-leak"}
+	  }}}}
+	}`)
+	seedConfigWorkspace(t, root, wk("u2"), `{
+	  "model_list": {"deepseek-chat": {"api_keys": ["sk-live-must-not-leak"]}},
+	  "tools": {"mcp": {"servers": {"memory": {
+	    "headers": {"Authorization": "Bearer must-not-leak"}
+	  }}}}
+	}`)
+
+	// The leaves, and the ANCESTORS. IsManagedConfigPath refuses prefix-of, so
+	// relaxing the read opened "tools", "tools.mcp", "tools.mcp.servers" and
+	// "agents" as well -- each of which returns a whole subtree through an endpoint
+	// that used to 400 for all of them. The masking is document-wide, so it holds;
+	// nothing proved it for a subtree read until now.
+	for _, probe := range []string{
+		"model_list",
+		"tools.mcp.servers.memory",
+		"tools.mcp.servers",
+		"tools.mcp",
+		"tools",
+	} {
+		insp, err := m.InspectScopeConfigKey(subsScope("alpha"), probe)
+		if err != nil {
+			t.Fatalf("%q: %v", probe, err)
+		}
+		// EVERY value bucket, and there has to be at least one. Checking a single
+		// bucket would miss the second model_list shape, and asserting only the
+		// absence of the secret would pass just as well on an empty histogram --
+		// the one way this test could stop testing anything.
+		seen := 0
+		for _, b := range insp.Buckets {
+			if b.State != BucketValue {
+				continue
+			}
+			seen++
+			if strings.Contains(string(b.Value), "must-not-leak") {
+				t.Fatalf("%q: the inspection served a credential: %s", probe, b.Value)
+			}
+			if !strings.Contains(string(b.Value), maskPlaceholder) {
+				t.Fatalf("%q: no mask in the previewed value, so nothing was redacted: %s", probe, b.Value)
+			}
+		}
+		if seen == 0 {
+			t.Fatalf("%q: no value bucket, so nothing was actually read: %s", probe, mustJSON(t, insp.Buckets))
+		}
 	}
 }
 

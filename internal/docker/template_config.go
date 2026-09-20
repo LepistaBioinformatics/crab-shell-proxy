@@ -67,6 +67,23 @@ type TemplateKey struct {
 	// That the whole document is generated is a fact about the DOCUMENT, and it
 	// belongs beside the catalog rather than on every row of it.
 	Managed bool `json:"managed"`
+	// Tunable marks a key the catalog OFFERS although the document it was built
+	// from does not contain it.
+	//
+	// It exists because the ganglion's catalog is flattened from the generator's
+	// own output (ganglionCatalogKeys), and the generator deliberately does not
+	// emit the harness's tuning numbers -- the turn's iteration cap and the
+	// sub-agent fan-out budget. Emitting them would be the smaller change and the
+	// wrong one: the harness resolves max_tool_iterations FILE FIRST, so a
+	// generated key would permanently outrank GANGLION_MAX_ITERATIONS and silently
+	// re-cap every agent whose operator set that variable.
+	//
+	// So they are appended as suggestions instead, which is exactly what the
+	// catalog is (handleAdminScopeConfigKeys: "a suggestion list, not a
+	// whitelist"). The flag is what lets a client say the true thing about them:
+	// absent means the harness's own default is in force, and writing one takes
+	// effect when the workspace next starts, not on the current turn.
+	Tunable bool `json:"tunable,omitempty"`
 	// Harness names the runtime whose document this key came from.
 	//
 	// On the key and not only on the catalog. The two harnesses' documents share
