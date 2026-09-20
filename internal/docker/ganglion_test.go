@@ -855,3 +855,29 @@ func TestGanglionEnvOmitsTheApprovalEndpointWhenItCannotBeMinted(t *testing.T) {
 		t.Fatalf("a tool was gated with no approver to ask:\n%s", joined)
 	}
 }
+
+// The cap an operator sets, and the silence when they do not.
+//
+// Nothing set GANGLION_MAX_ITERATIONS before this, so every ganglion agent ran
+// on the harness's built-in twelve -- which is right for a chat turn and wrong
+// for research, where a web search spends a round trip per query and another per
+// page opened.
+func TestGanglionEnvCarriesTheIterationCapWhenOneIsSet(t *testing.T) {
+	joined := strings.Join(
+		ganglionEnv(&config.Config{GanglionPort: 18800},
+			config.Agent{MaxIterations: 150}, "t", "", nil), "\n")
+	if !strings.Contains(joined, "GANGLION_MAX_ITERATIONS=150") {
+		t.Fatalf("the operator's cap did not reach the container:\n%s", joined)
+	}
+}
+
+// Absent, not zero. The harness applies its own default to a zero field, but an
+// explicit GANGLION_MAX_ITERATIONS=0 would be an operator saying something they
+// did not say.
+func TestGanglionEnvOmitsTheIterationCapWhenUnset(t *testing.T) {
+	joined := strings.Join(
+		ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", "", nil), "\n")
+	if strings.Contains(joined, "GANGLION_MAX_ITERATIONS") {
+		t.Fatalf("a cap was set that nobody chose:\n%s", joined)
+	}
+}

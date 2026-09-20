@@ -471,6 +471,12 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token, approvalEndpoint
 			"GANGLION_GATED_TOOLS=schedule_create",
 		)
 	}
+	// The turn's iteration cap, when an operator set one. Absent means the
+	// harness keeps its own default, which is what every agent ran on before
+	// this existed.
+	if agent.MaxIterations > 0 {
+		env = append(env, fmt.Sprintf("GANGLION_MAX_ITERATIONS=%d", agent.MaxIterations))
+	}
 	// The lifecycle mode. The harness cannot observe whether its own container
 	// stops when idle, and it needs that for one decision: refusing a SCHEDULED
 	// evolution pass on a scale-to-zero agent, which would store an intention

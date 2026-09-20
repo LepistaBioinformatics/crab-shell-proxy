@@ -135,7 +135,28 @@ agents:
     # at 0.2s, so this is far more conservative than it needs to be -- in
     # practice the container stays up through a working session and stops
     # overnight. Lower it freely.
-    mode: "scale-to-zero" # or "continuous"
+    # CONTINUOUS FOR NOW, to exercise the approval path locally.
+    #
+    # Approval is synchronous: the agent asks, the turn blocks, and a member has
+    # about five minutes to answer before the harness denies. None of that needs
+    # a container that stays up -- the proxy wakes a stopped one to run the turn
+    # in the first place. What a stopped container makes awkward is WATCHING it:
+    # a cold start in the middle of reading logs is one more thing moving while
+    # you are trying to see what happened.
+    #
+    # Put it back to scale-to-zero when the poking is done. The ganglion's cold
+    # start was measured at 0.2s and the scheduler was designed around stopping,
+    # so this costs a running container for nothing once you are not watching.
+    mode: "continuous" # or "scale-to-zero"
+    # How many tool round trips one turn may take. The harness defaults to
+    # TWELVE, which is right for a chat turn and wrong for research: a web
+    # search costs a round trip per query and another per page opened, so a
+    # scheduled task that reads three sources spends its whole budget before it
+    # writes anything -- and ends with "iteration cap reached before the agent
+    # finished", which reads as a failure of the task rather than of the cap.
+    #
+    # Remove the line to go back to the harness's own default.
+    maxIterations: 150
     idleTimeout: 30s
     # Pin the picoclaw provider/model and take the API key from the environment.
     # The proxy enables the pico channel, sets provider/model, and writes the key
