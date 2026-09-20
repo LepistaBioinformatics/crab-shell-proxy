@@ -390,15 +390,23 @@ func TestWriteInstanceConfigPinsContextManager(t *testing.T) {
 	}
 }
 
-// The bulk editor refuses the key outright rather than letting the admin fan an
-// edit out and discover afterwards that it did not stick. Both halves are
-// checked: the histogram an admin reads BEFORE deciding, and the apply.
-func TestScopeConfigKeyRefusesContextManager(t *testing.T) {
+// The bulk editor refuses the WRITE outright rather than letting the admin fan an
+// edit out and discover afterwards that it did not stick.
+//
+// The histogram is served, and flagged. An admin deciding what to do about
+// context_manager is better off seeing what their members hold than being told
+// the question cannot be asked -- the flag is what keeps the screen from offering
+// a write on the back of it, and the apply refuses independently either way.
+func TestScopeConfigKeyRefusesWritingContextManager(t *testing.T) {
 	m, _, _, _ := instanceConfigFixture(t, validConfigBody)
 	scope := Scope{Kind: ScopeSubscription, TenantID: "t1", SubsAccID: "s1", AgentKey: "alpha"}
 
-	if _, err := m.InspectScopeConfigKey(scope, "agents.defaults.context_manager"); !errors.Is(err, ErrManagedConfigPath) {
-		t.Errorf("InspectScopeConfigKey err = %v, want ErrManagedConfigPath", err)
+	insp, err := m.InspectScopeConfigKey(scope, "agents.defaults.context_manager")
+	if err != nil {
+		t.Errorf("InspectScopeConfigKey err = %v, want the read-only preview", err)
+	}
+	if !insp.Managed {
+		t.Error("the preview did not say the key is managed, so a client would offer the write")
 	}
 	if _, err := m.ApplyScopeConfigKey(scope, ScopeConfigChange{
 		Key: "agents.defaults.context_manager", Value: json.RawMessage(`"seahorse"`),

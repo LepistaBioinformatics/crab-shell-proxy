@@ -86,21 +86,45 @@ type ScopeConfigInspection struct {
 	Agent   string            `json:"agent"`
 	Total   int               `json:"total"`
 	Buckets []ConfigKeyBucket `json:"buckets"`
+	// Managed says the apply would refuse this key, so the histogram beside it is
+	// a PREVIEW and not a thing to act on.
+	//
+	// Answered here rather than left to the client, which would have to infer it
+	// from a catalog the key need not be in: a managed path can be typed by hand,
+	// and a client that guessed "not in the catalog, therefore editable" would
+	// offer a write the proxy can only 400. IsManagedConfigPath is the same
+	// function ApplyScopeConfigKey refuses with, so the flag and the refusal
+	// cannot drift.
+	Managed bool `json:"managed"`
 }
 
 // InspectScopeConfigKey reports the distribution of one key across the scope's
 // instances of one agent.
 //
-// The key is validated and refused BEFORE any filesystem access: a caller that
-// asked about a managed path needs to be told the edit could not survive, not
-// handed a histogram it will act on.
+// A MANAGED KEY IS INSPECTED, NOT REFUSED, and that is a change from how this
+// started. The refusal used to sit here on the reasoning that a caller asking
+// about a managed path needs to be told the edit could not survive rather than
+// handed a histogram it will act on. Both halves of that turned out to be wrong:
+// the telling is what the Managed flag now does, in the same response, and an
+// admin who cannot see what the proxy put in their members' documents has to open
+// each instance's raw editor one at a time to find out -- which serves the same
+// bytes to the same authority, one member per request. Refusing here hid nothing;
+// it only made the reading slower.
+//
+// What keeps that safe is not this function. ReadInstanceConfig masks
+// model_list[*].api_keys and every tools.mcp.servers.*.headers value before
+// returning, so the bytes bucketed below have already lost their credentials --
+// the two managed families that carry one. A key whose value reached here
+// unmasked would be a hole in that read path, not in this one, which is where the
+// test for it belongs too.
+//
+// The write is refused independently, in ApplyScopeConfigKey, against the same
+// IsManagedConfigPath. Nothing about editing is relaxed here.
 func (m *Manager) InspectScopeConfigKey(scope Scope, key string) (ScopeConfigInspection, error) {
 	if err := ValidateConfigKey(key); err != nil {
 		return ScopeConfigInspection{}, fmt.Errorf("inspect config key: %w", err)
 	}
-	if IsManagedConfigPath(key) {
-		return ScopeConfigInspection{}, fmt.Errorf("%w: %q", ErrManagedConfigPath, key)
-	}
+	managed := IsManagedConfigPath(key)
 
 	emails := m.scopeInstanceEmails(scope)
 
@@ -194,7 +218,7 @@ func (m *Manager) InspectScopeConfigKey(scope Scope, key string) (ScopeConfigIns
 	}
 
 	return ScopeConfigInspection{
-		Key: key, Agent: scope.AgentKey, Total: len(keys), Buckets: buckets,
+		Key: key, Agent: scope.AgentKey, Total: len(keys), Buckets: buckets, Managed: managed,
 	}, nil
 }
 
