@@ -81,20 +81,37 @@ func (r *SDKResolver) Resolve(header string) (Identity, bool) {
 // principalEmail returns the principal owner's email (or the first owner's), or
 // "" — parity with server.js's owners.find(isPrincipal) || owners[0].
 func principalEmail(owners []mycelium.Owner) string {
-	var chosen *mycelium.Owner
-	for i := range owners {
-		if owners[i].IsPrincipal {
-			chosen = &owners[i]
-			break
-		}
-	}
-	if chosen == nil && len(owners) > 0 {
-		chosen = &owners[0]
-	}
-	if chosen == nil {
+	o, ok := principalOwner(owners)
+	if !ok {
 		return ""
 	}
-	return chosen.Email
+	return o.Email
+}
+
+// principalOwner picks the owner an account is represented by: the one flagged
+// principal, else the first.
+func principalOwner(owners []mycelium.Owner) (mycelium.Owner, bool) {
+	for i := range owners {
+		if owners[i].IsPrincipal {
+			return owners[i], true
+		}
+	}
+	if len(owners) > 0 {
+		return owners[0], true
+	}
+	return mycelium.Owner{}, false
+}
+
+// PrincipalOwner returns the owner this identity represents.
+//
+// Exported because the email is no longer the only field a caller needs: the
+// profile has carried the member's NAME all along, and the proxy dropped it one
+// frame below the handler on every turn.
+func (i Identity) PrincipalOwner() (mycelium.Owner, bool) {
+	if i.Profile == nil {
+		return mycelium.Owner{}, false
+	}
+	return principalOwner(i.Profile.Owners)
 }
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
