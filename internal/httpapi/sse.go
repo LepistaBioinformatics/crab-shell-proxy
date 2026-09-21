@@ -77,7 +77,7 @@ func streamingModeFor(agent config.Agent) string {
 // on Docker. Once headers are sent the HTTP status can no longer change, so a
 // cold-start or turn failure is surfaced by closing the stream cleanly (a
 // [DONE] with no content) and logging — same as server.js.
-func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, ownerEmail, sessionKey, userContent, model, id, project string, steering bool) {
+func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config.Agent, key docker.WorkspaceKey, owner docker.Owner, sessionKey, userContent, model, id, project string, steering bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, errBody("streaming unsupported"))
@@ -324,7 +324,10 @@ func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, agent config
 		}
 	}()
 
-	tgt, err := s.Mgr.EnsureRunning(turnCtx, agent, key, ownerEmail)
+	tgt, err := s.Mgr.EnsureRunning(turnCtx, agent, key, owner.Email)
+	if err == nil {
+		s.seedSignedInUser(agent, key, owner)
+	}
 	if err != nil {
 		s.logf("stream: ensure running failed: %v", err)
 		stopHeartbeat()

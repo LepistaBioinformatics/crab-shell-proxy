@@ -282,6 +282,13 @@ func (s *Server) runScheduledTurn(
 	ctx context.Context, ref scheduleRef, job cron.Job, sessionID string,
 ) (status, message string) {
 	tgt, err := s.Mgr.EnsureRunning(ctx, ref.Agent, ref.Key, ref.Email)
+	if err == nil {
+		// FR-3. A scheduled turn carries an e-mail and no profile, so it writes
+		// what it has -- a document naming the account with no name on it is
+		// still more than the agent had, and the next interactive turn fills the
+		// name in.
+		s.seedSignedInUser(ref.Agent, ref.Key, docker.Owner{Email: ref.Email})
+	}
 	if err != nil {
 		return cron.StatusError, err.Error()
 	}

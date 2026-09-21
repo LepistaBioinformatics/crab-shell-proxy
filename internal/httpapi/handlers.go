@@ -37,6 +37,12 @@ import (
 // handlers need (satisfied by *docker.Manager).
 type Orchestrator interface {
 	EnsureRunning(ctx context.Context, agent config.Agent, key docker.WorkspaceKey, ownerEmail string) (docker.Target, error)
+	// SeedSignedInUser records who the workspace is running for, in the memory
+	// both harnesses read every turn. Separate from EnsureRunning rather than a
+	// wider parameter on it: reconcile restarts containers with no caller and
+	// must NOT write, and a method the restart path simply does not call says
+	// that at the call site instead of as a condition inside the writer.
+	SeedSignedInUser(key docker.WorkspaceKey, harness string, o docker.Owner) error
 	ArmIdle(agent config.Agent, key docker.WorkspaceKey)
 
 	// --- per-instance lifecycle mode ---
@@ -763,6 +769,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		folded = s.turns.Active(scopeOf(key), req.SessionID)
 		defer s.turns.Begin(scopeOf(key), req.SessionID)()
 	}
+	// FR-1. Before the branch, so the streaming and synchronous paths cannot
+	// disagree about it -- they are the same turn and only one of them is used
+	// by the webapp, which is how a difference here would go unnoticed.
+	owner := docker.OwnerFrom(ident)
 	userContent := lastUserContent(req.Messages)
 	model := req.Model
 	if model == "" {
@@ -771,7 +781,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	id := "chatcmpl-" + randomHex(12)
 
 	if req.Stream {
-		s.streamTurn(w, r, agent, key, ident.Email, sessionKey, userContent, model, id, req.Project, folded)
+		s.streamTurn(w, r, agent, key, owner, sessionKey, userContent, model, id, req.Project, folded)
 		return
 	}
 	// The synchronous path gets a log line and nothing else. Its response shape is
@@ -786,6 +796,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	turnCtx, cancel := context.WithTimeout(context.Background(), turnTimeout)
 	defer cancel()
 	tgt, err := s.Mgr.EnsureRunning(turnCtx, agent, key, ident.Email)
+	if err == nil {
+		s.seedSignedInUser(agent, key, owner)
+	}
 	if err != nil {
 		s.logf("ensure running failed: %v", err)
 		writeJSON(w, http.StatusBadGateway, errBody(err.Error()))
@@ -1781,4 +1794,30 @@ func (s *Server) handleTurnsRunning(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"turns": out})
+}
+
+// seedSignedInUser records who is talking, and never fails a turn over it.
+//
+// AFTER EnsureRunning, always: that is what creates the workspace and its memory
+// directory on a first-ever turn, and a seed before it would either fail or have
+// to create a workspace for a container that then does not start.
+//
+// A failure is logged and dropped. The member's answer is worth more than the
+// note about who asked for it, and a workspace whose memory cannot be written is
+// one this turn is about to fail on anyway, with a better message than this.
+func (s *Server) seedSignedInUser(agent config.Agent, key docker.WorkspaceKey, o docker.Owner) {
+	if o.Empty() {
+		// SAID, not silently skipped. A profile with no owners at all resolves to
+		// an empty e-mail (principalEmail returns "") and a staff profile can pass
+		// the authorization chain carrying one -- and the symptom, "the agent does
+		// not know who I am", is the same one a failed write produces. This is the
+		// only cause nothing else on this path would report.
+		s.logf("no signed-in account to record for %s/%s/%s/%s: the profile carried no owner",
+			key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+		return
+	}
+	if err := s.Mgr.SeedSignedInUser(key, agent.Harness, o); err != nil {
+		s.logf("could not record the signed-in account for %s/%s/%s/%s: %v",
+			key.TenantID, key.SubsAccID, key.Role, key.UserAccID, err)
+	}
 }

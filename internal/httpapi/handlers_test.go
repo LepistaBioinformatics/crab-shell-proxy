@@ -45,6 +45,10 @@ type fakeOrch struct {
 	scaffolded map[string]bool
 	keys       []docker.WorkspaceKey
 
+	// signed-in-identity: every owner the server asked to record, in order.
+	seeded  []docker.Owner
+	seedErr error
+
 	// harness-sphere-integration: canned inventory + failure injection.
 	instances    []docker.Instance
 	instancesErr error
@@ -507,6 +511,13 @@ func (f *fakeOrch) EnsureRunning(_ context.Context, _ config.Agent, key docker.W
 	}
 	f.keys = append(f.keys, key)
 	return docker.Target{Name: "picoclaw-alpha-h", Endpoint: "ws://x:1/pico/ws", AuthToken: "t"}, nil
+}
+func (f *fakeOrch) SeedSignedInUser(_ docker.WorkspaceKey, _ string, o docker.Owner) error {
+	if f.seedErr != nil {
+		return f.seedErr
+	}
+	f.seeded = append(f.seeded, o)
+	return nil
 }
 func (f *fakeOrch) ArmIdle(config.Agent, docker.WorkspaceKey) { f.armed++ }
 
