@@ -22,6 +22,19 @@ import (
 // is two thirds of what a conversation renders.
 const KindStep = "step"
 
+// KindCompact marks the harness's record that it shortened the context window.
+//
+// NOT a step, although it arrives in the same shape as one -- an events-only
+// assistant entry. A step is work the agent did inside a turn; this is
+// something that happened TO the conversation. Filing it under "ran three
+// tools" would collapse it into a run of narration and hide the only entry in
+// a transcript that is not about the agent at all.
+const KindCompact = "compaction"
+
+// EventCompact is the harness's event kind for that record
+// (crab-ganglion-harness internal/domain, EventCompact).
+const EventCompact = "compact"
+
 // Message is one conversational turn returned to the client.
 type Message struct {
 	Role      string `json:"role"`
@@ -60,6 +73,11 @@ type Event struct {
 	Arguments string `json:"arguments,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	// Count is how many of something the event is about -- for EventCompact,
+	// the messages compaction dropped. A number rather than a sentence for the
+	// reason the rest of this struct is codes: the harness has no locale, so
+	// the client renders "N earlier messages" in the member's own language.
+	Count int `json:"count,omitempty"`
 }
 
 // metaFile mirrors the subset of a *.meta.json we match on. picoclaw derives
@@ -611,6 +629,14 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 			// content, and this has none by construction.
 			m.Kind = KindStep
 		}
+		// LAST, so it wins. A compaction record is an events-only assistant
+		// entry and was marked narration by the branch above -- but a step is
+		// work the agent did INSIDE a turn, and filing "the conversation was
+		// shortened" under "ran three tools" hides the one thing here that is
+		// not about the agent at all.
+		if e.Role == "assistant" && hasCompact(m.Events) {
+			m.Kind = KindCompact
+		}
 		messages = append(messages, m)
 		// Held, not applied. A frame that already carries real events needs no
 		// stand-in for them.
@@ -734,4 +760,14 @@ func callEvents(e jsonlEntry) []Event {
 		out = append(out, Event{Kind: "tool", Name: name, Arguments: c.Function.Arguments})
 	}
 	return out
+}
+
+// hasCompact reports whether an entry is the harness's compaction record.
+func hasCompact(events []Event) bool {
+	for _, e := range events {
+		if e.Kind == EventCompact {
+			return true
+		}
+	}
+	return false
 }

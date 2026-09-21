@@ -167,3 +167,55 @@ func TestRead_TheStandInAppliesPerTurn(t *testing.T) {
 		t.Errorf("the newer turn = %+v, want its one recorded call", after)
 	}
 }
+
+// THE RECORD THE MEMBER IS OWED. Compaction shortens the context behind their
+// back; this is the entry that says so, and it arrives in the same shape as a
+// step -- an events-only assistant entry -- so the two have to be told apart
+// here rather than downstream.
+func TestRead_ACompactionRecordIsServedAsItsOwnKind(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"oi"}
+{"role":"assistant","content":"","events":[{"kind":"compact","count":12,"detail":"[12 earlier messages are not in this window; the full transcript is preserved]"}]}
+{"role":"assistant","content":"pronto"}
+`)
+	if len(msgs) != 3 {
+		t.Fatalf("got %d messages, want the question, the compaction and the answer: %+v", len(msgs), msgs)
+	}
+	mark := msgs[1]
+	if mark.Kind != KindCompact {
+		t.Errorf("kind = %q, want %q: it is not work the agent did inside the turn", mark.Kind, KindCompact)
+	}
+	if len(mark.Events) != 1 || mark.Events[0].Count != 12 {
+		t.Errorf("events = %+v, want the count the client renders", mark.Events)
+	}
+	if mark.Events[0].Detail == "" {
+		t.Error("the record carries no summary, which is the whole of what was kept")
+	}
+}
+
+// An events-only entry that is NOT a compaction record is still narration. The
+// two share a shape, and getting this backwards would file every silent tool
+// call as a shortening of the conversation.
+func TestRead_AnOrdinaryEventsEntryIsStillAStep(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"oi"}
+{"role":"assistant","content":"","events":[{"kind":"tool","name":"sh","status":"ok"}]}
+`)
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages: %+v", len(msgs), msgs)
+	}
+	if msgs[1].Kind != KindStep {
+		t.Errorf("kind = %q, want %q", msgs[1].Kind, KindStep)
+	}
+}
+
+// Every transcript written before the harness recorded compaction has no such
+// entry, and must be served exactly as it was.
+func TestRead_ATranscriptWithNoCompactionIsUnchanged(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"oi"}
+{"role":"assistant","content":"pronto"}
+`)
+	for _, m := range msgs {
+		if m.Kind == KindCompact {
+			t.Errorf("a transcript with no compaction served one: %+v", m)
+		}
+	}
+}
