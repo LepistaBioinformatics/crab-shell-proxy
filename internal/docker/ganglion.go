@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mcptoken"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 )
@@ -378,7 +380,41 @@ func provisionGanglion(userDir, user string) (string, error) {
 // which matters more here than usual, because this is the only place the
 // harness's configuration contract is expressed and a typo in a variable name
 // fails as "the harness would not boot", with nothing naming the cause.
-func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets []string) []string {
+// approvalRoutePath is where the proxy answers the harness's approver port.
+// Beside MCPRoutePath, and reached the same way: the base URL an operator
+// configured, plus a scoped token the proxy minted.
+const approvalRoutePath = "/v1/approvals"
+
+// ganglionApprovalEndpoint is the URL the harness asks for permission at, or ""
+// when this deployment cannot mint the scoped token it needs.
+//
+// THE SCOPE TRAVELS IN THE QUERY, and that is not a shortcut. The harness sends
+// GANGLION_TOKEN as the bearer -- a per-user random string this proxy minted,
+// which names a container but not the workspace behind it, and the proxy keeps
+// no reverse index. The same mcptoken the MCP route already verifies carries
+// tenant/subscription/role/user under a MAC, so verifying it yields the scope
+// with no lookup and nothing the container chose.
+//
+// This whole variable lives in the container's environment, which the shell
+// tool's env scrub hides and Landlock's /proc denial keeps it from reading back
+// -- the same protection GANGLION_API_KEY has.
+//
+// Empty when there is no secret to mint with: an endpoint that would answer 401
+// to every request turns every gated tool into a refusal nobody can explain. The
+// harness treats an unset endpoint as "no approver", which is the honest state.
+func (m *Manager) ganglionApprovalEndpoint(key WorkspaceKey) (string, error) {
+	token, err := m.memoryGraphTokenFor(key, "")
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", nil
+	}
+	return strings.TrimRight(m.cfg.MCPBaseURL, "/") + approvalRoutePath +
+		"?" + mcptoken.QueryParam + "=" + url.QueryEscape(token), nil
+}
+
+func ganglionEnv(cfg *config.Config, agent config.Agent, token, approvalEndpoint string, secrets []string) []string {
 	env := []string{
 		fmt.Sprintf("GANGLION_ADDR=0.0.0.0:%d", cfg.GanglionPort),
 		"GANGLION_DATA_DIR=" + ganglionMountDest,
@@ -412,6 +448,35 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token string, secrets [
 	// The admin's shared skills root. The agent's own <workspace>/skills is
 	// found without being told, so this names only the half the proxy owns.
 	env = append(env, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest)
+	// The approver. Setting this is what turns "this tool requires approval"
+	// from a sentence into a gate -- with no endpoint the harness installs an
+	// allow-all approver and short-circuits before it builds a request body.
+	//
+	// AND THE GATE LIST WITH IT, IN ONE PLACE. schedule_create is the tool that
+	// needs asking: it writes a standing instruction to wake this container and
+	// run a turn nobody is watching. The two variables travel together because
+	// they are useless apart -- an endpoint with an empty list asks about
+	// nothing, and a list with no endpoint is a list the harness never reads.
+	//
+	// The same condition governs both, and it is not a coincidence: no MCP token
+	// secret means no MCP server, which means no schedule_create to gate and no
+	// scoped token to reach the approver with.
+	//
+	// The proxy refuses an unapproved create on its own side too (see
+	// httpapi/approvals.go). That check is what holds if this line is ever wrong;
+	// this line is what makes the feature work at all.
+	if approvalEndpoint != "" {
+		env = append(env,
+			"GANGLION_APPROVAL_ENDPOINT="+approvalEndpoint,
+			"GANGLION_GATED_TOOLS=schedule_create",
+		)
+	}
+	// The turn's iteration cap, when an operator set one. Absent means the
+	// harness keeps its own default, which is what every agent ran on before
+	// this existed.
+	if agent.MaxIterations > 0 {
+		env = append(env, fmt.Sprintf("GANGLION_MAX_ITERATIONS=%d", agent.MaxIterations))
+	}
 	// The lifecycle mode. The harness cannot observe whether its own container
 	// stops when idle, and it needs that for one decision: refusing a SCHEDULED
 	// evolution pass on a scale-to-zero agent, which would store an intention
@@ -834,13 +899,18 @@ func (m *Manager) createGanglion(ctx context.Context, agent config.Agent, key Wo
 		return fmt.Errorf("agent %q: no ganglion image configured", agent.Key)
 	}
 
+	approvalEndpoint, err := m.ganglionApprovalEndpoint(key)
+	if err != nil {
+		return err
+	}
+
 	spec := CreateSpec{
 		Name:  name,
 		Image: image,
 		// Same uid the proxy already chowns per-user volumes to. Unlike Hermes,
 		// there is no s6 setuidgid step to break by setting this.
 		User: m.cfg.PicoclawUser,
-		Env:  ganglionEnv(m.cfg, agent, token, secrets),
+		Env:  ganglionEnv(m.cfg, agent, token, approvalEndpoint, secrets),
 		Labels: map[string]string{
 			LabelManaged:      "true",
 			LabelAgent:        key.Role,

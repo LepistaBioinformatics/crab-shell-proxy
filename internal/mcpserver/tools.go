@@ -377,6 +377,98 @@ func (s *server) registerTools(srv *mcp.Server) {
 	}, tool(s, func(sc memgraph.Scope, in recentChangesIn) (any, error) {
 		return s.store.GetRecentChanges(sc, in.Hours)
 	}))
+
+	s.registerScheduleTools(srv)
+}
+
+// registerScheduleTools adds the scheduled-task surface, when this deployment
+// has one.
+//
+// NOT REGISTERED AT ALL when Schedules is nil, rather than registered and
+// refusing. A tool the model can see but never use is a tool it will keep
+// trying, and the refusal it gets back says nothing it can act on.
+//
+// Names are prefixed `schedule_` so they cannot collide with a memory-graph
+// tool: the harness refuses a name collision at boot, and a container that
+// stops starting the moment an operator turns something on is the worst shape a
+// failure can have.
+func (s *server) registerScheduleTools(srv *mcp.Server) {
+	if s.schedules == nil {
+		return
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "schedule_create",
+		// The description is what the model reads when deciding whether to call
+		// this, so it names the two things that surprise: the member has to
+		// agree, and a run reaches nobody.
+		Description: "Schedule a message to be replayed to you as an ordinary turn, later or " +
+			"repeatedly. The member must approve each one before it is created, so ask only " +
+			"when they have asked for something recurring. A scheduled run is delivered to " +
+			"nobody: it does not appear in any conversation, and the member reads it in the " +
+			"Tasks panel. Removing a task you no longer need does not require approval.",
+		InputSchema: object(map[string]*jsonschema.Schema{
+			"message": str("What you will be asked to do when it fires, written as an instruction to yourself"),
+			"kind":    str(`When it fires: "cron" for a 5-field expression, "every" for an interval, "at" for one time only`),
+			"expr":    str(`A 5-field cron expression, for kind "cron" (example: "0 7 * * 1")`),
+			"everyMs": numWithDefault(`Interval in milliseconds, for kind "every"`, 0),
+			"atMs":    numWithDefault(`Unix epoch milliseconds, for kind "at". Must be in the future`, 0),
+			"tz":      str(`IANA timezone for kind "cron" (example: "America/Sao_Paulo"). UTC when omitted`),
+			"name":    str("A short label the member will see. Taken from the message when omitted"),
+			"deleteAfterRun": {
+				Type:        "boolean",
+				Description: "Remove the task once it has run. Usually true for a one-off",
+			},
+		}, "message", "kind"),
+	}, tool(s, func(sc memgraph.Scope, in scheduleCreateIn) (any, error) {
+		return s.schedules.CreateSchedule(sc, ScheduleInput{
+			Name:           in.Name,
+			Message:        in.Message,
+			Kind:           in.Kind,
+			Expr:           in.Expr,
+			EveryMs:        int64(in.EveryMs),
+			AtMs:           int64(in.AtMs),
+			TZ:             in.TZ,
+			DeleteAfterRun: in.DeleteAfterRun,
+		})
+	}))
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "schedule_list",
+		Description: "List the scheduled tasks in this workspace, with when each next runs and " +
+			"how the last run ended.",
+		InputSchema: object(map[string]*jsonschema.Schema{}),
+	}, tool(s, func(sc memgraph.Scope, _ scheduleListIn) (any, error) {
+		return s.schedules.ListSchedules(sc)
+	}))
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "schedule_delete",
+		Description: "Remove a scheduled task by id. Its past run transcripts are kept. " +
+			"Use schedule_list to find the id.",
+		InputSchema: object(map[string]*jsonschema.Schema{
+			"id": str("The task's id, as schedule_list reports it"),
+		}, "id"),
+	}, tool(s, func(sc memgraph.Scope, in scheduleDeleteIn) (any, error) {
+		return s.schedules.DeleteSchedule(sc, in.ID)
+	}))
+}
+
+type scheduleCreateIn struct {
+	Name           string  `json:"name"`
+	Message        string  `json:"message"`
+	Kind           string  `json:"kind"`
+	Expr           string  `json:"expr"`
+	EveryMs        float64 `json:"everyMs"`
+	AtMs           float64 `json:"atMs"`
+	TZ             string  `json:"tz"`
+	DeleteAfterRun bool    `json:"deleteAfterRun"`
+}
+
+type scheduleListIn struct{}
+
+type scheduleDeleteIn struct {
+	ID string `json:"id"`
 }
 
 func toRelations(in []relationIn) []memgraph.Relation {

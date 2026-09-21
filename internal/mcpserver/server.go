@@ -46,6 +46,49 @@ type Deps struct {
 	// no caller can select a project, and a call that tries is refused rather
 	// than quietly served the member's global graph.
 	OwnsProject func(memgraph.Scope, string) (bool, error)
+	// Schedules lets an agent manage its own scheduled tasks.
+	//
+	// OPTIONAL, and nil is a real configuration: the three schedule tools are
+	// then not registered at all. Absent rather than present-and-refusing, the
+	// same rule the harness applies to its own tools -- a tool the model can see
+	// but never use is a tool it will keep trying.
+	//
+	// The interface is here rather than a concrete type because the store, its
+	// bounds and its provenance all live beside the member-facing write route,
+	// and this package must not reach into that one.
+	Schedules ScheduleStore
+}
+
+// ScheduleStore is the scheduled-task surface an agent may reach.
+//
+// CREATE, LIST AND REMOVE — no edit. An edit is how a task a member approved
+// becomes a different task without a second approval, so the shape of this
+// interface is itself part of the control.
+//
+// Every method takes the scope the token carried. None takes a tenant,
+// subscription, role or user argument, for the reason the package header gives:
+// a caller cannot be allowed to name a workspace.
+type ScheduleStore interface {
+	// CreateSchedule files a new task. The implementation applies the bounds and
+	// records who authored it; this package only carries the request.
+	CreateSchedule(sc memgraph.Scope, in ScheduleInput) (any, error)
+	// ListSchedules returns this workspace's tasks.
+	ListSchedules(sc memgraph.Scope) (any, error)
+	// DeleteSchedule removes one by id, refusing an id from another workspace.
+	DeleteSchedule(sc memgraph.Scope, id string) (any, error)
+}
+
+// ScheduleInput is what the agent asks for. Deliberately narrower than the
+// member-facing request body: no id, no enabled flag, no project.
+type ScheduleInput struct {
+	Name           string
+	Message        string
+	Kind           string
+	Expr           string
+	EveryMs        int64
+	AtMs           int64
+	TZ             string
+	DeleteAfterRun bool
 }
 
 // ProjectHeader is how a caller says which of its own projects a call belongs to.
@@ -82,6 +125,7 @@ type server struct {
 	logf        func(string, ...any)
 	sourceFor   func(memgraph.Scope) (string, bool)
 	ownsProject func(memgraph.Scope, string) (bool, error)
+	schedules   ScheduleStore
 }
 
 // source resolves the conversation to record on a write, or "" when it cannot be
@@ -117,7 +161,7 @@ func NewHandler(d Deps) http.Handler {
 		d.Logf = func(string, ...any) {}
 	}
 	s := &server{store: d.Store, secret: d.Secret, logf: d.Logf,
-		sourceFor: d.SourceFor, ownsProject: d.OwnsProject}
+		sourceFor: d.SourceFor, ownsProject: d.OwnsProject, schedules: d.Schedules}
 
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,

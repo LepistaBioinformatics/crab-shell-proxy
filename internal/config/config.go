@@ -154,6 +154,26 @@ type Agent struct {
 	Mode Mode `yaml:"mode"`
 	// IdleTimeout is the scale-to-zero inactivity window (ignored when continuous).
 	IdleTimeout Duration `yaml:"idleTimeout"`
+
+	// MaxIterations caps how many tool round trips one turn may take, for a
+	// ganglion agent. Zero leaves the harness's own default in force.
+	//
+	// WHY THIS IS HERE AT ALL. The harness has read GANGLION_MAX_ITERATIONS
+	// since it shipped, and nothing ever set it -- so every agent ran on the
+	// built-in twelve unless a member's config file happened to carry
+	// `agents.defaults.max_tool_iterations`, which is picoclaw's key and is not
+	// written by anything here. A workspace that lost that file silently dropped
+	// from a hundred and fifty to twelve, and the only symptom was turns ending
+	// early with "iteration cap reached before the agent finished".
+	//
+	// Twelve is the right default for a chat turn and the wrong one for research:
+	// a web search is a round trip per query and another per page opened, so a
+	// scheduled task that reads three sources spends its whole budget before it
+	// writes anything.
+	//
+	// Per agent rather than per member: the cap bounds what one turn may spend,
+	// which is an operator's decision about cost, not a member's preference.
+	MaxIterations int `yaml:"maxIterations"`
 	// StartupDeadline optionally overrides the global StartupDeadline for this
 	// agent's cold-start health-wait, for an agent whose image takes unusually long
 	// to serve its port. Safe to raise well past mycelium's 60s gatewayTimeout
@@ -786,6 +806,25 @@ func ProjectsFile(root, tenantID, subsAccID, role, userAccID string) string {
 func SchedulesFile(root, tenantID, subsAccID, role, userAccID string) string {
 	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
 		".schedules.json")
+}
+
+// ApprovalsFile is the PROXY-OWNED record of answered approval requests,
+// UserWorkspace/.approvals.jsonl — beside .schedules.json and, like it, ABOVE
+// workspace/.
+//
+// Append-only, one JSON object per line. It answers "what did I approve", which
+// is a question a member can only ask later, about a decision they made in
+// seconds while a turn was blocked on them.
+//
+// Above the bind for the same reason the schedule store is: the agent asking for
+// permission must not be able to read back, or edit, the record of what it was
+// granted. A tampered record here would not grant anything by itself — the
+// decision is made live and never replayed from disk — but it is the only place
+// a member can audit the answers, and an auditable record the audited party can
+// rewrite is not one.
+func ApprovalsFile(root, tenantID, subsAccID, role, userAccID string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		".approvals.jsonl")
 }
 
 // SessionsDir is the path to a user's picoclaw session transcripts (used by

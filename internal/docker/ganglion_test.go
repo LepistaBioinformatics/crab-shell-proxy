@@ -70,7 +70,7 @@ func TestGanglionEnv_CarriesTheConfigurationContract(t *testing.T) {
 		APIKey:  "secret",
 	}}
 
-	env := ganglionEnv(cfg, agent, "bearer-1", nil)
+	env := ganglionEnv(cfg, agent, "bearer-1", "", nil)
 	joined := strings.Join(env, "\n")
 
 	for _, want := range []string{
@@ -92,7 +92,7 @@ func TestGanglionEnv_CarriesTheConfigurationContract(t *testing.T) {
 // the harness is in a container that reads nothing but its environment.
 func TestGanglionEnv_ForwardsTheCollectorEndpoint(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800, GanglionOTLPEndpoint: "http://otel-collector:4318"}
-	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n")
+	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", "", nil), "\n")
 	if !strings.Contains(joined, "GANGLION_OTLP_ENDPOINT=http://otel-collector:4318") {
 		t.Errorf("the collector endpoint never reached the container:\n%s", joined)
 	}
@@ -101,7 +101,7 @@ func TestGanglionEnv_ForwardsTheCollectorEndpoint(t *testing.T) {
 // Unset means unset: the variable is absent rather than empty, so the harness
 // takes the "no telemetry" path instead of trying to post to "".
 func TestGanglionEnv_OmitsTheCollectorWhenUnconfigured(t *testing.T) {
-	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil), "\n")
+	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", "", nil), "\n")
 	if strings.Contains(joined, "GANGLION_OTLP_ENDPOINT") {
 		t.Errorf("an empty collector endpoint was still passed:\n%s", joined)
 	}
@@ -111,7 +111,7 @@ func TestGanglionEnv_OmitsTheCollectorWhenUnconfigured(t *testing.T) {
 // fails loudly on its own missing GANGLION_MODEL, which is a legible error,
 // rather than the proxy panicking on a nil pointer.
 func TestGanglionEnv_ToleratesAnAgentWithNoModel(t *testing.T) {
-	env := ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil)
+	env := ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", "", nil)
 	if len(env) == 0 {
 		t.Fatal("no environment produced")
 	}
@@ -126,7 +126,7 @@ func TestGanglionEnv_ToleratesAnAgentWithNoModel(t *testing.T) {
 // anything that can list containers, including harness-sphere.
 func TestGanglionEnv_KeyIsEnvironmentNotLabel(t *testing.T) {
 	env := ganglionEnv(&config.Config{GanglionPort: 18800},
-		config.Agent{Model: &config.ModelConfig{APIKey: "super-secret"}}, "t", nil)
+		config.Agent{Model: &config.ModelConfig{APIKey: "super-secret"}}, "t", "", nil)
 	found := false
 	for _, e := range env {
 		if e == "GANGLION_API_KEY=super-secret" {
@@ -147,7 +147,7 @@ func TestGanglionEnv_KeyIsEnvironmentNotLabel(t *testing.T) {
 // otherwise.
 func TestGanglionEnvAndPersonaAgree(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800}
-	env := ganglionEnv(cfg, config.Agent{}, "t", nil)
+	env := ganglionEnv(cfg, config.Agent{}, "t", "", nil)
 
 	var systemFile string
 	for _, e := range env {
@@ -372,7 +372,7 @@ func TestTheCredentialKeyFileIsOutOfTheAgentsReach(t *testing.T) {
 // a value it cannot resolve.
 func TestBothEncryptionFactorsTravelTogether(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800, GanglionKeyPassphrase: "pass", GanglionKeyFile: "/srv/k"}
-	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n")
+	joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", "", nil), "\n")
 
 	for _, want := range []string{"GANGLION_KEY_PASSPHRASE=pass", "GANGLION_KEY_FILE=" + ganglionKeyFileDest} {
 		if !strings.Contains(joined, want) {
@@ -395,7 +395,7 @@ func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
 			t.Errorf("a key file was bound with none configured: %q", b)
 		}
 	}
-	if joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", nil), "\n"); strings.Contains(joined, "GANGLION_KEY_") {
+	if joined := strings.Join(ganglionEnv(cfg, config.Agent{}, "t", "", nil), "\n"); strings.Contains(joined, "GANGLION_KEY_") {
 		t.Errorf("an encryption variable was forwarded with none configured:\n%s", joined)
 	}
 }
@@ -410,7 +410,7 @@ func TestNoEncryptionMeansNoBindAndNoVariable(t *testing.T) {
 func TestTheLifecycleModeReachesTheHarness(t *testing.T) {
 	cfg := &config.Config{GanglionPort: 18800}
 	for _, mode := range []config.Mode{config.ModeScaleToZero, config.ModeContinuous} {
-		joined := strings.Join(ganglionEnv(cfg, config.Agent{Mode: mode}, "t", nil), "\n")
+		joined := strings.Join(ganglionEnv(cfg, config.Agent{Mode: mode}, "t", "", nil), "\n")
 		want := "GANGLION_LIFECYCLE_MODE=" + string(mode)
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in:\n%s", want, joined)
@@ -422,7 +422,7 @@ func TestTheLifecycleModeReachesTheHarness(t *testing.T) {
 // <workspace>/skills is found without being told, so only the proxy-owned half
 // is passed.
 func TestTheSkillsRootReachesTheHarness(t *testing.T) {
-	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", nil), "\n")
+	joined := strings.Join(ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", "", nil), "\n")
 	if !strings.Contains(joined, "GANGLION_SKILLS_ROOT="+ganglionSkillsDest) {
 		t.Errorf("the shared skills root was not named:\n%s", joined)
 	}
@@ -818,5 +818,66 @@ func TestTheGanglionWorkspaceIsSeededWithItsDirectories(t *testing.T) {
 		if err != nil || !info.IsDir() {
 			t.Errorf("%s was not seeded: %v", dir, err)
 		}
+	}
+}
+
+// ganglion-approval-endpoint: with no endpoint the harness installs an allow-all
+// approver, so this variable is the difference between a gate and a sentence.
+func TestGanglionEnvCarriesTheApprovalEndpointWhenThereIsOne(t *testing.T) {
+	joined := strings.Join(
+		ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t",
+			"http://crab-shell-proxy:8080/v1/approvals?t=abc.def", nil), "\n")
+	if !strings.Contains(joined, "GANGLION_APPROVAL_ENDPOINT=http://crab-shell-proxy:8080/v1/approvals?t=abc.def") {
+		t.Fatalf("the approver endpoint did not reach the container:\n%s", joined)
+	}
+	// THE GATE LIST TRAVELS WITH IT. The two are useless apart: an endpoint with
+	// an empty list asks about nothing, and without schedule_create in the list
+	// the harness invokes the tool unasked -- the proxy then refuses it for want
+	// of an approval, so every create fails. That is the right failure and not a
+	// working feature.
+	if !strings.Contains(joined, "GANGLION_GATED_TOOLS=schedule_create") {
+		t.Fatalf("the approver was configured but nothing was gated:\n%s", joined)
+	}
+}
+
+// A deployment with no MCP secret cannot mint the scoped token the endpoint
+// needs. Pointing the harness at a URL that would 401 every time would turn
+// every gated tool into a refusal with a reason nobody can act on.
+func TestGanglionEnvOmitsTheApprovalEndpointWhenItCannotBeMinted(t *testing.T) {
+	joined := strings.Join(
+		ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", "", nil), "\n")
+	if strings.Contains(joined, "GANGLION_APPROVAL_ENDPOINT") {
+		t.Fatalf("an unmintable endpoint was set anyway:\n%s", joined)
+	}
+	// And nothing is gated, because a gate the harness cannot ask about would
+	// refuse every call to the tool it names.
+	if strings.Contains(joined, "GANGLION_GATED_TOOLS") {
+		t.Fatalf("a tool was gated with no approver to ask:\n%s", joined)
+	}
+}
+
+// The cap an operator sets, and the silence when they do not.
+//
+// Nothing set GANGLION_MAX_ITERATIONS before this, so every ganglion agent ran
+// on the harness's built-in twelve -- which is right for a chat turn and wrong
+// for research, where a web search spends a round trip per query and another per
+// page opened.
+func TestGanglionEnvCarriesTheIterationCapWhenOneIsSet(t *testing.T) {
+	joined := strings.Join(
+		ganglionEnv(&config.Config{GanglionPort: 18800},
+			config.Agent{MaxIterations: 150}, "t", "", nil), "\n")
+	if !strings.Contains(joined, "GANGLION_MAX_ITERATIONS=150") {
+		t.Fatalf("the operator's cap did not reach the container:\n%s", joined)
+	}
+}
+
+// Absent, not zero. The harness applies its own default to a zero field, but an
+// explicit GANGLION_MAX_ITERATIONS=0 would be an operator saying something they
+// did not say.
+func TestGanglionEnvOmitsTheIterationCapWhenUnset(t *testing.T) {
+	joined := strings.Join(
+		ganglionEnv(&config.Config{GanglionPort: 18800}, config.Agent{}, "t", "", nil), "\n")
+	if strings.Contains(joined, "GANGLION_MAX_ITERATIONS") {
+		t.Fatalf("a cap was set that nobody chose:\n%s", joined)
 	}
 }

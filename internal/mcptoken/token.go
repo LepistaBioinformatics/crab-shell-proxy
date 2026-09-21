@@ -67,6 +67,16 @@ var (
 // practice, but that is a guarantee owned by a different package. Refusing here is
 // what makes "no caller can address another member's graph" a property of this
 // encoding rather than a property of whoever happened to call it.
+// QueryParam is the query-string key a scoped token travels under when a URL
+// carries it instead of a header.
+//
+// The MCP route takes its token in an Authorization header, which is the better
+// place. The approvals route cannot: the shipped harness sends its own bearer
+// there, so the scope has to ride the endpoint URL the proxy hands it. Named
+// here so the side that builds the URL and the side that reads it cannot drift
+// -- they live in packages that must not import each other.
+const QueryParam = "t"
+
 func Mint(secret string, sc memgraph.Scope) (string, error) {
 	if secret == "" {
 		return "", ErrNoSecret

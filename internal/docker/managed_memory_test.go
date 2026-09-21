@@ -246,3 +246,31 @@ func TestTheRoutingNoteNamesTheRealToolNames(t *testing.T) {
 		t.Error("the routing note lost its honesty rule")
 	}
 }
+
+// ganglion-agent-scheduling: the skill that explains scheduling ships with the
+// tools, and only with them.
+func TestTheSchedulingSkillShipsOnlyWhereTheToolsExist(t *testing.T) {
+	has := func(binds []string) bool {
+		for _, b := range binds {
+			if strings.Contains(b, managedScheduleRel) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !has(managedContentBinds("/base", "/mnt", config.HarnessGanglion, true)) {
+		t.Fatal("a ganglion with a token secret did not get the scheduling skill")
+	}
+	// No secret means no MCP server, which means no schedule tools. A skill
+	// describing tools the model cannot see is worse than none: it will keep
+	// reaching for them and read the refusal as its own mistake.
+	if has(managedContentBinds("/base", "/mnt", config.HarnessGanglion, false)) {
+		t.Fatal("the scheduling skill shipped where the tools do not exist")
+	}
+	// picoclaw schedules through its own CLI into its own store. This skill
+	// describes tools it does not have.
+	if has(managedContentBinds("/base", "/mnt", config.HarnessPicoclaw, true)) {
+		t.Fatal("the scheduling skill reached picoclaw")
+	}
+}
