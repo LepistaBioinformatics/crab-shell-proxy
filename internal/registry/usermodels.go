@@ -122,9 +122,20 @@ type UserSelection struct {
 // otherwise: a member who cannot name an endpoint cannot aim the instance at one,
 // which is the whole class of risk rather than a governed instance of it.
 type ScopePolicy struct {
-	AllowUserModels     *bool     `json:"allow_user_models,omitempty"`
-	AllowCustomEndpoint *bool     `json:"allow_custom_endpoint,omitempty"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	AllowUserModels     *bool `json:"allow_user_models,omitempty"`
+	AllowCustomEndpoint *bool `json:"allow_custom_endpoint,omitempty"`
+	// AllowEmailPrefixSearch lets a member look somebody up by PART of their
+	// email in the mangrove directory, rather than only by the whole address.
+	//
+	// Unset everywhere means NO, like AllowCustomEndpoint and unlike
+	// AllowUserModels. Exact-match answers a question the member already had
+	// ("what is alice's id?"); prefix search answers one they did not ("who is
+	// there?"), and turns the directory into something that can be swept by
+	// trying letters. An administrator who wants the friendlier behaviour turns
+	// it on for their scope, which is the decision being made rather than a
+	// default nobody chose.
+	AllowEmailPrefixSearch *bool     `json:"allow_email_prefix_search,omitempty"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 // MaxUserModelsPerAccount bounds a member's personal list. Not a licensing knob
@@ -510,6 +521,9 @@ func (r *Registry) SetScopePolicy(sel ScopeSel, patch ScopePolicy) error {
 		if patch.AllowCustomEndpoint != nil {
 			cur.AllowCustomEndpoint = patch.AllowCustomEndpoint
 		}
+		if patch.AllowEmailPrefixSearch != nil {
+			cur.AllowEmailPrefixSearch = patch.AllowEmailPrefixSearch
+		}
 		cur.UpdatedAt = r.now()
 		return putJSON(b, key, cur)
 	})
@@ -517,15 +531,22 @@ func (r *Registry) SetScopePolicy(sel ScopeSel, patch ScopePolicy) error {
 
 // AllowUserModelsPolicy / AllowCustomEndpointPolicy build a one-field patch, so a
 // caller setting one switch cannot express "and clear the other" by accident.
-func AllowUserModelsPolicy(v bool) ScopePolicy     { return ScopePolicy{AllowUserModels: &v} }
+func AllowUserModelsPolicy(v bool) ScopePolicy { return ScopePolicy{AllowUserModels: &v} }
+
+// AllowEmailPrefixSearchPolicy builds the one-field patch for the mangrove
+// directory's search mode.
+func AllowEmailPrefixSearchPolicy(v bool) ScopePolicy {
+	return ScopePolicy{AllowEmailPrefixSearch: &v}
+}
 func AllowCustomEndpointPolicy(v bool) ScopePolicy { return ScopePolicy{AllowCustomEndpoint: &v} }
 
 // PolicyField names one switch, for a caller that wants to clear just that one.
 type PolicyField string
 
 const (
-	FieldUserModels     PolicyField = "user_models"
-	FieldCustomEndpoint PolicyField = "custom_endpoint"
+	FieldUserModels        PolicyField = "user_models"
+	FieldCustomEndpoint    PolicyField = "custom_endpoint"
+	FieldEmailPrefixSearch PolicyField = "email_prefix_search"
 )
 
 // ClearScopePolicy removes a level's policy so it inherits again.
@@ -556,13 +577,16 @@ func (r *Registry) ClearScopePolicy(sel ScopeSel, fields ...PolicyField) error {
 				cur.AllowUserModels = nil
 			case FieldCustomEndpoint:
 				cur.AllowCustomEndpoint = nil
+			case FieldEmailPrefixSearch:
+				cur.AllowEmailPrefixSearch = nil
 			default:
 				return fmt.Errorf("%w: unknown policy field %q", ErrInvalid, f)
 			}
 		}
 		// Nothing set left: drop the record rather than keep an empty one, so
 		// GetScopePolicy answers ErrNotFound like it would have before any write.
-		if cur.AllowUserModels == nil && cur.AllowCustomEndpoint == nil {
+		if cur.AllowUserModels == nil && cur.AllowCustomEndpoint == nil &&
+			cur.AllowEmailPrefixSearch == nil {
 			return b.Delete([]byte(key))
 		}
 		cur.UpdatedAt = r.now()
@@ -631,6 +655,25 @@ func policyCascadeTx(tx *bolt.Tx, ref WorkspaceRef, pick func(ScopePolicy) *bool
 		}
 	}
 	return false, "", false
+}
+
+// EmailPrefixSearchAllowed answers whether this workspace's member may search
+// the mangrove directory by part of an email.
+//
+// Unset everywhere means NO. See the field's own comment for why that is the
+// safe end of the choice rather than the unfriendly one.
+func (r *Registry) EmailPrefixSearchAllowed(ref WorkspaceRef) (bool, ScopeLevel, error) {
+	allowed, by := false, ScopeLevel("")
+	err := r.db.View(func(tx *bolt.Tx) error {
+		v, level, found := policyCascadeTx(tx, ref, func(p ScopePolicy) *bool {
+			return p.AllowEmailPrefixSearch
+		})
+		if found {
+			allowed, by = v, level
+		}
+		return nil
+	})
+	return allowed, by, err
 }
 
 func userModelsAllowedTx(tx *bolt.Tx, ref WorkspaceRef) (bool, ScopeLevel) {

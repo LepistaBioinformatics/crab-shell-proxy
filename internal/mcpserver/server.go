@@ -66,6 +66,15 @@ type Deps struct {
 	// rather than present-and-refusing, for the reason Schedules gives above,
 	// and because this is the whole of an EXPERIMENTAL feature's off switch.
 	Mangrove *mangrove.Client
+	// ResolveAudience turns an `email:<address>` addressee into the actor id it
+	// names, within the caller's own subscription.
+	//
+	// A FUNCTION rather than a client, for the reason Store and SourceFor are:
+	// the lookup reads the workspace tree, which lives in the docker layer, and
+	// this package must not reach into that one. Nil means the email form is
+	// simply not resolved -- the gate then refuses it by name, which is the
+	// correct failure rather than a silent drop.
+	ResolveAudience func(memgraph.Scope, []string) ([]string, error)
 }
 
 // ScheduleStore is the scheduled-task surface an agent may reach.
@@ -129,13 +138,23 @@ const MaxRequestBytes = 1 << 20
 var errNoScope = errors.New("no authorized workspace for this request")
 
 type server struct {
-	store       *memgraph.Store
-	secret      string
-	logf        func(string, ...any)
-	sourceFor   func(memgraph.Scope) (string, bool)
-	ownsProject func(memgraph.Scope, string) (bool, error)
-	schedules   ScheduleStore
-	mangrove    *mangrove.Client
+	store           *memgraph.Store
+	secret          string
+	logf            func(string, ...any)
+	sourceFor       func(memgraph.Scope) (string, bool)
+	ownsProject     func(memgraph.Scope, string) (bool, error)
+	schedules       ScheduleStore
+	mangrove        *mangrove.Client
+	resolveAudience func(memgraph.Scope, []string) ([]string, error)
+}
+
+// audience resolves `email:` entries when a resolver was supplied, and is the
+// identity function when one was not.
+func (s *server) audience(sc memgraph.Scope, to []string) ([]string, error) {
+	if s.resolveAudience == nil {
+		return to, nil
+	}
+	return s.resolveAudience(sc, to)
 }
 
 // source resolves the conversation to record on a write, or "" when it cannot be
@@ -172,7 +191,7 @@ func NewHandler(d Deps) http.Handler {
 	}
 	s := &server{store: d.Store, secret: d.Secret, logf: d.Logf,
 		sourceFor: d.SourceFor, ownsProject: d.OwnsProject, schedules: d.Schedules,
-		mangrove: d.Mangrove}
+		mangrove: d.Mangrove, resolveAudience: d.ResolveAudience}
 
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,

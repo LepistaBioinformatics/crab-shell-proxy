@@ -101,7 +101,7 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 		Description: "Publish a memory to the mangrove, the shared network. " +
 			"Omit `to` to keep it private to you. Address `mangrove:group:subscription:<id>` " +
 			"to offer it to your subscription (a manager approves before it travels), " +
-			"or a colleague's actor id to send it to them directly. " +
+			"or a colleague's actor id -- or `email:<address>` -- to send it to them directly. " +
 			"You cannot address a tenant; only a person can.",
 		InputSchema: object(map[string]*jsonschema.Schema{
 			"type":    str("MemoryNote for a fact or note, MemoryFile for a document"),
@@ -110,8 +110,12 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 			"to":      strArray("Who to address. Empty means private to you."),
 		}, "type", "cell", "content"),
 	}, tool(s, func(sc memgraph.Scope, in mangrovePublishIn) (any, error) {
+		to, err := s.audience(sc, in.To)
+		if err != nil {
+			return nil, err
+		}
 		return s.mangrove.Publish(context.Background(), scopeTuple(sc), mangrove.AsService, agentCannotProveTenant,
-			mangrove.Object{Type: in.Type, Cell: in.Cell, Content: in.Content}, in.To)
+			mangrove.Object{Type: in.Type, Cell: in.Cell, Content: in.Content}, to)
 	}))
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -125,8 +129,12 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 			"undo":     boolean("Remove from the target instead of adding"),
 		}, "objectId", "target"),
 	}, tool(s, func(sc memgraph.Scope, in mangroveShareIn) (any, error) {
+		target := in.Target
+		if resolved, err := s.audience(sc, []string{target}); err == nil && len(resolved) == 1 {
+			target = resolved[0]
+		}
 		return s.mangrove.Share(context.Background(), scopeTuple(sc), mangrove.AsService, agentCannotProveTenant,
-			in.ObjectID, in.Target, in.Undo)
+			in.ObjectID, target, in.Undo)
 	}))
 
 	mcp.AddTool(srv, &mcp.Tool{

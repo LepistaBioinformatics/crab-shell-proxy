@@ -458,6 +458,14 @@ func (s *Server) Handler() http.Handler {
 			// Config.MangroveBaseURL. Built here rather than held on Server
 			// because nothing else in this package calls it.
 			Mangrove: s.mangroveClient(),
+			ResolveAudience: func(sc memgraph.Scope, to []string) ([]string, error) {
+				return s.resolveAudience(docker.WorkspaceKey{
+					TenantID:  sc.TenantID,
+					SubsAccID: sc.SubsAccID,
+					Role:      sc.Role,
+					UserAccID: sc.UserAccID,
+				}, to)
+			},
 		}))
 	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
@@ -553,6 +561,11 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /v1/mangrove/admit", s.handleMangroveAdmit)
 		mux.HandleFunc("POST /v1/mangrove/decide", s.handleMangroveDecide)
 		mux.HandleFunc("POST /v1/mangrove/revoke", s.handleMangroveRevoke)
+		// Finding somebody to share with, and finding yourself. The directory
+		// never reaches past the caller's own subscription; identity only ever
+		// answers with the caller's own ids.
+		mux.HandleFunc("GET /v1/mangrove/directory", s.handleMangroveDirectory)
+		mux.HandleFunc("GET /v1/mangrove/identity", s.handleMangroveIdentity)
 	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
