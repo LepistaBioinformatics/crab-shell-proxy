@@ -465,10 +465,30 @@ func ganglionEnv(cfg *config.Config, agent config.Agent, token, approvalEndpoint
 	// The proxy refuses an unapproved create on its own side too (see
 	// httpapi/approvals.go). That check is what holds if this line is ever wrong;
 	// this line is what makes the feature work at all.
+	//
+	// THE REEF ADDS TWO MORE, and only when the reef is configured. reef_publish
+	// and reef_share are the calls that put this member's memory in front of
+	// other people; a turn steered by untrusted text should not be able to do
+	// that without the member saying so, for the same reason schedule_create
+	// cannot write a standing instruction alone.
+	//
+	// Gating them only when the reef is on is not tidiness. A gated tool that
+	// does not exist is a name in a list the harness checks every call and can
+	// never match, and it tells the next reader that a tool exists when it does
+	// not.
+	//
+	// reef_timeline, reef_react and reef_admit are deliberately NOT gated: the
+	// first two read or acknowledge, and reef_admit only moves something into
+	// this member's OWN memory, which their person already chose to receive.
+	// Gating a read is how a gate stops being read as meaningful.
 	if approvalEndpoint != "" {
+		gated := "schedule_create"
+		if cfg.ReefBaseURL != "" && cfg.ResolvedReefToken != "" {
+			gated += ",reef_publish,reef_share"
+		}
 		env = append(env,
 			"GANGLION_APPROVAL_ENDPOINT="+approvalEndpoint,
-			"GANGLION_GATED_TOOLS=schedule_create",
+			"GANGLION_GATED_TOOLS="+gated,
 		)
 	}
 	// The turn's iteration cap, when an operator set one. Absent means the

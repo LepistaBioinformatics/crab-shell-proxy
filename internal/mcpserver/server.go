@@ -18,6 +18,7 @@ import (
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mcptoken"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/reef"
 )
 
 // Deps is everything the MCP endpoint needs.
@@ -57,6 +58,14 @@ type Deps struct {
 	// bounds and its provenance all live beside the member-facing write route,
 	// and this package must not reach into that one.
 	Schedules ScheduleStore
+	// Reef lets an agent share memory with other members through
+	// crab-reef-network.
+	//
+	// OPTIONAL, and nil -- or a client with no base URL or no token -- is a real
+	// configuration: the reef tools are then not registered at all. Absent
+	// rather than present-and-refusing, for the reason Schedules gives above,
+	// and because this is the whole of an EXPERIMENTAL feature's off switch.
+	Reef *reef.Client
 }
 
 // ScheduleStore is the scheduled-task surface an agent may reach.
@@ -126,6 +135,7 @@ type server struct {
 	sourceFor   func(memgraph.Scope) (string, bool)
 	ownsProject func(memgraph.Scope, string) (bool, error)
 	schedules   ScheduleStore
+	reef        *reef.Client
 }
 
 // source resolves the conversation to record on a write, or "" when it cannot be
@@ -161,7 +171,8 @@ func NewHandler(d Deps) http.Handler {
 		d.Logf = func(string, ...any) {}
 	}
 	s := &server{store: d.Store, secret: d.Secret, logf: d.Logf,
-		sourceFor: d.SourceFor, ownsProject: d.OwnsProject, schedules: d.Schedules}
+		sourceFor: d.SourceFor, ownsProject: d.OwnsProject, schedules: d.Schedules,
+		reef: d.Reef}
 
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,
@@ -172,6 +183,7 @@ func NewHandler(d Deps) http.Handler {
 		SchemaCache: mcp.NewSchemaCache(),
 	})
 	s.registerTools(srv)
+	s.registerReefTools(srv)
 
 	// Stateless: no session bookkeeping. The client opens no standalone SSE stream
 	// (measured — E-9), so there is nothing for a session to hold.
