@@ -441,6 +441,22 @@ func (s *Server) Handler() http.Handler {
 			// rather than per agent. The check is the same one every
 			// project-scoped route makes, so a call can only ever name a project
 			// the member actually has.
+			// Publishing a workspace file into the mangrove. The agent names a
+			// path; the proxy is what actually reads it, so the harness never
+			// gets a filesystem argument it could point elsewhere.
+			OpenWorkspaceFile: func(sc memgraph.Scope, path string) (io.ReadCloser, string, error) {
+				key := docker.WorkspaceKey{
+					TenantID:  sc.TenantID,
+					SubsAccID: sc.SubsAccID,
+					Role:      sc.Role,
+					UserAccID: sc.UserAccID,
+				}
+				agent, ok := s.Cfg.Agents[sc.Role]
+				if !ok {
+					return nil, "", fmt.Errorf("unknown agent %q", sc.Role)
+				}
+				return s.Mgr.OpenMedia(key, agent.Harness, sc.Project, mediaRelPath(path))
+			},
 			OwnsProject: func(sc memgraph.Scope, project string) (bool, error) {
 				return s.Mgr.HasProject(docker.WorkspaceKey{
 					TenantID:  sc.TenantID,
@@ -559,6 +575,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /v1/mangrove/timeline", s.handleMangroveTimeline)
 		mux.HandleFunc("GET /v1/mangrove/capabilities", s.handleMangroveCapabilities)
 		mux.HandleFunc("POST /v1/mangrove/publish", s.handleMangrovePublish)
+		mux.HandleFunc("GET /v1/mangrove/blob", s.handleMangroveBlob)
+		mux.HandleFunc("POST /v1/mangrove/merge", s.handleMangroveMerge)
 		mux.HandleFunc("POST /v1/mangrove/admit", s.handleMangroveAdmit)
 		mux.HandleFunc("POST /v1/mangrove/decide", s.handleMangroveDecide)
 		mux.HandleFunc("POST /v1/mangrove/revoke", s.handleMangroveRevoke)

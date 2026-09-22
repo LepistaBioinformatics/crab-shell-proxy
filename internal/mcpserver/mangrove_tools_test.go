@@ -199,3 +199,115 @@ func TestAgentCallsNeverClaimTenantLicence(t *testing.T) {
 		t.Errorf("tuple = %v, want the token's scope %+v", tup, scopeA)
 	}
 }
+
+// The network exists to share MEMORY. This is the shape that does it: the agent
+// names entities from its own graph and the post carries them, with the
+// relations among them, as a fragment the recipient can merge.
+func TestAnAgentPublishesAGraphFragment(t *testing.T) {
+	var bodies []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	h := newHarnessWithMangrove(t, mangrove.New(upstream.URL, "secret"))
+	if _, err := h.store.CreateEntities(scopeA, []memgraph.Entity{
+		{Name: "Rhizophora", EntityType: "species",
+			Observations: []memgraph.Observation{{Content: "salt tolerant"}}},
+		{Name: "Mangrove", EntityType: "biome"},
+		{Name: "Unrelated", EntityType: "noise"},
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.CreateRelations(scopeA, []memgraph.Relation{
+		{From: "Rhizophora", To: "Mangrove", RelationType: "grows in"},
+		{From: "Rhizophora", To: "Unrelated", RelationType: "not shared"},
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	sess := h.connect(t, mint(t, scopeA))
+	if _, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "mangrove_publish",
+		Arguments: map[string]any{"type": "MemoryNote", "entities": []string{"Rhizophora", "Mangrove"}},
+	}); err != nil {
+		t.Fatalf("publish entities: %v", err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("the mangrove saw %d calls, want 1", len(bodies))
+	}
+	obj, _ := bodies[0]["object"].(map[string]any)
+	if obj["mediaType"] != mangrove.GraphFragmentMediaType {
+		t.Errorf("mediaType = %v, want the fragment type", obj["mediaType"])
+	}
+	if !strings.HasPrefix(obj["cell"].(string), "graph:") {
+		t.Errorf("cell = %v; a fragment derives its cell and must not collide with a prose note", obj["cell"])
+	}
+
+	var frag struct {
+		Entities  []memgraph.Entity   `json:"entities"`
+		Relations []memgraph.Relation `json:"relations"`
+	}
+	if err := json.Unmarshal([]byte(obj["content"].(string)), &frag); err != nil {
+		t.Fatalf("content is not a fragment: %v", err)
+	}
+	if len(frag.Entities) != 2 {
+		t.Errorf("shared %d entities, want the two that were named", len(frag.Entities))
+	}
+	// THE EDGE TO AN UNSHARED NODE MUST NOT TRAVEL. A fragment with a dangling
+	// relation would name an entity the recipient was never given.
+	if len(frag.Relations) != 1 || frag.Relations[0].To != "Mangrove" {
+		t.Errorf("relations = %v, want only the one between the two shared entities", frag.Relations)
+	}
+}
+
+// EXACTLY ONE KIND. `cell` is the reduction key and each shape derives it
+// differently; two at once would leave a reader asking which part is the
+// content.
+func TestAnAgentCannotPublishTwoKindsAtOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	h := newHarnessWithMangrove(t, mangrove.New(upstream.URL, "secret"))
+	if _, err := h.store.CreateEntities(scopeA,
+		[]memgraph.Entity{{Name: "Rhizophora", EntityType: "species"}}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	sess := h.connect(t, mint(t, scopeA))
+
+	for _, args := range []map[string]any{
+		{"type": "MemoryNote", "cell": "c", "content": "prose", "entities": []string{"Rhizophora"}},
+		{"type": "MemoryNote", "cell": "c"}, // neither
+	} {
+		res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "mangrove_publish", Arguments: args,
+		})
+		if err == nil && (res == nil || !res.IsError) {
+			t.Errorf("publishing %v was accepted", args)
+		}
+	}
+}
+
+// Naming entities that are not in the graph is an error the agent can act on,
+// not an empty post nobody notices.
+func TestPublishingEntitiesNobodyHasIsRefused(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	h := newHarnessWithMangrove(t, mangrove.New(upstream.URL, "secret"))
+	sess := h.connect(t, mint(t, scopeA))
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "mangrove_publish",
+		Arguments: map[string]any{"type": "MemoryNote", "entities": []string{"Nothing"}},
+	})
+	if err == nil && (res == nil || !res.IsError) {
+		t.Error("publishing entities nobody has was accepted")
+	}
+}

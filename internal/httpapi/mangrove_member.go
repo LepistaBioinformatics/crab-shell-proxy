@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/authz"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/config"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/docker"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mangrove"
@@ -33,6 +34,34 @@ import (
 // from authz.CallerTier over the injected mycelium profile. The mangrove does not
 // read roles because it is not the component that can -- it has no profile, no
 // gateway and no mycelium client.
+
+// mangroveWriteCaller is mangroveCaller plus the two things a WRITE that touches
+// the workspace needs and a read does not: which agent (for its harness, which
+// decides the directory layout) and which project (each keeps its own files and
+// its own graph).
+//
+// It is a separate function rather than a wider mangroveCaller because the seven
+// routes that only read must not start carrying a project they never use -- an
+// unused parameter is where a future caller gets it wrong.
+func (s *Server) mangroveWriteCaller(w http.ResponseWriter, r *http.Request) (docker.WorkspaceKey, identity.Identity, config.Agent, string, bool) {
+	agent, ident, ok := s.resolveSecretCaller(w, r)
+	if !ok {
+		return docker.WorkspaceKey{}, identity.Identity{}, config.Agent{}, "", false
+	}
+	tenantID, subsAccID, ok := s.mangroveScopeParams(w, r)
+	if !ok {
+		return docker.WorkspaceKey{}, identity.Identity{}, config.Agent{}, "", false
+	}
+	key, ok := s.authorizeSecret(w, agent, ident, tenantID, subsAccID)
+	if !ok {
+		return docker.WorkspaceKey{}, identity.Identity{}, config.Agent{}, "", false
+	}
+	_, project, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
+	if !ok {
+		return docker.WorkspaceKey{}, identity.Identity{}, config.Agent{}, "", false
+	}
+	return key, ident, agent, project, true
+}
 
 // mangroveCaller resolves the member's workspace AND keeps the identity, which
 // restartCallerKey drops. The identity is the only place the profile lives, and
