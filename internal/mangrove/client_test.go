@@ -38,7 +38,7 @@ func TestEnabledNeedsBothHalves(t *testing.T) {
 }
 
 func TestUnconfiguredClientRefusesRatherThanDialling(t *testing.T) {
-	_, err := New("", "").Publish(context.Background(), tuple(), AsService, false, Object{}, nil)
+	_, err := New("", "").Publish(context.Background(), tuple(), AsService, Licences{}, Object{}, nil)
 	if err == nil {
 		t.Fatal("an unconfigured client attempted a call")
 	}
@@ -54,7 +54,7 @@ func TestRefusalBodySurvives(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "secret").Publish(context.Background(), tuple(), AsService, false,
+	_, err := New(srv.URL, "secret").Publish(context.Background(), tuple(), AsService, Licences{},
 		Object{Type: "MemoryNote", Cell: "c"}, []string{"mangrove:actor:mallory:service"})
 	if err == nil {
 		t.Fatal("a 403 was not reported as an error")
@@ -119,14 +119,19 @@ func TestCallerFieldsAreOnTheWire(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "secret")
 
-	if _, err := c.Publish(context.Background(), tuple(), AsService, false, Object{Type: "MemoryNote", Cell: "c"}, nil); err != nil {
+	if _, err := c.Publish(context.Background(), tuple(), AsService, Licences{}, Object{Type: "MemoryNote", Cell: "c"}, nil); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	if body["as"] != "service" {
 		t.Errorf("as = %v, want service", body["as"])
 	}
-	if _, present := body["tenantLicensed"]; present {
-		t.Errorf("tenantLicensed was sent for an agent call: %v", body["tenantLicensed"])
+	// The zero Licences value is the agent, and it must go out as an ABSENCE.
+	// A `false` on the wire and a missing field mean the same to the mangrove,
+	// but only the absence says the agent never held a licence to begin with.
+	for _, field := range []string{"tenantLicensed", "groupsLicensed"} {
+		if _, present := body[field]; present {
+			t.Errorf("%s was sent for an agent call: %v", field, body[field])
+		}
 	}
 	tup, _ := body["tuple"].(map[string]any)
 	if tup["userAccId"] != "alice" || tup["subsAccId"] != "s1" {
@@ -134,7 +139,8 @@ func TestCallerFieldsAreOnTheWire(t *testing.T) {
 	}
 
 	body = nil
-	if _, err := c.Publish(context.Background(), tuple(), AsPerson, true, Object{Type: "MemoryNote", Cell: "c"}, nil); err != nil {
+	if _, err := c.Publish(context.Background(), tuple(), AsPerson,
+		Licences{Tenant: true, Groups: true}, Object{Type: "MemoryNote", Cell: "c"}, nil); err != nil {
 		t.Fatalf("publish as person: %v", err)
 	}
 	if body["as"] != "person" {
@@ -142,6 +148,23 @@ func TestCallerFieldsAreOnTheWire(t *testing.T) {
 	}
 	if body["tenantLicensed"] != true {
 		t.Errorf("tenantLicensed = %v, want true for a licensed human", body["tenantLicensed"])
+	}
+	if body["groupsLicensed"] != true {
+		t.Errorf("groupsLicensed = %v, want true for a governing human", body["groupsLicensed"])
+	}
+
+	// The two are independent: governing a subscription does not license the
+	// tenant, and the struct must not collapse them.
+	body = nil
+	if _, err := c.Publish(context.Background(), tuple(), AsPerson,
+		Licences{Groups: true}, Object{Type: "MemoryNote", Cell: "c"}, nil); err != nil {
+		t.Fatalf("publish as subscription manager: %v", err)
+	}
+	if body["groupsLicensed"] != true {
+		t.Errorf("groupsLicensed = %v, want true", body["groupsLicensed"])
+	}
+	if _, present := body["tenantLicensed"]; present {
+		t.Errorf("governing a subscription leaked a tenant licence: %v", body["tenantLicensed"])
 	}
 }
 
