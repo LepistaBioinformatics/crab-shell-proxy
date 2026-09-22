@@ -201,18 +201,25 @@ func (s *Server) handleAdminModelPolicySet(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		AllowUserModels     *bool `json:"allow_user_models"`
 		AllowCustomEndpoint *bool `json:"allow_custom_endpoint"`
+		// Whether a member may search the mangrove directory by PART of an
+		// email rather than only by the whole address. Off unless set; see the
+		// field's comment in registry for why that is the safe end.
+		AllowEmailPrefixSearch *bool `json:"allow_email_prefix_search"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid JSON body"))
 		return
 	}
-	if req.AllowUserModels == nil && req.AllowCustomEndpoint == nil {
+	if req.AllowUserModels == nil && req.AllowCustomEndpoint == nil &&
+		req.AllowEmailPrefixSearch == nil {
 		writeJSON(w, http.StatusBadRequest,
-			errBody(`at least one of "allow_user_models" or "allow_custom_endpoint" is required`))
+			errBody(`at least one of "allow_user_models", "allow_custom_endpoint" or "allow_email_prefix_search" is required`))
 		return
 	}
 	patch := registry.ScopePolicy{
-		AllowUserModels: req.AllowUserModels, AllowCustomEndpoint: req.AllowCustomEndpoint,
+		AllowUserModels:        req.AllowUserModels,
+		AllowCustomEndpoint:    req.AllowCustomEndpoint,
+		AllowEmailPrefixSearch: req.AllowEmailPrefixSearch,
 	}
 	if err := s.Reg.SetScopePolicy(sel, patch); err != nil {
 		status, body := registryErrStatus(err)
@@ -233,10 +240,11 @@ func (s *Server) handleAdminModelPolicyClear(w http.ResponseWriter, r *http.Requ
 	var fields []registry.PolicyField
 	switch f := registry.PolicyField(r.URL.Query().Get("field")); f {
 	case "":
-	case registry.FieldUserModels, registry.FieldCustomEndpoint:
+	case registry.FieldUserModels, registry.FieldCustomEndpoint, registry.FieldEmailPrefixSearch:
 		fields = append(fields, f)
 	default:
-		writeJSON(w, http.StatusBadRequest, errBody(`"field" must be user_models or custom_endpoint`))
+		writeJSON(w, http.StatusBadRequest,
+			errBody(`"field" must be user_models, custom_endpoint or email_prefix_search`))
 		return
 	}
 	if err := s.Reg.ClearScopePolicy(sel, fields...); err != nil {
