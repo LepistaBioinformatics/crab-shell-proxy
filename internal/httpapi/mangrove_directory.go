@@ -132,6 +132,26 @@ func mangrovePersonID(accID string) string {
 	return "mangrove:actor:" + identity.SanitizeID(accID) + ":person"
 }
 
+// subscriptionByEmail indexes the caller's own subscription by lowercased email.
+//
+// It is the single lookup behind both ways of addressing by email -- an
+// `email:<address>` entry in an agent's audience, and the webapp's structured
+// `toEmails`. One function so the two cannot disagree about who is in a
+// subscription, and so the membership call crosses the process boundary once.
+func (s *Server) subscriptionByEmail(key docker.WorkspaceKey) (map[string]string, error) {
+	users, err := s.Mgr.ListSubscriptionUsers(key.TenantID, key.SubsAccID)
+	if err != nil {
+		return nil, err
+	}
+	byEmail := make(map[string]string, len(users))
+	for _, u := range users {
+		if e := strings.ToLower(strings.TrimSpace(u.Email)); e != "" {
+			byEmail[e] = u.AccID
+		}
+	}
+	return byEmail, nil
+}
+
 // resolveAudience turns any `email:<address>` entry in an audience into the
 // actor id it names, leaving every other entry untouched.
 //
@@ -156,15 +176,9 @@ func (s *Server) resolveAudience(key docker.WorkspaceKey, audience []string) ([]
 	if !needsLookup {
 		return audience, nil
 	}
-	users, err := s.Mgr.ListSubscriptionUsers(key.TenantID, key.SubsAccID)
+	byEmail, err := s.subscriptionByEmail(key)
 	if err != nil {
 		return nil, err
-	}
-	byEmail := make(map[string]string, len(users))
-	for _, u := range users {
-		if e := strings.ToLower(strings.TrimSpace(u.Email)); e != "" {
-			byEmail[e] = u.AccID
-		}
 	}
 	out := make([]string, 0, len(audience))
 	for _, a := range audience {

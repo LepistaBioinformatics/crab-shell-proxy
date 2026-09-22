@@ -13,11 +13,12 @@
 //	As              "service" when an agent is acting inside a turn, "person"
 //	                when a human is acting in the webapp. It selects which of
 //	                the workspace's two actors signs.
-//	TenantLicensed  set ONLY when the caller arrived with a real mycelium
-//	                profile that licenses the tenant. An agent's MCP token
-//	                proves one subscription and cannot prove this, so the MCP
-//	                path never sets it -- which is what stops an agent
-//	                broadcasting tenant-wide.
+//	Licences        set ONLY when the caller arrived with a real mycelium
+//	                profile. `Tenant` says the profile licenses the tenant;
+//	                `Groups` says it governs the subscription. An agent's MCP
+//	                token proves MEMBERSHIP of a subscription and neither of
+//	                these, so the MCP path sets neither -- which is what stops
+//	                an agent broadcasting to any group at all.
 package mangrove
 
 import (
@@ -136,6 +137,21 @@ type base struct {
 	Tuple          Tuple `json:"tuple"`
 	As             Actor `json:"as"`
 	TenantLicensed bool  `json:"tenantLicensed,omitempty"`
+	GroupsLicensed bool  `json:"groupsLicensed,omitempty"`
+}
+
+// Licences are the widening permissions a caller holds, resolved from a real
+// mycelium profile. THE ZERO VALUE IS THE AGENT: it holds neither, addresses
+// only itself and named peers in its own subscription, and cannot reach a group.
+//
+// They travel as a struct rather than as two bool parameters because two
+// anonymous booleans in a row is a transposition waiting to happen, and
+// transposing these two silently widens reach.
+type Licences struct {
+	// Tenant: licensed on the tenant, so may address the tenant group.
+	Tenant bool
+	// Groups: governs the subscription, so may address a group at all.
+	Groups bool
 }
 
 // Object is one unit of shared memory.
@@ -155,9 +171,9 @@ type publishReq struct {
 
 // Publish creates a memory object. `to` empty means private to the author,
 // which is the default a bare publish carries.
-func (c *Client) Publish(ctx context.Context, t Tuple, as Actor, tenantLicensed bool, obj Object, to []string) (json.RawMessage, error) {
+func (c *Client) Publish(ctx context.Context, t Tuple, as Actor, lic Licences, obj Object, to []string) (json.RawMessage, error) {
 	return c.post(ctx, "/internal/v1/publish", publishReq{
-		base:   base{Tuple: t, As: as, TenantLicensed: tenantLicensed},
+		base:   base{Tuple: t, As: as, TenantLicensed: lic.Tenant, GroupsLicensed: lic.Groups},
 		Object: obj,
 		To:     to,
 	})
@@ -171,9 +187,9 @@ type shareReq struct {
 }
 
 // Share adds an existing object to a wider scope, or removes it with undo.
-func (c *Client) Share(ctx context.Context, t Tuple, as Actor, tenantLicensed bool, objectID, target string, undo bool) (json.RawMessage, error) {
+func (c *Client) Share(ctx context.Context, t Tuple, as Actor, lic Licences, objectID, target string, undo bool) (json.RawMessage, error) {
 	return c.post(ctx, "/internal/v1/share", shareReq{
-		base:     base{Tuple: t, As: as, TenantLicensed: tenantLicensed},
+		base:     base{Tuple: t, As: as, TenantLicensed: lic.Tenant, GroupsLicensed: lic.Groups},
 		ObjectID: objectID, Target: target, Undo: undo,
 	})
 }

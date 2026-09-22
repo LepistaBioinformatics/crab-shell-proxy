@@ -45,10 +45,11 @@ func scopeTuple(sc memgraph.Scope) mangrove.Tuple {
 }
 
 type mangrovePublishIn struct {
-	Type    string   `json:"type"`
-	Cell    string   `json:"cell"`
-	Content string   `json:"content"`
-	To      []string `json:"to"`
+	Type      string   `json:"type"`
+	Cell      string   `json:"cell"`
+	Content   string   `json:"content"`
+	MediaType string   `json:"mediaType"`
+	To        []string `json:"to"`
 }
 
 type mangroveShareIn struct {
@@ -92,37 +93,48 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 	// carries no mycelium licences. It therefore cannot prove it may address a
 	// tenant, and the mangrove refuses tenant scope without that proof. The result
 	// is deliberate and stricter than the specification asked for: AN AGENT
-	// CANNOT BROADCAST TENANT-WIDE AT ALL. Tenant scope is a human action taken
-	// in the webapp, where a real profile exists to resolve.
-	const agentCannotProveTenant = false
+	// CANNOT ADDRESS A GROUP AT ALL. Its MCP token proves MEMBERSHIP of one
+	// subscription; addressing a group is a question about governance, which no
+	// agent token can answer. Group scope is a human action taken in the
+	// webapp, where a real profile exists to resolve.
+	//
+	// The zero value would do this on its own. It is named and passed
+	// explicitly so that a reader of these two call sites sees the stance
+	// rather than an omission.
+	var agentHoldsNoLicences mangrove.Licences
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "mangrove_publish",
 		Description: "Publish a memory to the mangrove, the shared network. " +
-			"Omit `to` to keep it private to you. Address `mangrove:group:subscription:<id>` " +
-			"to offer it to your subscription (a manager approves before it travels), " +
-			"or a colleague's actor id -- or `email:<address>` -- to send it to them directly. " +
-			"You cannot address a tenant; only a person can.",
+			"Omit `to` to keep it private to you. Address a colleague's actor id " +
+			"-- or `email:<address>` -- to send it to them directly; they admit it " +
+			"before it reaches their agent. " +
+			"You cannot address a group, neither a subscription nor a tenant: " +
+			"broadcasting to a whole scope is a human action, taken in the web UI " +
+			"by somebody who governs it.",
 		InputSchema: object(map[string]*jsonschema.Schema{
-			"type":    str("MemoryNote for a fact or note, MemoryFile for a document"),
-			"cell":    str("What this memory is ABOUT -- the entity name or file path. Two authors may hold different claims about one cell and neither overwrites the other."),
-			"content": str("The memory itself"),
-			"to":      strArray("Who to address. Empty means private to you."),
+			"type":      str("MemoryNote for a fact or note, MemoryFile for a document"),
+			"cell":      str("What this memory is ABOUT -- the entity name or file path. Two authors may hold different claims about one cell and neither overwrites the other."),
+			"content":   str("The memory itself"),
+			"mediaType": str("The format of `content`: text/markdown for prose, text/plain otherwise. Say it rather than letting the reader guess."),
+			"to":        strArray("Who to address. Empty means private to you."),
 		}, "type", "cell", "content"),
 	}, tool(s, func(sc memgraph.Scope, in mangrovePublishIn) (any, error) {
 		to, err := s.audience(sc, in.To)
 		if err != nil {
 			return nil, err
 		}
-		return s.mangrove.Publish(context.Background(), scopeTuple(sc), mangrove.AsService, agentCannotProveTenant,
-			mangrove.Object{Type: in.Type, Cell: in.Cell, Content: in.Content}, to)
+		return s.mangrove.Publish(context.Background(), scopeTuple(sc), mangrove.AsService, agentHoldsNoLicences,
+			mangrove.Object{
+				Type: in.Type, Cell: in.Cell, Content: in.Content, MediaType: in.MediaType,
+			}, to)
 	}))
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "mangrove_share",
-		Description: "Share a memory you already published into a wider scope, " +
-			"or withdraw it from one with undo. You cannot share beyond what you " +
-			"can already reach.",
+		Description: "Share a memory you already published with somebody else, " +
+			"or withdraw it from them with undo. You cannot share beyond what you " +
+			"can already reach, and you cannot share into a group.",
 		InputSchema: object(map[string]*jsonschema.Schema{
 			"objectId": str("The mangrove object id to share"),
 			"target":   str("The scope or actor to share into"),
@@ -133,7 +145,7 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 		if resolved, err := s.audience(sc, []string{target}); err == nil && len(resolved) == 1 {
 			target = resolved[0]
 		}
-		return s.mangrove.Share(context.Background(), scopeTuple(sc), mangrove.AsService, agentCannotProveTenant,
+		return s.mangrove.Share(context.Background(), scopeTuple(sc), mangrove.AsService, agentHoldsNoLicences,
 			in.ObjectID, target, in.Undo)
 	}))
 
