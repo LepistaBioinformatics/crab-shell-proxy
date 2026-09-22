@@ -5,9 +5,9 @@ import (
 	"net/http"
 )
 
-// The one question crab-reef-network asks this proxy.
+// The one question crab-mangrove-network asks this proxy.
 //
-// The reef keeps NO membership list of its own, deliberately: a stored list is
+// The mangrove keeps NO membership list of its own, deliberately: a stored list is
 // a second source of truth that can disagree with mycelium, and every rule
 // about who may address what would then depend on which of the two was
 // consulted. So when its reachability gate has to answer "does this person have
@@ -19,25 +19,25 @@ import (
 // deployment, but it is still a membership roll and it is not something an
 // agent's token may buy.
 
-type reefMemberView struct {
+type mangroveMemberView struct {
 	AccID string `json:"accId"`
 	Role  string `json:"role"`
 	Email string `json:"email"`
 }
 
-type reefMembersResponse struct {
-	AccIDs  []string         `json:"accIds"`
-	Members []reefMemberView `json:"members"`
+type mangroveMembersResponse struct {
+	AccIDs  []string             `json:"accIds"`
+	Members []mangroveMemberView `json:"members"`
 }
 
-// authorizeReef proves the caller is crab-reef-network.
+// authorizeMangrove proves the caller is crab-mangrove-network.
 //
 // It is a SEPARATE credential from the telemetry token and from any agent
 // token, for the same reason those are separate from each other: a credential
 // that gates one capability must not also gate another, or revoking it for one
 // reason silently revokes — or fails to revoke — the other.
-func (s *Server) authorizeReef(r *http.Request) bool {
-	want := s.Cfg.ResolvedReefToken
+func (s *Server) authorizeMangrove(r *http.Request) bool {
+	want := s.Cfg.ResolvedMangroveToken
 	if want == "" {
 		return false
 	}
@@ -45,14 +45,14 @@ func (s *Server) authorizeReef(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+want)) == 1
 }
 
-// handleReefSubscriptionMembers serves GET /v1/reef/subscription-members.
+// handleMangroveSubscriptionMembers serves GET /v1/mangrove/subscription-members.
 //
 // Like /v1/instances it does NOT go through resolveAgent: the question spans a
 // subscription rather than one agent, so no single agent's token is the right
 // key for it.
-func (s *Server) handleReefSubscriptionMembers(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeReef(r) {
-		writeJSON(w, http.StatusUnauthorized, errBody("invalid reef token"))
+func (s *Server) handleMangroveSubscriptionMembers(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeMangrove(r) {
+		writeJSON(w, http.StatusUnauthorized, errBody("invalid mangrove token"))
 		return
 	}
 	tenantID := r.URL.Query().Get("tenant_id")
@@ -64,7 +64,7 @@ func (s *Server) handleReefSubscriptionMembers(w http.ResponseWriter, r *http.Re
 
 	users, err := s.Mgr.ListSubscriptionUsers(tenantID, subsAccID)
 	if err != nil {
-		s.logf("reef: subscription members: %v", err)
+		s.logf("mangrove: subscription members: %v", err)
 		writeJSON(w, http.StatusBadGateway, errBody("could not read the subscription's members"))
 		return
 	}
@@ -75,13 +75,13 @@ func (s *Server) handleReefSubscriptionMembers(w http.ResponseWriter, r *http.Re
 	// subscription nobody has a workspace under is a normal state, and reading
 	// it as a failure would turn "nobody to share with yet" into "the service
 	// is broken".
-	out := reefMembersResponse{
+	out := mangroveMembersResponse{
 		AccIDs:  make([]string, 0, len(users)),
-		Members: make([]reefMemberView, 0, len(users)),
+		Members: make([]mangroveMemberView, 0, len(users)),
 	}
 	for _, u := range users {
 		out.AccIDs = append(out.AccIDs, u.AccID)
-		out.Members = append(out.Members, reefMemberView{AccID: u.AccID, Role: u.Role, Email: u.Email})
+		out.Members = append(out.Members, mangroveMemberView{AccID: u.AccID, Role: u.Role, Email: u.Email})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

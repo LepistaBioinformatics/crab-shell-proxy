@@ -1,10 +1,10 @@
-// Package reef is this proxy's client for crab-reef-network, the EXPERIMENTAL
+// Package mangrove is this proxy's client for crab-mangrove-network, the EXPERIMENTAL
 // federated memory network agents share through.
 //
-// THE PROXY IS THE ONLY CALLER THE REEF HAS, and that is what makes the whole
+// THE PROXY IS THE ONLY CALLER THE MANGROVE HAS, and that is what makes the whole
 // arrangement work. Every request carries a workspace tuple this proxy has
 // ALREADY verified -- from the MCP bearer token for an agent, or from the
-// mycelium profile for a human -- so the reef performs no authentication of its
+// mycelium profile for a human -- so the mangrove performs no authentication of its
 // own beyond proving that the caller is us.
 //
 // Two fields in every request body are ours alone to set, and getting either
@@ -18,7 +18,7 @@
 //	                proves one subscription and cannot prove this, so the MCP
 //	                path never sets it -- which is what stops an agent
 //	                broadcasting tenant-wide.
-package reef
+package mangrove
 
 import (
 	"bytes"
@@ -32,7 +32,7 @@ import (
 )
 
 // Tuple is the verified workspace identity. It mirrors docker.WorkspaceKey and
-// the reef's own actor.Tuple; it is redeclared here rather than imported so the
+// the mangrove's own actor.Tuple; it is redeclared here rather than imported so the
 // wire shape is visible at the boundary that produces it.
 type Tuple struct {
 	TenantID  string `json:"tenantId"`
@@ -51,7 +51,7 @@ const (
 	AsPerson Actor = "person"
 )
 
-// Client talks to the reef. A zero BaseURL or Token means the feature is off,
+// Client talks to the mangrove. A zero BaseURL or Token means the feature is off,
 // and Enabled reports that -- callers use it to decide whether to REGISTER the
 // tools at all, rather than to register tools that refuse.
 type Client struct {
@@ -64,14 +64,14 @@ func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		Token:   token,
-		// Bounded so a hung reef cannot hold a turn open. The reef does no
+		// Bounded so a hung mangrove cannot hold a turn open. The mangrove does no
 		// remote work of its own on these paths except, for an audience naming
 		// a specific colleague, one call back to this proxy.
 		HTTP: &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
-// Enabled reports whether the reef is configured at all.
+// Enabled reports whether the mangrove is configured at all.
 //
 // BOTH halves are required. A base URL with no token would reach a service that
 // refuses every request, and a token with no base URL reaches nothing; either
@@ -81,7 +81,7 @@ func (c *Client) Enabled() bool {
 	return c != nil && c.BaseURL != "" && c.Token != ""
 }
 
-// Error is a non-2xx answer from the reef, carrying the body so a refusal keeps
+// Error is a non-2xx answer from the mangrove, carrying the body so a refusal keeps
 // the addressee it named. FR-B6a requires a refusal to say WHICH addressee was
 // out of reach; swallowing the body here would lose exactly that.
 type Error struct {
@@ -91,14 +91,14 @@ type Error struct {
 
 func (e *Error) Error() string {
 	if e.Body != "" {
-		return fmt.Sprintf("reef: %s", e.Body)
+		return fmt.Sprintf("mangrove: %s", e.Body)
 	}
-	return fmt.Sprintf("reef: answered %d", e.Status)
+	return fmt.Sprintf("mangrove: answered %d", e.Status)
 }
 
 func (c *Client) post(ctx context.Context, path string, body any) (json.RawMessage, error) {
 	if !c.Enabled() {
-		return nil, fmt.Errorf("reef: not configured")
+		return nil, fmt.Errorf("mangrove: not configured")
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -113,16 +113,16 @@ func (c *Client) post(ctx context.Context, path string, body any) (json.RawMessa
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		// The reef being unreachable must NOT fail a turn or a boot -- it
+		// The mangrove being unreachable must NOT fail a turn or a boot -- it
 		// returns something the model can read. The container boundary for
 		// optionality is registration, not request time.
-		return nil, fmt.Errorf("reef: unreachable: %w", err)
+		return nil, fmt.Errorf("mangrove: unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, fmt.Errorf("reef: read body: %w", err)
+		return nil, fmt.Errorf("mangrove: read body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, &Error{Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
@@ -232,7 +232,7 @@ type decideReq struct {
 // Decide accepts or rejects a pending cross-scope publication.
 //
 // HUMANS ONLY, and there is no MCP tool for it. Governs is the caller's
-// mycelium role resolved by this proxy -- the reef does not read roles, because
+// mycelium role resolved by this proxy -- the mangrove does not read roles, because
 // it is not the component that can. An agent has no path to this call.
 func (c *Client) Decide(ctx context.Context, t Tuple, activityID string, accept, governs bool) (json.RawMessage, error) {
 	return c.post(ctx, "/internal/v1/decide", decideReq{
@@ -249,7 +249,7 @@ type revokeReq struct {
 
 // Revoke tombstones an object the caller's own agent authored.
 //
-// HUMANS ONLY, and the reef enforces that independently: it refuses a revoke
+// HUMANS ONLY, and the mangrove enforces that independently: it refuses a revoke
 // signed by the Service actor. Authority runs one way, and it is checked on
 // both sides rather than trusted from here.
 func (c *Client) Revoke(ctx context.Context, t Tuple, objectID, cell string) (json.RawMessage, error) {

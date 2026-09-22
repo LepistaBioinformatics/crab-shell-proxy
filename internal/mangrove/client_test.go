@@ -1,4 +1,4 @@
-package reef
+package mangrove
 
 import (
 	"context"
@@ -22,8 +22,8 @@ func TestEnabledNeedsBothHalves(t *testing.T) {
 		name, base, token string
 		want              bool
 	}{
-		{"both set", "http://reef:8090", "secret", true},
-		{"no token", "http://reef:8090", "", false},
+		{"both set", "http://mangrove:8090", "secret", true},
+		{"no token", "http://mangrove:8090", "", false},
 		{"no base url", "", "secret", false},
 		{"neither", "", "", false},
 	} {
@@ -44,27 +44,27 @@ func TestUnconfiguredClientRefusesRatherThanDialling(t *testing.T) {
 	}
 }
 
-// A REFUSAL MUST KEEP THE ADDRESSEE IT NAMED. The reef answers 403 with a body
+// A REFUSAL MUST KEEP THE ADDRESSEE IT NAMED. The mangrove answers 403 with a body
 // saying which entry was out of reach; swallowing that body would leave the
 // agent -- and the member reading its answer -- with no way to know what to fix.
 func TestRefusalBodySurvives(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"error":"out of reach: reef:actor:mallory:service (no workspace under a subscription this caller shares)","addressee":"reef:actor:mallory:service","delivered":false}`)
+		_, _ = io.WriteString(w, `{"error":"out of reach: mangrove:actor:mallory:service (no workspace under a subscription this caller shares)","addressee":"mangrove:actor:mallory:service","delivered":false}`)
 	}))
 	defer srv.Close()
 
 	_, err := New(srv.URL, "secret").Publish(context.Background(), tuple(), AsService, false,
-		Object{Type: "MemoryNote", Cell: "c"}, []string{"reef:actor:mallory:service"})
+		Object{Type: "MemoryNote", Cell: "c"}, []string{"mangrove:actor:mallory:service"})
 	if err == nil {
 		t.Fatal("a 403 was not reported as an error")
 	}
-	var reefErr *Error
-	if !errors.As(err, &reefErr) {
-		t.Fatalf("want a *reef.Error, got %T", err)
+	var mangroveErr *Error
+	if !errors.As(err, &mangroveErr) {
+		t.Fatalf("want a *mangrove.Error, got %T", err)
 	}
-	if reefErr.Status != http.StatusForbidden {
-		t.Errorf("status = %d", reefErr.Status)
+	if mangroveErr.Status != http.StatusForbidden {
+		t.Errorf("status = %d", mangroveErr.Status)
 	}
 	if !strings.Contains(err.Error(), "mallory") {
 		t.Errorf("the offending addressee was lost: %v", err)
@@ -74,20 +74,20 @@ func TestRefusalBodySurvives(t *testing.T) {
 	}
 }
 
-// An unreachable reef is an error the caller can render, never a panic and
+// An unreachable mangrove is an error the caller can render, never a panic and
 // never a hang beyond the timeout.
-func TestUnreachableReefIsAnOrdinaryError(t *testing.T) {
+func TestUnreachableMangroveIsAnOrdinaryError(t *testing.T) {
 	// A port nothing listens on.
 	_, err := New("http://127.0.0.1:1", "secret").Timeline(context.Background(), tuple(), AsService, "received")
 	if err == nil {
 		t.Fatal("reaching a dead address succeeded")
 	}
 	if !strings.Contains(err.Error(), "unreachable") {
-		t.Errorf("error does not say it could not reach the reef: %v", err)
+		t.Errorf("error does not say it could not reach the mangrove: %v", err)
 	}
 }
 
-// The bearer token authenticates the proxy as the reef's one caller.
+// The bearer token authenticates the proxy as the mangrove's one caller.
 func TestTokenIsSent(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +106,7 @@ func TestTokenIsSent(t *testing.T) {
 
 // THE TWO FIELDS THIS PROXY ALONE MAY SET.
 //
-// `as` decides which actor signs, and `tenantLicensed` is what the reef takes
+// `as` decides which actor signs, and `tenantLicensed` is what the mangrove takes
 // as proof that a human's mycelium profile licenses the tenant. An agent's MCP
 // token cannot prove the latter, so the MCP path must never set it -- this test
 // pins the wire shape that makes the distinction expressible at all.
@@ -157,7 +157,7 @@ func TestHumanOnlyCallsAlwaysActAsThePerson(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "secret")
 
-	if _, err := c.Revoke(context.Background(), tuple(), "reef:obj:1", "cell"); err != nil {
+	if _, err := c.Revoke(context.Background(), tuple(), "mangrove:obj:1", "cell"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if body["as"] != "person" {
@@ -165,7 +165,7 @@ func TestHumanOnlyCallsAlwaysActAsThePerson(t *testing.T) {
 	}
 
 	body = nil
-	if _, err := c.Decide(context.Background(), tuple(), "reef:act:1", true, true); err != nil {
+	if _, err := c.Decide(context.Background(), tuple(), "mangrove:act:1", true, true); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
 	if body["as"] != "person" {
@@ -184,7 +184,7 @@ func TestBaseURLTrailingSlashIsNormalised(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL+"/", "secret").Admit(context.Background(), tuple(), AsPerson, "reef:act:1"); err != nil {
+	if _, err := New(srv.URL+"/", "secret").Admit(context.Background(), tuple(), AsPerson, "mangrove:act:1"); err != nil {
 		t.Fatalf("admit: %v", err)
 	}
 	if path != "/internal/v1/admit" {
