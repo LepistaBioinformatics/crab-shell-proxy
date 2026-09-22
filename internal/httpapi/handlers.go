@@ -27,7 +27,6 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mcpserver"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
-	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/reef"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
@@ -458,7 +457,7 @@ func (s *Server) Handler() http.Handler {
 			// means the `reef_*` tools are not registered at all -- see
 			// Config.ReefBaseURL. Built here rather than held on Server
 			// because nothing else in this package calls it.
-			Reef: reef.New(s.Cfg.ReefBaseURL, s.Cfg.ResolvedReefToken),
+			Reef: s.reefClient(),
 		}))
 	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
@@ -540,6 +539,20 @@ func (s *Server) Handler() http.Handler {
 	// that reaches a member.
 	if s.Cfg.ReefBaseURL != "" && s.Cfg.ResolvedReefToken != "" {
 		mux.HandleFunc("GET /v1/reef/subscription-members", s.handleReefSubscriptionMembers)
+		// The MEMBER's half. Unlike subscription-members above -- which the reef
+		// itself calls on zombie_net with its own credential -- these are reached
+		// by a person through the gateway, and authorize against the injected
+		// mycelium profile like every other member route.
+		//
+		// decide and revoke have NO agent equivalent and must not grow one: the
+		// first needs a role an agent never presents, and the second is the
+		// human's authority over their own bot, which an agent that could
+		// exercise could also reverse.
+		mux.HandleFunc("GET /v1/reef/timeline", s.handleReefTimeline)
+		mux.HandleFunc("GET /v1/reef/capabilities", s.handleReefCapabilities)
+		mux.HandleFunc("POST /v1/reef/admit", s.handleReefAdmit)
+		mux.HandleFunc("POST /v1/reef/decide", s.handleReefDecide)
+		mux.HandleFunc("POST /v1/reef/revoke", s.handleReefRevoke)
 	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
