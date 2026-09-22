@@ -12,22 +12,22 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mangrove"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
-	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/reef"
 )
 
-// newHarnessWithReef mirrors newHarness, with a reef client threaded in. It is
+// newHarnessWithMangrove mirrors newHarness, with a mangrove client threaded in. It is
 // a separate constructor rather than a parameter on the original so that every
 // existing test keeps proving the unconfigured shape -- including the golden
 // schema test, which counts advertised tools and would otherwise have to be
 // taught about a feature it has nothing to do with.
-func newHarnessWithReef(t *testing.T, rc *reef.Client) *harness {
+func newHarnessWithMangrove(t *testing.T, rc *mangrove.Client) *harness {
 	t.Helper()
 	store := memgraph.NewStore(t.TempDir(), func() time.Time {
 		return time.UnixMilli(1_800_000_000_000)
 	})
 	logs := &logCapture{}
-	h := NewHandler(Deps{Store: store, Secret: testSecret, Logf: logs.logf, Reef: rc})
+	h := NewHandler(Deps{Store: store, Secret: testSecret, Logf: logs.logf, Mangrove: rc})
 	mux := http.NewServeMux()
 	mux.Handle("/v1/mcp", h)
 	srv := httptest.NewServer(mux)
@@ -35,10 +35,10 @@ func newHarnessWithReef(t *testing.T, rc *reef.Client) *harness {
 	return &harness{srv: srv, store: store, logs: logs}
 }
 
-// callPublish is a minimal valid reef_publish call.
+// callPublish is a minimal valid mangrove_publish call.
 func callPublish() *mcp.CallToolParams {
 	return &mcp.CallToolParams{
-		Name: "reef_publish",
+		Name: "mangrove_publish",
 		Arguments: map[string]any{
 			"type":    "MemoryNote",
 			"cell":    "soil-ph",
@@ -47,17 +47,17 @@ func callPublish() *mcp.CallToolParams {
 	}
 }
 
-// reefNames is the surface this feature adds. Pinned as a list rather than
+// mangroveNames is the surface this feature adds. Pinned as a list rather than
 // counted, so adding a tool without deciding to is a failing test.
-var reefNames = []string{
-	"reef_publish", "reef_share", "reef_timeline", "reef_react", "reef_admit",
+var mangroveNames = []string{
+	"mangrove_publish", "mangrove_share", "mangrove_timeline", "mangrove_react", "mangrove_admit",
 }
 
 // listToolNames drives the real MCP client against a handler built with the
-// given reef client, and returns every advertised tool name.
-func listToolNames(t *testing.T, reefClient *reef.Client) []string {
+// given mangrove client, and returns every advertised tool name.
+func listToolNames(t *testing.T, mangroveClient *mangrove.Client) []string {
 	t.Helper()
-	h := newHarnessWithReef(t, reefClient)
+	h := newHarnessWithMangrove(t, mangroveClient)
 	sess := h.connect(t, mint(t, scopeA))
 	listed, err := sess.ListTools(context.Background(), nil)
 	if err != nil {
@@ -70,7 +70,7 @@ func listToolNames(t *testing.T, reefClient *reef.Client) []string {
 	return names
 }
 
-// THE OFF SWITCH. Unconfigured, not one reef tool exists -- absent, not
+// THE OFF SWITCH. Unconfigured, not one mangrove tool exists -- absent, not
 // present-and-refusing.
 //
 // This is not tidiness. Every registered tool is described to the model on
@@ -78,21 +78,21 @@ func listToolNames(t *testing.T, reefClient *reef.Client) []string {
 // deployment that never wanted the feature. It is also the whole of an
 // EXPERIMENTAL feature's blast radius: unset the config and the stack is the
 // stack it was before.
-func TestNoReefToolsWhenUnconfigured(t *testing.T) {
+func TestNoMangroveToolsWhenUnconfigured(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		client *reef.Client
+		client *mangrove.Client
 	}{
 		{"nil client", nil},
-		{"no base url", reef.New("", "secret")},
-		{"no token", reef.New("http://reef:8090", "")},
-		{"neither", reef.New("", "")},
+		{"no base url", mangrove.New("", "secret")},
+		{"no token", mangrove.New("http://mangrove:8090", "")},
+		{"neither", mangrove.New("", "")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			names := listToolNames(t, tc.client)
 			for _, got := range names {
-				if strings.HasPrefix(got, "reef_") {
-					t.Errorf("reef tool %q was registered with the reef %s", got, tc.name)
+				if strings.HasPrefix(got, "mangrove_") {
+					t.Errorf("mangrove tool %q was registered with the mangrove %s", got, tc.name)
 				}
 			}
 		})
@@ -100,23 +100,23 @@ func TestNoReefToolsWhenUnconfigured(t *testing.T) {
 }
 
 // Configured, exactly the five appear -- no more, no fewer.
-func TestReefToolsAppearWhenConfigured(t *testing.T) {
-	names := listToolNames(t, reef.New("http://reef:8090", "secret"))
+func TestMangroveToolsAppearWhenConfigured(t *testing.T) {
+	names := listToolNames(t, mangrove.New("http://mangrove:8090", "secret"))
 
 	seen := map[string]bool{}
 	for _, n := range names {
-		if strings.HasPrefix(n, "reef_") {
+		if strings.HasPrefix(n, "mangrove_") {
 			seen[n] = true
 		}
 	}
-	for _, want := range reefNames {
+	for _, want := range mangroveNames {
 		if !seen[want] {
 			t.Errorf("%s was not advertised", want)
 		}
 		delete(seen, want)
 	}
 	for extra := range seen {
-		t.Errorf("unexpected reef tool %q -- the surface is a budget, not a wish list", extra)
+		t.Errorf("unexpected mangrove tool %q -- the surface is a budget, not a wish list", extra)
 	}
 }
 
@@ -125,8 +125,8 @@ func TestReefToolsAppearWhenConfigured(t *testing.T) {
 // and REFUSES ITS BOOT on a collision -- so a duplicate here would not fail a
 // call, it would stop a member's container from starting, later, for one
 // member, with no relation in time to the change that caused it.
-func TestReefToolNamesDoNotCollide(t *testing.T) {
-	names := listToolNames(t, reef.New("http://reef:8090", "secret"))
+func TestMangroveToolNamesDoNotCollide(t *testing.T) {
+	names := listToolNames(t, mangrove.New("http://mangrove:8090", "secret"))
 	seen := map[string]bool{}
 	for _, n := range names {
 		if seen[n] {
@@ -139,23 +139,23 @@ func TestReefToolNamesDoNotCollide(t *testing.T) {
 	}
 }
 
-// Turning the reef on must not disturb the surface that was already there.
-func TestEnablingTheReefAddsOnlyReefTools(t *testing.T) {
+// Turning the mangrove on must not disturb the surface that was already there.
+func TestEnablingTheMangroveAddsOnlyMangroveTools(t *testing.T) {
 	before := listToolNames(t, nil)
-	after := listToolNames(t, reef.New("http://reef:8090", "secret"))
+	after := listToolNames(t, mangrove.New("http://mangrove:8090", "secret"))
 
 	beforeSet := map[string]bool{}
 	for _, n := range before {
 		beforeSet[n] = true
 	}
 	for _, n := range after {
-		if !beforeSet[n] && !strings.HasPrefix(n, "reef_") {
-			t.Errorf("enabling the reef added non-reef tool %q", n)
+		if !beforeSet[n] && !strings.HasPrefix(n, "mangrove_") {
+			t.Errorf("enabling the mangrove added non-mangrove tool %q", n)
 		}
 	}
-	if len(after) != len(before)+len(reefNames) {
-		t.Errorf("advertised %d tools with the reef on and %d with it off; want exactly %d more",
-			len(after), len(before), len(reefNames))
+	if len(after) != len(before)+len(mangroveNames) {
+		t.Errorf("advertised %d tools with the mangrove on and %d with it off; want exactly %d more",
+			len(after), len(before), len(mangroveNames))
 	}
 }
 
@@ -163,7 +163,7 @@ func TestEnablingTheReefAddsOnlyReefTools(t *testing.T) {
 // claim it can. This drives a real tool call through the real client and reads
 // what actually went on the wire.
 //
-// If tenantLicensed ever leaked out of this path, the reef would accept a
+// If tenantLicensed ever leaked out of this path, the mangrove would accept a
 // tenant-wide broadcast from a turn steered by untrusted text -- which is the
 // single worst thing this feature could do.
 func TestAgentCallsNeverClaimTenantLicence(t *testing.T) {
@@ -176,14 +176,14 @@ func TestAgentCallsNeverClaimTenantLicence(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHarnessWithReef(t, reef.New(upstream.URL, "secret"))
+	h := newHarnessWithMangrove(t, mangrove.New(upstream.URL, "secret"))
 	sess := h.connect(t, mint(t, scopeA))
 
 	if _, err := sess.CallTool(context.Background(), callPublish()); err != nil {
-		t.Fatalf("reef_publish: %v", err)
+		t.Fatalf("mangrove_publish: %v", err)
 	}
 	if len(bodies) != 1 {
-		t.Fatalf("the reef saw %d calls, want 1", len(bodies))
+		t.Fatalf("the mangrove saw %d calls, want 1", len(bodies))
 	}
 	body := bodies[0]
 	if _, present := body["tenantLicensed"]; present {

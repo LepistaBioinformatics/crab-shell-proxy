@@ -12,13 +12,13 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
-// memberReefServer wires a server at `reefURL`, which the tests point at a
-// stub standing in for crab-reef-network.
-func memberReefServer(reefURL string) *Server {
+// memberMangroveServer wires a server at `mangroveURL`, which the tests point at a
+// stub standing in for crab-mangrove-network.
+func memberMangroveServer(mangroveURL string) *Server {
 	cfg := &config.Config{
-		ContainerDataRoot: "/tmp",
-		ReefBaseURL:       reefURL,
-		ResolvedReefToken: reefTok,
+		ContainerDataRoot:     "/tmp",
+		MangroveBaseURL:       mangroveURL,
+		ResolvedMangroveToken: mangroveTok,
 		Agents: map[string]config.Agent{
 			"alpha": {Key: "alpha", ServiceName: "picoclaw-alpha", ResolvedToken: "bearer",
 				Mode: config.ModeContinuous},
@@ -27,15 +27,15 @@ func memberReefServer(reefURL string) *Server {
 	return &Server{Cfg: cfg, Resolver: identity.NewSDKResolver(), Mgr: newFakeOrch(), Pico: &fakeTurner{}}
 }
 
-// stubReef records the last body it was handed and answers 200.
-type stubReef struct {
+// stubMangrove records the last body it was handed and answers 200.
+type stubMangrove struct {
 	srv  *httptest.Server
 	last map[string]any
 }
 
-func newStubReef(t *testing.T) *stubReef {
+func newStubMangrove(t *testing.T) *stubMangrove {
 	t.Helper()
-	sr := &stubReef{}
+	sr := &stubMangrove{}
 	sr.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sr.last = map[string]any{}
 		_ = json.NewDecoder(r.Body).Decode(&sr.last)
@@ -59,21 +59,21 @@ func memberReq(t *testing.T, method, path, profileJSON, body string) *http.Reque
 	return r
 }
 
-const reefScope = "?tenant_id=" + tenantT + "&subs_acc_id=" + subsX
+const mangroveScope = "?tenant_id=" + tenantT + "&subs_acc_id=" + subsX
 
 // Unconfigured, none of the member routes exist either. Absent, not refusing —
 // the same rule the tools and the membership route follow.
-func TestReefMemberRoutesAbsentWhenUnconfigured(t *testing.T) {
-	s := memberReefServer("")
+func TestMangroveMemberRoutesAbsentWhenUnconfigured(t *testing.T) {
+	s := memberMangroveServer("")
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/reef/timeline"},
-		{http.MethodGet, "/v1/reef/capabilities"},
-		{http.MethodPost, "/v1/reef/admit"},
-		{http.MethodPost, "/v1/reef/decide"},
-		{http.MethodPost, "/v1/reef/revoke"},
+		{http.MethodGet, "/v1/mangrove/timeline"},
+		{http.MethodGet, "/v1/mangrove/capabilities"},
+		{http.MethodPost, "/v1/mangrove/admit"},
+		{http.MethodPost, "/v1/mangrove/decide"},
+		{http.MethodPost, "/v1/mangrove/revoke"},
 	} {
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, memberReq(t, tc.method, tc.path+reefScope,
+		s.Handler().ServeHTTP(w, memberReq(t, tc.method, tc.path+mangroveScope,
 			licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true), "{}"))
 		if w.Code != http.StatusNotFound {
 			t.Errorf("%s %s answered %d, want 404", tc.method, tc.path, w.Code)
@@ -85,17 +85,17 @@ func TestReefMemberRoutesAbsentWhenUnconfigured(t *testing.T) {
 // as the Service; this one signs as the Person, which is what gives the human
 // authority over their own bot.
 func TestMemberCallsActAsThePerson(t *testing.T) {
-	stub := newStubReef(t)
-	s := memberReefServer(stub.srv.URL)
+	stub := newStubMangrove(t)
+	s := memberMangroveServer(stub.srv.URL)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/reef/timeline"+reefScope,
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/mangrove/timeline"+mangroveScope,
 		licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), ""))
 	if w.Code != http.StatusOK {
 		t.Fatalf("timeline answered %d: %s", w.Code, w.Body.String())
 	}
 	if stub.last["as"] != "person" {
-		t.Errorf("the reef saw as=%v, want person", stub.last["as"])
+		t.Errorf("the mangrove saw as=%v, want person", stub.last["as"])
 	}
 }
 
@@ -103,25 +103,25 @@ func TestMemberCallsActAsThePerson(t *testing.T) {
 // profile rather than from anything the caller asserts. A plain member holding
 // write on the subscription is not a subscriptions-manager.
 func TestDecideRefusesWithoutAGoverningRole(t *testing.T) {
-	stub := newStubReef(t)
-	s := memberReefServer(stub.srv.URL)
+	stub := newStubMangrove(t)
+	s := memberMangroveServer(stub.srv.URL)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/reef/decide"+reefScope,
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/mangrove/decide"+mangroveScope,
 		licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true),
-		`{"activityId":"reef:act:1","accept":true}`))
+		`{"activityId":"mangrove:act:1","accept":true}`))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("a plain member decided a scope: %d %s", w.Code, w.Body.String())
 	}
 	if stub.last != nil {
-		t.Error("the refusal still reached the reef; it must be refused here")
+		t.Error("the refusal still reached the mangrove; it must be refused here")
 	}
 }
 
 // And a subscriptions-manager may, with `governs` sent as a resolved fact.
 func TestDecideAllowedForASubscriptionsManager(t *testing.T) {
-	stub := newStubReef(t)
-	s := memberReefServer(stub.srv.URL)
+	stub := newStubMangrove(t)
+	s := memberMangroveServer(stub.srv.URL)
 
 	// Two licensed records: the agent role that authorizes the workspace, and
 	// the governing role on the same subscription.
@@ -132,24 +132,24 @@ func TestDecideAllowedForASubscriptionsManager(t *testing.T) {
 		`]}}`
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/reef/decide"+reefScope,
-		profile, `{"activityId":"reef:act:1","accept":true}`))
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/mangrove/decide"+mangroveScope,
+		profile, `{"activityId":"mangrove:act:1","accept":true}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("a subscriptions-manager could not decide: %d %s", w.Code, w.Body.String())
 	}
 	if stub.last["governs"] != true {
-		t.Errorf("governs=%v reached the reef, want true", stub.last["governs"])
+		t.Errorf("governs=%v reached the mangrove, want true", stub.last["governs"])
 	}
 }
 
 // capabilities is what lets the UI make the pending reading ABSENT rather than
 // empty for somebody who governs nothing.
 func TestCapabilitiesReportsTheCallersAuthority(t *testing.T) {
-	stub := newStubReef(t)
-	s := memberReefServer(stub.srv.URL)
+	stub := newStubMangrove(t)
+	s := memberMangroveServer(stub.srv.URL)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/reef/capabilities"+reefScope,
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/mangrove/capabilities"+mangroveScope,
 		licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), ""))
 	if w.Code != http.StatusOK {
 		t.Fatalf("capabilities answered %d: %s", w.Code, w.Body.String())
@@ -168,10 +168,10 @@ func TestCapabilitiesReportsTheCallersAuthority(t *testing.T) {
 }
 
 // A TENANT MANAGER IS LICENSED ON THE TENANT, and that is the only way the
-// reef ever hears tenantLicensed=true. The MCP path cannot produce it.
+// mangrove ever hears tenantLicensed=true. The MCP path cannot produce it.
 func TestTenantManagerIsTenantLicensed(t *testing.T) {
-	stub := newStubReef(t)
-	s := memberReefServer(stub.srv.URL)
+	stub := newStubMangrove(t)
+	s := memberMangroveServer(stub.srv.URL)
 
 	profile := `{"accId":"` + accAlice + `","owners":[{"email":"u@x","isPrincipal":true}],` +
 		`"licensedResources":{"records":[` +
@@ -180,7 +180,7 @@ func TestTenantManagerIsTenantLicensed(t *testing.T) {
 		`]}}`
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/reef/capabilities"+reefScope, profile, ""))
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/mangrove/capabilities"+mangroveScope, profile, ""))
 	if w.Code != http.StatusOK {
 		t.Fatalf("capabilities answered %d: %s", w.Code, w.Body.String())
 	}
@@ -196,30 +196,30 @@ func TestTenantManagerIsTenantLicensed(t *testing.T) {
 }
 
 func TestAdmitAndRevokeValidateTheirBodies(t *testing.T) {
-	stub := newStubReef(t)
-	s := memberReefServer(stub.srv.URL)
+	stub := newStubMangrove(t)
+	s := memberMangroveServer(stub.srv.URL)
 	profile := licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true)
 
 	for _, tc := range []struct{ path, body string }{
-		{"/v1/reef/admit", `{}`},
-		{"/v1/reef/revoke", `{"objectId":"reef:obj:1"}`},
-		{"/v1/reef/revoke", `{"cell":"soil-ph"}`},
+		{"/v1/mangrove/admit", `{}`},
+		{"/v1/mangrove/revoke", `{"objectId":"mangrove:obj:1"}`},
+		{"/v1/mangrove/revoke", `{"cell":"soil-ph"}`},
 	} {
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, tc.path+reefScope, profile, tc.body))
+		s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, tc.path+mangroveScope, profile, tc.body))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("%s with %s answered %d, want 400", tc.path, tc.body, w.Code)
 		}
 	}
 }
 
-// AN UNREACHABLE REEF IS ITS OWN STATE, distinct from a refusal and from an
+// AN UNREACHABLE MANGROVE IS ITS OWN STATE, distinct from a refusal and from an
 // empty answer. The UI has to tell "nothing shared yet" from "the service is
 // down", and it can only do that if this layer keeps them apart.
-func TestUnreachableReefIsABadGateway(t *testing.T) {
-	s := memberReefServer("http://127.0.0.1:1")
+func TestUnreachableMangroveIsABadGateway(t *testing.T) {
+	s := memberMangroveServer("http://127.0.0.1:1")
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/reef/timeline"+reefScope,
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet, "/v1/mangrove/timeline"+mangroveScope,
 		licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), ""))
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("answered %d, want 502", w.Code)
@@ -229,24 +229,24 @@ func TestUnreachableReefIsABadGateway(t *testing.T) {
 	}
 }
 
-// A REFUSAL KEEPS ITS BODY. The reef names the addressee that was out of reach;
+// A REFUSAL KEEPS ITS BODY. The mangrove names the addressee that was out of reach;
 // flattening it would leave the member nothing to act on.
-func TestReefRefusalIsForwardedIntact(t *testing.T) {
-	reefSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestMangroveRefusalIsForwardedIntact(t *testing.T) {
+	mangroveSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"error":"out of reach: reef:group:tenant:t1","addressee":"reef:group:tenant:t1","delivered":false}`)
+		_, _ = io.WriteString(w, `{"error":"out of reach: mangrove:group:tenant:t1","addressee":"mangrove:group:tenant:t1","delivered":false}`)
 	}))
-	defer reefSrv.Close()
-	s := memberReefServer(reefSrv.URL)
+	defer mangroveSrv.Close()
+	s := memberMangroveServer(mangroveSrv.URL)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/reef/admit"+reefScope,
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/mangrove/admit"+mangroveScope,
 		licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true),
-		`{"activityId":"reef:act:1"}`))
+		`{"activityId":"mangrove:act:1"}`))
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("answered %d, want the reef's own 403", w.Code)
+		t.Fatalf("answered %d, want the mangrove's own 403", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "reef:group:tenant:t1") {
+	if !strings.Contains(w.Body.String(), "mangrove:group:tenant:t1") {
 		t.Errorf("the named addressee was lost: %s", w.Body.String())
 	}
 }

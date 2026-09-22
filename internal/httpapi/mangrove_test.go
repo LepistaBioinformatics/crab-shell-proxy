@@ -12,17 +12,17 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/identity"
 )
 
-const reefTok = "reef-secret"
+const mangroveTok = "mangrove-secret"
 
-// reefServer builds a server with the reef configured or not. BOTH halves are
+// mangroveServer builds a server with the mangrove configured or not. BOTH halves are
 // required, so the two arguments are separate: a base URL with no token and a
 // token with no base URL are each a misconfiguration, and each must read as
 // off rather than as half-on.
-func reefServer(orch Orchestrator, baseURL, tok string) *Server {
+func mangroveServer(orch Orchestrator, baseURL, tok string) *Server {
 	cfg := &config.Config{
-		ContainerDataRoot: "/tmp",
-		ReefBaseURL:       baseURL,
-		ResolvedReefToken: tok,
+		ContainerDataRoot:     "/tmp",
+		MangroveBaseURL:       baseURL,
+		ResolvedMangroveToken: tok,
 		Agents: map[string]config.Agent{
 			"alpha": {Key: "alpha", ServiceName: "picoclaw-alpha", ResolvedToken: "bearer",
 				Mode: config.ModeContinuous},
@@ -31,28 +31,28 @@ func reefServer(orch Orchestrator, baseURL, tok string) *Server {
 	return &Server{Cfg: cfg, Resolver: identity.NewSDKResolver(), Mgr: orch, Pico: &fakeTurner{}}
 }
 
-func reefReq(auth, query string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/v1/reef/subscription-members"+query, nil)
+func mangroveReq(auth, query string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/v1/mangrove/subscription-members"+query, nil)
 	if auth != "" {
 		r.Header.Set("Authorization", auth)
 	}
 	return r
 }
 
-// ABSENT, NOT 401, when the reef is not configured. This route discloses a
+// ABSENT, NOT 401, when the mangrove is not configured. This route discloses a
 // subscription's whole membership roll -- account ids and emails -- so a
 // deployment that has not opted in must grow no new surface at all. It is the
 // same rule /v1/instances follows for the same reason.
-func TestReefMembersRouteAbsentWhenUnconfigured(t *testing.T) {
+func TestMangroveMembersRouteAbsentWhenUnconfigured(t *testing.T) {
 	for _, tc := range []struct{ name, base, tok string }{
 		{"neither half", "", ""},
-		{"base url only", "http://reef:8090", ""},
-		{"token only", "", reefTok},
+		{"base url only", "http://mangrove:8090", ""},
+		{"token only", "", mangroveTok},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := reefServer(newFakeOrch(), tc.base, tc.tok)
+			s := mangroveServer(newFakeOrch(), tc.base, tc.tok)
 			w := httptest.NewRecorder()
-			s.Handler().ServeHTTP(w, reefReq("Bearer "+reefTok, "?tenant_id=t1&subs_acc_id=s1"))
+			s.Handler().ServeHTTP(w, mangroveReq("Bearer "+mangroveTok, "?tenant_id=t1&subs_acc_id=s1"))
 			if w.Code != http.StatusNotFound {
 				t.Errorf("answered %d, want 404 -- the route must be absent, not refusing", w.Code)
 			}
@@ -60,55 +60,55 @@ func TestReefMembersRouteAbsentWhenUnconfigured(t *testing.T) {
 	}
 }
 
-func TestReefMembersRefusesABadToken(t *testing.T) {
-	s := reefServer(newFakeOrch(), "http://reef:8090", reefTok)
-	for _, auth := range []string{"", "Bearer wrong", reefTok, "Bearer " + reefTok + "x"} {
+func TestMangroveMembersRefusesABadToken(t *testing.T) {
+	s := mangroveServer(newFakeOrch(), "http://mangrove:8090", mangroveTok)
+	for _, auth := range []string{"", "Bearer wrong", mangroveTok, "Bearer " + mangroveTok + "x"} {
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, reefReq(auth, "?tenant_id=t1&subs_acc_id=s1"))
+		s.Handler().ServeHTTP(w, mangroveReq(auth, "?tenant_id=t1&subs_acc_id=s1"))
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("auth %q answered %d, want 401", auth, w.Code)
 		}
 	}
 }
 
-// An agent's own bearer must not open this route. The reef credential gates a
+// An agent's own bearer must not open this route. The mangrove credential gates a
 // different capability, and a credential that gates two things cannot be
 // revoked for one of them.
-func TestReefMembersDoesNotAcceptAnAgentToken(t *testing.T) {
-	s := reefServer(newFakeOrch(), "http://reef:8090", reefTok)
+func TestMangroveMembersDoesNotAcceptAnAgentToken(t *testing.T) {
+	s := mangroveServer(newFakeOrch(), "http://mangrove:8090", mangroveTok)
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, reefReq("Bearer bearer", "?tenant_id=t1&subs_acc_id=s1"))
+	s.Handler().ServeHTTP(w, mangroveReq("Bearer bearer", "?tenant_id=t1&subs_acc_id=s1"))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("an agent token answered %d, want 401", w.Code)
 	}
 }
 
-func TestReefMembersNeedsBothQueryParameters(t *testing.T) {
-	s := reefServer(newFakeOrch(), "http://reef:8090", reefTok)
+func TestMangroveMembersNeedsBothQueryParameters(t *testing.T) {
+	s := mangroveServer(newFakeOrch(), "http://mangrove:8090", mangroveTok)
 	for _, q := range []string{"", "?tenant_id=t1", "?subs_acc_id=s1"} {
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, reefReq("Bearer "+reefTok, q))
+		s.Handler().ServeHTTP(w, mangroveReq("Bearer "+mangroveTok, q))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("query %q answered %d, want 400", q, w.Code)
 		}
 	}
 }
 
-func TestReefMembersReturnsTheRoll(t *testing.T) {
+func TestMangroveMembersReturnsTheRoll(t *testing.T) {
 	orch := newFakeOrch()
 	orch.users = []docker.UserRef{
 		{AccID: "alice", Role: "alpha", Email: "alice@example.test"},
 		{AccID: "bob", Role: "alpha", Email: "bob@example.test"},
 	}
-	s := reefServer(orch, "http://reef:8090", reefTok)
+	s := mangroveServer(orch, "http://mangrove:8090", mangroveTok)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, reefReq("Bearer "+reefTok, "?tenant_id=t1&subs_acc_id=s1"))
+	s.Handler().ServeHTTP(w, mangroveReq("Bearer "+mangroveTok, "?tenant_id=t1&subs_acc_id=s1"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("answered %d: %s", w.Code, w.Body.String())
 	}
 
-	var got reefMembersResponse
+	var got mangroveMembersResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -125,13 +125,13 @@ func TestReefMembersReturnsTheRoll(t *testing.T) {
 // A subscription nobody has a workspace under is a normal state. Answering it
 // as an error would turn "nobody to share with yet" into "the service is
 // broken", which is the distinction FR-J0 exists to keep.
-func TestReefMembersEmptySubscriptionIsNotAnError(t *testing.T) {
+func TestMangroveMembersEmptySubscriptionIsNotAnError(t *testing.T) {
 	orch := newFakeOrch()
 	orch.users = nil
-	s := reefServer(orch, "http://reef:8090", reefTok)
+	s := mangroveServer(orch, "http://mangrove:8090", mangroveTok)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, reefReq("Bearer "+reefTok, "?tenant_id=t1&subs_acc_id=s1"))
+	s.Handler().ServeHTTP(w, mangroveReq("Bearer "+mangroveTok, "?tenant_id=t1&subs_acc_id=s1"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("answered %d, want 200", w.Code)
 	}

@@ -453,11 +453,11 @@ func (s *Server) Handler() http.Handler {
 			// store to write into: with no Schedules the three tools are not
 			// offered at all, rather than offered and refusing.
 			Schedules: agentScheduleStore(s),
-			// The reef, when this deployment has one. Nil or unconfigured
-			// means the `reef_*` tools are not registered at all -- see
-			// Config.ReefBaseURL. Built here rather than held on Server
+			// The mangrove, when this deployment has one. Nil or unconfigured
+			// means the `mangrove_*` tools are not registered at all -- see
+			// Config.MangroveBaseURL. Built here rather than held on Server
 			// because nothing else in this package calls it.
-			Reef: s.reefClient(),
+			Mangrove: s.mangroveClient(),
 		}))
 	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
@@ -531,15 +531,15 @@ func (s *Server) Handler() http.Handler {
 	if s.Cfg.ResolvedTelemetryToken != "" {
 		mux.HandleFunc("GET /v1/instances", s.handleInstances)
 	}
-	// The one question crab-reef-network asks back. Registered ONLY when both
-	// halves of the reef configuration are present -- absent, not 401, for the
+	// The one question crab-mangrove-network asks back. Registered ONLY when both
+	// halves of the mangrove configuration are present -- absent, not 401, for the
 	// reason /v1/instances gives: this route discloses a subscription's whole
 	// membership roll, so a deployment that has not opted in grows no new
 	// surface. Requiring BOTH halves keeps "half-configured" from being a state
 	// that reaches a member.
-	if s.Cfg.ReefBaseURL != "" && s.Cfg.ResolvedReefToken != "" {
-		mux.HandleFunc("GET /v1/reef/subscription-members", s.handleReefSubscriptionMembers)
-		// The MEMBER's half. Unlike subscription-members above -- which the reef
+	if s.Cfg.MangroveBaseURL != "" && s.Cfg.ResolvedMangroveToken != "" {
+		mux.HandleFunc("GET /v1/mangrove/subscription-members", s.handleMangroveSubscriptionMembers)
+		// The MEMBER's half. Unlike subscription-members above -- which the mangrove
 		// itself calls on zombie_net with its own credential -- these are reached
 		// by a person through the gateway, and authorize against the injected
 		// mycelium profile like every other member route.
@@ -548,11 +548,11 @@ func (s *Server) Handler() http.Handler {
 		// first needs a role an agent never presents, and the second is the
 		// human's authority over their own bot, which an agent that could
 		// exercise could also reverse.
-		mux.HandleFunc("GET /v1/reef/timeline", s.handleReefTimeline)
-		mux.HandleFunc("GET /v1/reef/capabilities", s.handleReefCapabilities)
-		mux.HandleFunc("POST /v1/reef/admit", s.handleReefAdmit)
-		mux.HandleFunc("POST /v1/reef/decide", s.handleReefDecide)
-		mux.HandleFunc("POST /v1/reef/revoke", s.handleReefRevoke)
+		mux.HandleFunc("GET /v1/mangrove/timeline", s.handleMangroveTimeline)
+		mux.HandleFunc("GET /v1/mangrove/capabilities", s.handleMangroveCapabilities)
+		mux.HandleFunc("POST /v1/mangrove/admit", s.handleMangroveAdmit)
+		mux.HandleFunc("POST /v1/mangrove/decide", s.handleMangroveDecide)
+		mux.HandleFunc("POST /v1/mangrove/revoke", s.handleMangroveRevoke)
 	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched

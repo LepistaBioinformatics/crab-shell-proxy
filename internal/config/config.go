@@ -384,12 +384,12 @@ type Config struct {
 	// leave the deployment's whole tenant topology readable without a credential.
 	TelemetryToken secret `yaml:"telemetryToken"`
 
-	// ReefBaseURL is where crab-reef-network listens, and ReefToken is the
+	// MangroveBaseURL is where crab-mangrove-network listens, and MangroveToken is the
 	// shared secret proving this proxy is its one caller.
 	//
 	// BOTH unset is the default, and it disables the feature entirely: the
-	// `reef_*` tools are not registered, and GET /v1/reef/subscription-members
-	// is not registered. Absent, not refusing — the reef is EXPERIMENTAL and
+	// `mangrove_*` tools are not registered, and GET /v1/mangrove/subscription-members
+	// is not registered. Absent, not refusing — the mangrove is EXPERIMENTAL and
 	// optional, and a deployment that has not opted in must grow no new tool
 	// names (every registered tool costs context on every turn) and no new
 	// surface.
@@ -397,8 +397,8 @@ type Config struct {
 	// EITHER ONE ALONE IS A MISCONFIGURATION and is treated as off. A base URL
 	// with no token reaches a service that refuses everything; a token with no
 	// base URL reaches nothing.
-	ReefBaseURL string `yaml:"reefBaseURL"`
-	ReefToken   secret `yaml:"reefToken"`
+	MangroveBaseURL string `yaml:"mangroveBaseURL"`
+	MangroveToken   secret `yaml:"mangroveToken"`
 
 	// MediaMaxBytes bounds an uploaded file (media-upload feature). It is the
 	// only thing an upload is checked against: the extension allowlist that used
@@ -418,9 +418,9 @@ type Config struct {
 	// GET /v1/instances is not registered; see TelemetryToken.
 	ResolvedTelemetryToken string `yaml:"-"`
 
-	// ResolvedReefToken is filled by Load from ReefToken. Empty — or an empty
-	// ReefBaseURL — means the reef is off; see ReefBaseURL.
-	ResolvedReefToken string `yaml:"-"`
+	// ResolvedMangroveToken is filled by Load from MangroveToken. Empty — or an empty
+	// MangroveBaseURL — means the mangrove is off; see MangroveBaseURL.
+	ResolvedMangroveToken string `yaml:"-"`
 }
 
 // Load reads, validates, and env-resolves the config at path.
@@ -533,9 +533,9 @@ func Load(path string) (*Config, error) {
 		cfg.ResolvedTelemetryToken = telSec
 	}
 	// Same rule again: unset is "not configured", which here means neither the
-	// reef tools nor the membership route exist. See ReefBaseURL.
-	if reefSec, reefErr := cfg.ReefToken.resolve(); reefErr == nil {
-		cfg.ResolvedReefToken = reefSec
+	// mangrove tools nor the membership route exist. See MangroveBaseURL.
+	if mangroveSec, mangroveErr := cfg.MangroveToken.resolve(); mangroveErr == nil {
+		cfg.ResolvedMangroveToken = mangroveSec
 	}
 	return &cfg, nil
 }
@@ -576,12 +576,12 @@ func (c *Config) applyEnvOverrides() {
 		c.MCPBaseURL = v
 	}
 	// NO DEFAULT for either of these, unlike MCPBaseURL. A default base URL
-	// would make the reef half-configured out of the box, and "half" is the one
+	// would make the mangrove half-configured out of the box, and "half" is the one
 	// state this feature must not have: the token is what decides it is on, and
 	// a URL pointing at a service nobody deployed is not an improvement on
 	// nothing.
-	if v := os.Getenv("CRAB_REEF_BASE_URL"); v != "" {
-		c.ReefBaseURL = v
+	if v := os.Getenv("CRAB_MANGROVE_BASE_URL"); v != "" {
+		c.MangroveBaseURL = v
 	}
 	if v := os.Getenv("CRAB_GANGLION_IMAGE"); v != "" {
 		c.GanglionImage = v
