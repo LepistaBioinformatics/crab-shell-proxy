@@ -27,6 +27,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/mcpserver"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/memgraph"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/reef"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
@@ -453,6 +454,11 @@ func (s *Server) Handler() http.Handler {
 			// store to write into: with no Schedules the three tools are not
 			// offered at all, rather than offered and refusing.
 			Schedules: agentScheduleStore(s),
+			// The reef, when this deployment has one. Nil or unconfigured
+			// means the `reef_*` tools are not registered at all -- see
+			// Config.ReefBaseURL. Built here rather than held on Server
+			// because nothing else in this package calls it.
+			Reef: reef.New(s.Cfg.ReefBaseURL, s.Cfg.ResolvedReefToken),
 		}))
 	}
 	// admin-shared-content: authority-over-target ops, gated in-proxy via
@@ -525,6 +531,15 @@ func (s *Server) Handler() http.Handler {
 	// not opted in must grow no new surface at all. Mirrors /v1/mcp.
 	if s.Cfg.ResolvedTelemetryToken != "" {
 		mux.HandleFunc("GET /v1/instances", s.handleInstances)
+	}
+	// The one question crab-reef-network asks back. Registered ONLY when both
+	// halves of the reef configuration are present -- absent, not 401, for the
+	// reason /v1/instances gives: this route discloses a subscription's whole
+	// membership roll, so a deployment that has not opted in grows no new
+	// surface. Requiring BOTH halves keeps "half-configured" from being a state
+	// that reaches a member.
+	if s.Cfg.ReefBaseURL != "" && s.Cfg.ResolvedReefToken != "" {
+		mux.HandleFunc("GET /v1/reef/subscription-members", s.handleReefSubscriptionMembers)
 	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Unauthenticated OpenAPI document for mycelium tool discovery (fetched
