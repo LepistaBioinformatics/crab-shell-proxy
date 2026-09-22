@@ -29,8 +29,22 @@ shared-skills/                  the administrator's, read-only
 public/                         THE MEMBER SEES THIS. Nothing else.
 .shared/tenant/ …               files an administrator published (read-only)
 sessions/  windows/             your own transcripts and context; leave them alone
+.tool-output/                   large tool output, parked; a message points at a file here
+state/                          the harness's own; leave it alone
 .tmp/                           scratch; TMPDIR already points here
 ```
+
+When a command produces more output than fits in the conversation, the result you
+see keeps its first and last lines and names a file under `.tool-output/`. The
+whole of it is in that file — read it with the shell when you need the middle.
+Several turns later the inline part is dropped too and only the path is left; the
+file has not moved.
+
+The conversation itself is shortened the same way once it grows: the oldest
+messages stop being sent with each turn. They are not lost — `search_history`
+searches everything that was SAID earlier in this conversation, including what is
+no longer in front of you. It does not cover tool output; that is what the files
+above are for.
 
 **There is no `.secrets/` here.** Credentials reach this harness as environment
 variables, not as files — so read them from the environment and do not go looking
@@ -38,10 +52,15 @@ for a secrets directory. (The `shared-content` skill describes one; that part of
 is about the other harness this platform runs.)
 
 There is no `cron/` either. Your scheduled work is held outside this tree and you
-cannot read or write it as a file — but you can manage it through the
-`schedule_create`, `schedule_list` and `schedule_delete` tools, and the
-`scheduled-tasks` skill explains when to. The store staying out of reach is the
-point: creating one asks the member first, and a file you could write would not.
+cannot read or write it as a file. The store staying out of reach is the point:
+creating a task asks the member first, and a file you could write would not.
+
+**Whether you can schedule anything at all depends on the deployment**, like every
+other tool below. If `schedule_create` is in the tool set you were given this turn,
+the `scheduled-tasks` skill is there too and explains when to use it — what a
+scheduled run reaches (nobody), why each one is approved, and the limits. If it is
+not in your tool set, this deployment has no scheduling and saying otherwise to a
+member is the failure the last section of this file is about.
 
 **A project is a workspace of its own, beside this one, not inside it.** A turn in
 a project starts in that project's directory and cannot reach the main workspace or
@@ -52,6 +71,23 @@ one project to another; ask the member to hand it over through their own interfa
 A project's own directory holds the same shape, plus `PROJECT.md` — the instructions
 the member wrote for that project — and its own `memory/MEMORY.md`, separate from
 this one.
+
+## Files left over from the other harness
+
+Some workspaces were run by **picoclaw** before this platform moved to the
+ganglion, and a migrated one can still carry that harness's files: a `config.json`
+and a `.security.yml` above this tree, a `.secrets/` directory, a `cron/`
+directory, and skills describing a browser, `gh`, `tmux` or a Raspberry Pi.
+
+**All of it is deprecated and none of it applies to you.** Those skills describe a
+machine that is not this one — see the last section — and the directories are read
+by nothing here. The orchestrator moves them into a backup outside this tree as it
+finds them, so what you see is transitional.
+
+So: do not act on a skill that assumes tools this image does not have, do not go
+looking for `.secrets/` or `cron/`, and do not recreate any of them. If a member
+asks about something that only existed under the old harness, say it is not part of
+this runtime rather than improvising an equivalent.
 
 ## Handing a file to the member
 

@@ -268,6 +268,20 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 		if err != nil {
 			return Target{}, err
 		}
+		// AFTER provisioning and BEFORE the container starts, so a leftover is
+		// gone from the tree the next turn reads rather than from the one after
+		// it. Only a workspace MIGRATED from picoclaw has anything to move; a
+		// ganglion-native one costs a handful of stat calls here.
+		//
+		// Never fatal. A file that has sat there for months staying one more
+		// turn is not worth refusing a member their conversation.
+		if swept, serr := m.sweepPicoclawLeftovers(userDir); serr != nil {
+			m.logf("workspace %s/%s: picoclaw leftovers partly swept (%d moved): %v",
+				key.Role, key.UserAccID, swept, serr)
+		} else if swept > 0 {
+			m.logf("workspace %s/%s: moved %d picoclaw leftover(s) into %s",
+				key.Role, key.UserAccID, swept, PicoclawBackupDir)
+		}
 		return m.ensureGanglionRunning(ctx, agent, key, name, authToken)
 	}
 	authToken, err = provision(userDir, templateDir, personaDir,
