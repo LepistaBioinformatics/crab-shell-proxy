@@ -80,6 +80,29 @@ mcpTokenSecret: { env: "CRAB_MCP_TOKEN_SECRET" }
 # tenant/subscription/user topology, so a forgotten secret must yield no endpoint.
 telemetryToken: { env: "CRAB_TELEMETRY_TOKEN" }
 
+# crab-reef-network: where it listens, and the shared secret proving this proxy
+# is its one caller.
+#
+# BOTH ARE REQUIRED and both default to unset, which switches the feature off
+# entirely: no `reef_*` tools registered, no member routes, no membership route.
+# Absent, not refusing -- every registered tool is described to the model on
+# every turn, so a tool that can only fail would cost context forever in a
+# deployment that never wanted the feature.
+#
+# reefToken is NOT an agent token and NOT mcpTokenSecret. It gates a route that
+# answers with a subscription's whole roll of account ids and emails, and a
+# credential that gates two capabilities cannot be revoked for one of them.
+#
+# reefBaseURL is NOT declared here, and that is not an omission: it is a plain
+# string rather than a secret, so it takes the CRAB_REEF_BASE_URL environment
+# override directly the way mcpBaseURL does. Writing `{ env: ... }` for it would
+# not even unmarshal.
+#
+# There is deliberately no DEFAULT for it either, unlike mcpBaseURL: a default
+# would make the reef half-configured out of the box, and half is the one state
+# this feature must not have.
+reefToken: { env: "CRAB_REEF_TOKEN" }
+
 # The origin a SPAWNED CONTAINER uses to reach this proxy; it becomes the `url` of
 # the MCP server injected into each workspace. The proxy cannot infer the name it
 # answers to on the container network, so it is configured here. Override with
