@@ -11,6 +11,7 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -47,6 +48,15 @@ type Deps struct {
 	// no caller can select a project, and a call that tries is refused rather
 	// than quietly served the member's global graph.
 	OwnsProject func(memgraph.Scope, string) (bool, error)
+	// OpenWorkspaceFile opens one of the member's own workspace files, so the
+	// agent can put a document in a post instead of pasting it.
+	//
+	// OPTIONAL. Nil means mangrove_publish does not offer the `file` argument at
+	// all -- absent rather than present-and-refusing, the same rule the schedule
+	// tools follow: a tool argument the model can see but never use is one it
+	// will keep trying.
+	OpenWorkspaceFile func(memgraph.Scope, string) (io.ReadCloser, string, error)
+
 	// Schedules lets an agent manage its own scheduled tasks.
 	//
 	// OPTIONAL, and nil is a real configuration: the three schedule tools are
@@ -143,6 +153,7 @@ type server struct {
 	logf            func(string, ...any)
 	sourceFor       func(memgraph.Scope) (string, bool)
 	ownsProject     func(memgraph.Scope, string) (bool, error)
+	openFile        func(memgraph.Scope, string) (io.ReadCloser, string, error)
 	schedules       ScheduleStore
 	mangrove        *mangrove.Client
 	resolveAudience func(memgraph.Scope, []string) ([]string, error)
@@ -190,8 +201,9 @@ func NewHandler(d Deps) http.Handler {
 		d.Logf = func(string, ...any) {}
 	}
 	s := &server{store: d.Store, secret: d.Secret, logf: d.Logf,
-		sourceFor: d.SourceFor, ownsProject: d.OwnsProject, schedules: d.Schedules,
-		mangrove: d.Mangrove, resolveAudience: d.ResolveAudience}
+		sourceFor: d.SourceFor, ownsProject: d.OwnsProject, openFile: d.OpenWorkspaceFile,
+		schedules: d.Schedules,
+		mangrove:  d.Mangrove, resolveAudience: d.ResolveAudience}
 
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    ServerName,

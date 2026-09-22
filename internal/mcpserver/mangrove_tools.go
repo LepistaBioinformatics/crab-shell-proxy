@@ -2,6 +2,12 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"sort"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -50,6 +56,12 @@ type mangrovePublishIn struct {
 	Content   string   `json:"content"`
 	MediaType string   `json:"mediaType"`
 	To        []string `json:"to"`
+
+	// Entities publishes a piece of the agent's own memory graph -- those
+	// entities AND the relations among them.
+	Entities []string `json:"entities"`
+	// File publishes one of the member's workspace files by its path.
+	File string `json:"file"`
 }
 
 type mangroveShareIn struct {
@@ -112,22 +124,18 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 			"You cannot address a group, neither a subscription nor a tenant: " +
 			"broadcasting to a whole scope is a human action, taken in the web UI " +
 			"by somebody who governs it.",
-		InputSchema: object(map[string]*jsonschema.Schema{
-			"type":      str("MemoryNote for a fact or note, MemoryFile for a document"),
-			"cell":      str("What this memory is ABOUT -- the entity name or file path. Two authors may hold different claims about one cell and neither overwrites the other."),
-			"content":   str("The memory itself"),
-			"mediaType": str("The format of `content`: text/markdown for prose, text/plain otherwise. Say it rather than letting the reader guess."),
-			"to":        strArray("Who to address. Empty means private to you."),
-		}, "type", "cell", "content"),
+		InputSchema: s.publishSchema(),
 	}, tool(s, func(sc memgraph.Scope, in mangrovePublishIn) (any, error) {
 		to, err := s.audience(sc, in.To)
 		if err != nil {
 			return nil, err
 		}
-		return s.mangrove.Publish(context.Background(), scopeTuple(sc), mangrove.AsService, agentHoldsNoLicences,
-			mangrove.Object{
-				Type: in.Type, Cell: in.Cell, Content: in.Content, MediaType: in.MediaType,
-			}, to)
+		obj, err := s.publishObject(sc, in)
+		if err != nil {
+			return nil, err
+		}
+		return s.mangrove.Publish(context.Background(), scopeTuple(sc), mangrove.AsService,
+			agentHoldsNoLicences, obj, to)
 	}))
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -186,4 +194,103 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 	}, tool(s, func(sc memgraph.Scope, in mangroveAdmitIn) (any, error) {
 		return s.mangrove.Admit(context.Background(), scopeTuple(sc), mangrove.AsService, in.ActivityID)
 	}))
+}
+
+// publishSchema offers `file` only where the proxy wired a way to read one.
+// Absent rather than present-and-refusing: an argument the model can see but
+// never use is one it will keep trying.
+func (s *server) publishSchema() *jsonschema.Schema {
+	props := map[string]*jsonschema.Schema{
+		"type":      str("MemoryNote for a fact or note, MemoryFile for a document"),
+		"cell":      str("What this memory is ABOUT -- the entity name. Two authors may hold different claims about one cell and neither overwrites the other. Ignored when you publish entities or a file, which derive it."),
+		"content":   str("The memory itself, as prose"),
+		"mediaType": str("The format of `content`: text/markdown for prose, text/plain otherwise. Say it rather than letting the reader guess."),
+		"entities":  strArray("Instead of `content`: names of entities in YOUR memory graph to share. The relations among them travel too."),
+		"to":        strArray("Who to address. Empty means private to you."),
+	}
+	if s.openFile != nil {
+		props["file"] = str("Instead of `content`: the path of one of your workspace files, like public/report.pdf")
+	}
+	return object(props, "type")
+}
+
+// publishObject turns the three shapes into one object. EXACTLY ONE, because
+// `cell` is the reduction key and each shape derives it differently -- two at
+// once would leave a reader asking which part is the content.
+func (s *server) publishObject(sc memgraph.Scope, in mangrovePublishIn) (mangrove.Object, error) {
+	kinds := 0
+	if strings.TrimSpace(in.Content) != "" {
+		kinds++
+	}
+	if len(in.Entities) > 0 {
+		kinds++
+	}
+	if strings.TrimSpace(in.File) != "" {
+		kinds++
+	}
+	if kinds != 1 {
+		return mangrove.Object{}, errors.New("publish exactly one of content, entities or file")
+	}
+
+	switch {
+	case len(in.Entities) > 0:
+		g, err := s.store.OpenNodes(sc, in.Entities)
+		if err != nil {
+			return mangrove.Object{}, err
+		}
+		if len(g.Entities) == 0 {
+			return mangrove.Object{}, errors.New("none of those entities are in your memory graph")
+		}
+		body, err := json.Marshal(map[string]any{"entities": g.Entities, "relations": g.Relations})
+		if err != nil {
+			return mangrove.Object{}, err
+		}
+		return mangrove.Object{
+			Type:      "MemoryNote",
+			Cell:      mangroveFragmentCell(g.Entities),
+			Content:   string(body),
+			MediaType: mangrove.GraphFragmentMediaType,
+		}, nil
+
+	case strings.TrimSpace(in.File) != "":
+		if s.openFile == nil {
+			return mangrove.Object{}, errors.New("this deployment cannot publish workspace files")
+		}
+		rc, display, err := s.openFile(sc, in.File)
+		if err != nil {
+			return mangrove.Object{}, err
+		}
+		defer rc.Close()
+		digest, size, err := s.mangrove.PutBlob(context.Background(), rc)
+		if err != nil {
+			return mangrove.Object{}, err
+		}
+		return mangrove.Object{
+			Type: "MemoryFile", Cell: in.File, Blob: digest, FileName: display, Size: size,
+		}, nil
+
+	default:
+		cell := strings.TrimSpace(in.Cell)
+		if cell == "" {
+			return mangrove.Object{}, errors.New("cell is required: it is what the reduction is keyed by")
+		}
+		typ := in.Type
+		if typ == "" {
+			typ = "MemoryNote"
+		}
+		return mangrove.Object{Type: typ, Cell: cell, Content: in.Content, MediaType: in.MediaType}, nil
+	}
+}
+
+// mangroveFragmentCell mirrors the proxy's own derivation, and is duplicated for
+// the same reason mangroveServiceID is: the shape is a wire contract between two
+// surfaces, not an implementation detail of either.
+func mangroveFragmentCell(entities []memgraph.Entity) string {
+	names := make([]string, 0, len(entities))
+	for _, e := range entities {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	return "graph:" + hex.EncodeToString(sum[:])[:12]
 }
