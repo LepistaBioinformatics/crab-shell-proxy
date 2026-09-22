@@ -154,6 +154,15 @@ type Licences struct {
 	Groups bool
 }
 
+// GraphFragmentMediaType marks an object whose content is a piece of somebody's
+// memory graph rather than prose.
+//
+// It is a media type rather than a third ObjectType because a fragment IS a note
+// -- text about what is remembered -- and it stores and travels identically. A
+// new enum value would force a branch in every consumer that currently needs
+// none, to tell apart two things that differ only in how they are read.
+const GraphFragmentMediaType = "application/vnd.mangrove.graph+json"
+
 // Object is one unit of shared memory.
 type Object struct {
 	ID        string `json:"id,omitempty"`
@@ -161,6 +170,12 @@ type Object struct {
 	Cell      string `json:"cell"`
 	Content   string `json:"content,omitempty"`
 	MediaType string `json:"mediaType,omitempty"`
+
+	// Blob names content in the mangrove's blob store, for a MemoryFile. The
+	// bytes never travel through here.
+	Blob     string `json:"blob,omitempty"`
+	FileName string `json:"fileName,omitempty"`
+	Size     int64  `json:"size,omitempty"`
 }
 
 type publishReq struct {
@@ -273,4 +288,75 @@ func (c *Client) Revoke(ctx context.Context, t Tuple, objectID, cell string) (js
 		base:     base{Tuple: t, As: AsPerson},
 		ObjectID: objectID, Cell: cell,
 	})
+}
+
+// PutBlob streams content into the mangrove's blob store and returns its digest.
+//
+// It STREAMS rather than taking a []byte: the caller is copying a member's file,
+// which may be megabytes, and buffering it in the proxy to hand it to a store
+// that is itself streaming would be two copies for no reason.
+func (c *Client) PutBlob(ctx context.Context, r io.Reader) (digest string, size int64, err error) {
+	if !c.Enabled() {
+		return "", 0, fmt.Errorf("mangrove: not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/v1/blob", r)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("mangrove: unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", 0, fmt.Errorf("mangrove: read body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", 0, &Error{Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+	}
+	var out struct {
+		Blob string `json:"blob"`
+		Size int64  `json:"size"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", 0, fmt.Errorf("mangrove: decode blob reply: %w", err)
+	}
+	return out.Blob, out.Size, nil
+}
+
+// FetchBlob opens the bytes of content this member can see a live post naming.
+//
+// The caller closes the reader. It is NOT read into memory here for the same
+// reason PutBlob streams, and because the proxy's own handler is going to copy
+// it straight into a response.
+func (c *Client) FetchBlob(ctx context.Context, t Tuple, digest string) (io.ReadCloser, string, int64, error) {
+	if !c.Enabled() {
+		return nil, "", 0, fmt.Errorf("mangrove: not configured")
+	}
+	body, err := json.Marshal(map[string]any{"tuple": t, "blob": digest})
+	if err != nil {
+		return nil, "", 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+"/internal/v1/blob/fetch", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("mangrove: unreachable: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, "", 0, &Error{Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+	}
+	return resp.Body, resp.Header.Get("Content-Disposition"), resp.ContentLength, nil
 }

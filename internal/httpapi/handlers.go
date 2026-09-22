@@ -559,6 +559,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /v1/mangrove/timeline", s.handleMangroveTimeline)
 		mux.HandleFunc("GET /v1/mangrove/capabilities", s.handleMangroveCapabilities)
 		mux.HandleFunc("POST /v1/mangrove/publish", s.handleMangrovePublish)
+		mux.HandleFunc("GET /v1/mangrove/blob", s.handleMangroveBlob)
+		mux.HandleFunc("POST /v1/mangrove/merge", s.handleMangroveMerge)
 		mux.HandleFunc("POST /v1/mangrove/admit", s.handleMangroveAdmit)
 		mux.HandleFunc("POST /v1/mangrove/decide", s.handleMangroveDecide)
 		mux.HandleFunc("POST /v1/mangrove/revoke", s.handleMangroveRevoke)

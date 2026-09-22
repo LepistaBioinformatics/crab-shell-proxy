@@ -48,6 +48,33 @@ type publishBody struct {
 	MediaType string               `json:"mediaType"`
 	To        []string             `json:"to"`
 	ToEmails  []publishEmailTarget `json:"toEmails"`
+
+	// File is a workspace media path -- `public/report.pdf`. The proxy reads the
+	// file and streams it into the mangrove's blob store; the post names the
+	// digest. The member never uploads it again.
+	File string `json:"file"`
+	// Entities are memory-graph entity names. The post carries those entities
+	// AND THE RELATIONS AMONG THEM, which is what makes the fragment usable
+	// rather than a list of disconnected nodes.
+	Entities []string `json:"entities"`
+}
+
+// WHAT A POST CARRIES IS EXACTLY ONE THING. Prose, a file, or a piece of the
+// graph. Allowing two would make `cell` ambiguous -- it is the reduction key, and
+// each kind derives it differently -- and would leave a reader asking which part
+// of an object is the content.
+func (b publishBody) kinds() int {
+	n := 0
+	if strings.TrimSpace(b.Content) != "" {
+		n++
+	}
+	if strings.TrimSpace(b.File) != "" {
+		n++
+	}
+	if len(b.Entities) > 0 {
+		n++
+	}
+	return n
 }
 
 // handleMangrovePublish serves POST /v1/mangrove/publish -- a person composing a
@@ -57,7 +84,7 @@ type publishBody struct {
 // not by their bot: the recipient must be able to tell which of the two wrote
 // something, and the whole governance model rests on that distinction.
 func (s *Server) handleMangrovePublish(w http.ResponseWriter, r *http.Request) {
-	key, ident, ok := s.mangroveCaller(w, r, true)
+	key, ident, agent, project, ok := s.mangroveWriteCaller(w, r)
 	if !ok {
 		return
 	}
@@ -67,20 +94,15 @@ func (s *Server) handleMangrovePublish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("malformed body"))
 		return
 	}
-	body.Cell = strings.TrimSpace(body.Cell)
-	if body.Cell == "" {
-		writeJSON(w, http.StatusBadRequest, errBody(`"cell" is required: it is what the reduction is keyed by`))
-		return
-	}
-	if strings.TrimSpace(body.Content) == "" {
-		writeJSON(w, http.StatusBadRequest, errBody(`"content" is required`))
-		return
-	}
-	mediaType, ok := composedMediaType(body.MediaType)
-	if !ok {
+	if body.kinds() != 1 {
 		writeJSON(w, http.StatusBadRequest,
-			errBody(`"mediaType" must be text/markdown or text/plain`))
+			errBody(`exactly one of "content", "file" or "entities" is required`))
 		return
+	}
+
+	obj, err := s.composedObject(r.Context(), w, key, agent, project, body)
+	if err != nil {
+		return // composedObject wrote the response
 	}
 
 	audience, err := s.composedAudience(key, body)
@@ -98,15 +120,7 @@ func (s *Server) handleMangrovePublish(w http.ResponseWriter, r *http.Request) {
 		Groups: governs(ident, key),
 	}
 
-	raw, err := s.mangroveClient().Publish(r.Context(), s.mangroveTuple(key), mangrove.AsPerson, lic,
-		mangrove.Object{
-			// MemoryNote only. MemoryFile implies an upload path this route does
-			// not build, and a composed body is a note by definition.
-			Type:      "MemoryNote",
-			Cell:      body.Cell,
-			Content:   body.Content,
-			MediaType: mediaType,
-		}, audience)
+	raw, err := s.mangroveClient().Publish(r.Context(), s.mangroveTuple(key), mangrove.AsPerson, lic, obj, audience)
 	s.writeMangroveResult(w, raw, err)
 }
 
