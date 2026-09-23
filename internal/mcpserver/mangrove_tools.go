@@ -186,8 +186,16 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "mangrove_admit",
-		Description: "Take a memory somebody sent you directly into your own memory. " +
-			"Until it is admitted it is visible to your person but is not yours.",
+		// THIS DESCRIPTION USED TO CLAIM THE TOOL WROTE TO MEMORY. It does not
+		// and never did: admitting emits an Accept and writes nothing anywhere.
+		// It became actively wrong once merging a shared fragment into the graph
+		// shipped as a PERSON's act (AD-031) -- a model told this tool takes
+		// something into its memory will report a merge that did not happen.
+		Description: "Accept something somebody sent you: it stops being held and " +
+			"joins what you can read in mangrove_timeline. " +
+			"THIS DOES NOT WRITE ANYTHING INTO YOUR MEMORY OR YOUR KNOWLEDGE GRAPH. " +
+			"Taking a shared memory-graph fragment into the graph is the member's " +
+			"own act, in their interface -- say so rather than reporting it done.",
 		InputSchema: object(map[string]*jsonschema.Schema{
 			"activityId": str("The held activity id, from mangrove_timeline's `held` list"),
 		}, "activityId"),
