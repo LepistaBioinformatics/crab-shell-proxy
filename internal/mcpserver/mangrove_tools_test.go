@@ -311,3 +311,71 @@ func TestPublishingEntitiesNobodyHasIsRefused(t *testing.T) {
 		t.Error("publishing entities nobody has was accepted")
 	}
 }
+
+// WHAT THE TOOL SAYS IT DOES IS WHAT THE MODEL WILL REPORT HAVING DONE.
+//
+// `mangrove_admit`'s description claimed for months that it took a memory "into
+// your own memory". It never did -- admitting emits an Accept and writes nothing
+// anywhere -- and the claim became actively harmful once merging a shared
+// fragment into the graph shipped as a PERSON's act (AD-031): a model told this
+// tool writes to its memory will report a merge that did not happen.
+//
+// Prose is the one part of a tool nothing else checks, which is how it stayed
+// wrong. This pins the correction rather than the wording: the description has to
+// keep saying, in as many words, that it does not write.
+func TestAdmitDoesNotClaimToWriteMemory(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+
+	h := newHarnessWithMangrove(t, mangrove.New(upstream.URL, "secret"))
+	sess := h.connect(t, mint(t, scopeA))
+	tools, err := sess.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var admit string
+	for _, tl := range tools.Tools {
+		if tl.Name == "mangrove_admit" {
+			admit = tl.Description
+		}
+	}
+	if admit == "" {
+		t.Fatal("mangrove_admit is not advertised")
+	}
+	if !strings.Contains(admit, "DOES NOT WRITE ANYTHING INTO YOUR MEMORY") {
+		t.Errorf("the disclaimer is gone; a model will report a merge it did not do:\n%s", admit)
+	}
+	if strings.Contains(strings.ToLower(admit), "into your own memory.") {
+		t.Errorf("the old claim is back:\n%s", admit)
+	}
+}
+
+// The agent's publish tool must not offer a group as an addressee, because the
+// gate refuses one -- a suggestion the model cannot act on is one it will keep
+// trying.
+func TestPublishToolDoesNotOfferAGroup(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+
+	h := newHarnessWithMangrove(t, mangrove.New(upstream.URL, "secret"))
+	sess := h.connect(t, mint(t, scopeA))
+	tools, err := sess.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range tools.Tools {
+		if tl.Name != "mangrove_publish" {
+			continue
+		}
+		if !strings.Contains(tl.Description, "cannot address a group") {
+			t.Errorf("publish does not say groups are closed to it:\n%s", tl.Description)
+		}
+		if strings.Contains(tl.Description, "mangrove:group:subscription") {
+			t.Errorf("publish still offers a group id as an example:\n%s", tl.Description)
+		}
+	}
+}
