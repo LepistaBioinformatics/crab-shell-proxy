@@ -225,6 +225,11 @@ func (m *Manager) EnsureRunning(ctx context.Context, agent config.Agent, key Wor
 	}
 
 	userDir := config.UserWorkspace(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role, key.UserAccID)
+	// Keep the owner marker current. Never fatal: a stale label is a worse search
+	// result, not a reason to refuse somebody their conversation.
+	if err := refreshOwnerEmail(userDir, key, ownerEmail); err != nil {
+		m.logf("workspace %s/%s: owner marker not refreshed: %v", key.Role, key.UserAccID, err)
+	}
 	templateDir := config.TemplatesDir(m.cfg.ContainerDataRoot, agent.Template)
 	// Provision the per-user data dir and obtain picoclaw's pico channel token,
 	// persisted per user so a returning user reuses it.

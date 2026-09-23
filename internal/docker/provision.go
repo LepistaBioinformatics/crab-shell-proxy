@@ -376,3 +376,36 @@ func readPicoToken(path string) (string, error) {
 	}
 	return "", nil
 }
+
+// refreshOwnerEmail keeps .crab-owner.json's email current on a workspace that
+// already exists.
+//
+// THE MARKER WAS WRITE-ONCE, AND ONE PROVISIONING PATH WRITES IT EMPTY.
+// provision() drops the file only on FIRST provision, and reconcile() calls
+// EnsureRunning with no email at boot -- so a workspace first created by a
+// reconcile recorded "" and kept it forever. ListSubscriptionUsers labels a
+// member from that file, and the mangrove's directory searches those labels, so
+// every search answered with an empty result while the address sat in mycelium
+// the whole time.
+//
+// Refreshed HERE rather than fixed inside provision, because fixing provision
+// would only help workspaces created after the fix. This heals an existing one
+// on its owner's next turn, which is the only thing that helps the workspaces
+// that are already broken.
+//
+// AN EMPTY INCOMING EMAIL NEVER OVERWRITES A GOOD ONE. reconcile still passes
+// "" at boot, and a sweep must not undo what a turn wrote.
+func refreshOwnerEmail(userDir string, key WorkspaceKey, email string) error {
+	if email == "" {
+		return nil
+	}
+	if _, err := os.Stat(userDir); err != nil {
+		// Not provisioned yet; provision writes the marker itself, with this
+		// same email.
+		return nil
+	}
+	if ownerEmail(userDir) == email {
+		return nil
+	}
+	return writeOwnerFile(userDir, key, email)
+}
