@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -166,7 +167,7 @@ func TestTheSecretEnvironmentCarriesEveryCandidateAndProvider(t *testing.T) {
 			model("backup", "p", "m", "https://e/v1", "sk-2"),
 			model("keyless", "p", "m", "https://e/v1", ""),
 		},
-	}, map[string]string{"brave": "BSA"})
+	}, map[string]string{"brave": "BSA"}, nil)
 
 	joined := strings.Join(env, "\n")
 	for _, want := range []string{
@@ -197,9 +198,9 @@ func TestTheSecretEnvironmentIsOrdered(t *testing.T) {
 		},
 	}
 	web := map[string]string{"tavily": "t", "brave": "b"}
-	first := strings.Join(ganglionSecretEnv(res, web), "\n")
+	first := strings.Join(ganglionSecretEnv(res, web, nil), "\n")
 	for i := 0; i < 20; i++ {
-		if got := strings.Join(ganglionSecretEnv(res, web), "\n"); got != first {
+		if got := strings.Join(ganglionSecretEnv(res, web, nil), "\n"); got != first {
 			t.Fatalf("order changed between calls:\n%s\n---\n%s", first, got)
 		}
 	}
@@ -273,7 +274,7 @@ func TestTheFallbackPathDoesNotRecreateOnEveryEnsure(t *testing.T) {
 	}
 	res := registry.Resolution{Primary: agentModel}
 
-	secrets := ganglionSecretEnv(res, nil)
+	secrets := ganglionSecretEnv(res, nil, nil)
 	// What the container is actually created with, both halves together.
 	created := append([]string{
 		"GANGLION_ADDR=0.0.0.0:18800",
@@ -282,14 +283,14 @@ func TestTheFallbackPathDoesNotRecreateOnEveryEnsure(t *testing.T) {
 	}, secrets...)
 
 	// The next ensure recomputes the same secrets from the same fallback.
-	if ganglionSecretDrift(ganglionSecretEnv(res, nil), created) {
+	if ganglionSecretDrift(ganglionSecretEnv(res, nil, nil), created) {
 		t.Fatal("the fallback path reports drift against the container it just created: every turn would recreate it")
 	}
 
 	// And it stays stable across many ensures, which is what a recreate loop
 	// would look like if the derivation were merely unordered rather than wrong.
 	for i := 0; i < 10; i++ {
-		if ganglionSecretDrift(ganglionSecretEnv(res, nil), created) {
+		if ganglionSecretDrift(ganglionSecretEnv(res, nil, nil), created) {
 			t.Fatalf("drift appeared on ensure %d", i+2)
 		}
 	}
@@ -301,11 +302,108 @@ func TestTheFallbackPathDoesNotRecreateOnEveryEnsure(t *testing.T) {
 // candidate for "no API key".
 func TestAPunctuatedModelNameRoundTrips(t *testing.T) {
 	res := registry.Resolution{Primary: model("gpt-5.4", "openai", "gpt-5.4", "https://e/v1", "sk-1")}
-	secrets := ganglionSecretEnv(res, nil)
+	secrets := ganglionSecretEnv(res, nil, nil)
 	if len(secrets) != 1 || !strings.HasPrefix(secrets[0], "GANGLION_MODEL_KEY_GPT_5_4=") {
 		t.Fatalf("secrets = %v", secrets)
 	}
-	if ganglionSecretDrift(ganglionSecretEnv(res, nil), secrets) {
+	if ganglionSecretDrift(ganglionSecretEnv(res, nil, nil), secrets) {
 		t.Fatal("a punctuated model name reported drift against itself")
+	}
+}
+
+// THE MEMBER'S OWN SECRETS, WHICH HAD NO PATH TO A GANGLION AGENT AT ALL.
+//
+// `.env` and `secrets.json` are the two sinks the secrets tab writes, and what a
+// picoclaw agent found as files in a mounted `.secrets/`. The ganglion has no such
+// bind and nothing read those two sinks -- only `native.yml`'s `web.` slots, which
+// are the harness's own search provider and never reach the agent either. A member
+// migrating from picoclaw saved a credential, got a 200 back, and their agent could
+// not see it, with nothing anywhere reporting the gap.
+func TestMemberSecretsBecomeMarkedEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("DB_URL=postgres://x\nEMPTY=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secrets.json"),
+		[]byte(`{"STRIPE_KEY":"sk_live","BLANK":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	member, err := ganglionMemberSecrets(dir)
+	if err != nil {
+		t.Fatalf("read member secrets: %v", err)
+	}
+	// BOTH SINKS, merged. Which one a member picked is about the tool that will
+	// read it, not about who may -- and for a ganglion it stops mattering.
+	if member["DB_URL"] != "postgres://x" || member["STRIPE_KEY"] != "sk_live" {
+		t.Fatalf("a sink was dropped: %v", member)
+	}
+	// "Set to empty" reads as "unset", as everywhere else in this path.
+	if _, ok := member["EMPTY"]; ok {
+		t.Errorf("an empty dotenv value was carried: %v", member)
+	}
+	if _, ok := member["BLANK"]; ok {
+		t.Errorf("an empty json value was carried: %v", member)
+	}
+
+	env := strings.Join(ganglionSecretEnv(registry.Resolution{}, nil, member), "\n")
+	for _, want := range []string{"CRAB_SECRET__DB_URL=postgres://x", "CRAB_SECRET__STRIPE_KEY=sk_live"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("%q is not in the container environment:\n%s", want, env)
+		}
+	}
+}
+
+// AN ABSENT STORE IS THE ORDINARY CASE, not a fault: most members have saved
+// nothing, and an error here would fail the ensure and leave them with no agent.
+func TestNoSecretsIsNotAnError(t *testing.T) {
+	member, err := ganglionMemberSecrets(t.TempDir())
+	if err != nil {
+		t.Fatalf("an empty store was an error: %v", err)
+	}
+	if len(member) != 0 {
+		t.Errorf("invented %d secrets: %v", len(member), member)
+	}
+}
+
+// THE TWO HALVES OF ONE CHANNEL LIVE IN TWO REPOSITORIES, and nothing but this
+// connects them. The proxy marks a variable; the ganglion's exec tool decides what
+// a command may read. A rename on either side silently stops every member secret
+// reaching every agent, with no test failing anywhere -- which is the exact shape
+// of the bug this whole change exists to fix.
+func TestSecretPrefixMatchesTheHarness(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(
+		"..", "..", "..", "crab-ganglion-harness",
+		"internal", "adapter", "tool", "exec", "exec.go",
+	))
+	if err != nil {
+		t.Skipf("the harness checkout is not beside this one: %v", err)
+	}
+	m := regexp.MustCompile(`SecretPrefix = "([^"]+)"`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("no SecretPrefix in the harness's exec tool: the pattern no longer matches, so this proves nothing")
+	}
+	if got := string(m[1]); got != GanglionSecretPrefix {
+		t.Errorf("the harness passes %q through and the proxy writes %q; every member secret is dropped", got, GanglionSecretPrefix)
+	}
+}
+
+// A REVOKED SECRET STAYS READABLE UNTIL THE CONTAINER IS REPLACED, which is why
+// removals count for these and not for model keys. Docker fixes environment at
+// creation, so a drift that does not fire is a credential the agent can still use
+// after the member deleted it.
+func TestRemovingAMemberSecretIsDrift(t *testing.T) {
+	created := ganglionSecretEnv(registry.Resolution{}, nil, map[string]string{
+		"DB_URL": "postgres://x",
+	})
+	if !ganglionSecretDrift(ganglionSecretEnv(registry.Resolution{}, nil, nil), created) {
+		t.Error("deleting a secret left it live in the container")
+	}
+	// And the asymmetry is deliberate: a key for a model no longer in the chain is
+	// a variable nothing reads, and is not worth destroying a running container.
+	res := registry.Resolution{Primary: model("primary", "p", "m", "https://e/v1", "sk-1")}
+	withModel := ganglionSecretEnv(res, nil, nil)
+	if ganglionSecretDrift(ganglionSecretEnv(registry.Resolution{}, nil, nil), withModel) {
+		t.Error("a stale model key forced a recreate; only member secrets should")
 	}
 }
