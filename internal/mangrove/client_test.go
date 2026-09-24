@@ -207,10 +207,12 @@ func TestBaseURLTrailingSlashIsNormalised(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL+"/", "secret").Admit(context.Background(), tuple(), AsPerson, "mangrove:act:1"); err != nil {
-		t.Fatalf("admit: %v", err)
+	if _, err := New(srv.URL+"/", "secret").React(
+		context.Background(), tuple(), AsPerson, "read", "mangrove:obj:1", false,
+	); err != nil {
+		t.Fatalf("react: %v", err)
 	}
-	if path != "/internal/v1/admit" {
+	if path != "/internal/v1/react" {
 		t.Errorf("path = %q; a trailing slash on the base URL produced a doubled separator", path)
 	}
 }

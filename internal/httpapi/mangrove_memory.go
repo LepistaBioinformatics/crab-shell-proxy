@@ -255,7 +255,7 @@ func (s *Server) handleMangroveMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, activityID, err := s.sharedObject(r, key, body.ObjectID)
+	obj, err := s.sharedObject(r, key, body.ObjectID)
 	if err != nil {
 		var me *mangrove.Error
 		if errors.As(err, &me) {
@@ -292,12 +292,19 @@ func (s *Server) handleMangroveMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Taking it is also admitting it: leaving it held would go on offering an
-	// Admit for something already in the member's graph.
-	if activityID != "" {
-		if _, err := s.mangroveClient().Admit(r.Context(), s.mangroveTuple(key), mangrove.AsPerson, activityID); err != nil {
-			s.logf("mangrove: merge: admit after merge: %v", err)
-		}
+	// MERGING IS CERTAINLY READING. This used to admit the item so it would stop
+	// being offered for admission; the hold is gone, but the receipt is still
+	// right -- somebody who took a fragment into their graph has opened it, and
+	// an inbox that still showed it as unread afterwards would be wrong in the
+	// one case it can be sure about.
+	//
+	// Best effort, as the admit was: the graph write already succeeded, and
+	// failing the whole call over a receipt would tell the member their merge
+	// did not happen when it did.
+	if _, err := s.mangroveClient().React(
+		r.Context(), s.mangroveTuple(key), mangrove.AsPerson, "read", obj.ID, false,
+	); err != nil {
+		s.logf("mangrove: merge: read receipt after merge: %v", err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -307,42 +314,37 @@ func (s *Server) handleMangroveMerge(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sharedObject finds a shared object this member can see, by its object id, and
-// the activity id if it is still held.
+// sharedObject finds a shared object this member can see, by its object id.
 //
 // It goes through the timeline rather than a lookup of its own, because the
 // timeline is where the visibility rule is answered. A merge must not be able to
 // reach something a read cannot.
-func (s *Server) sharedObject(r *http.Request, key docker.WorkspaceKey, objectID string) (*mangrove.Object, string, error) {
+//
+// ONE LIST TO SEARCH. There were two -- claims, and a `held` list for what the
+// member had not admitted -- and this returned the held item's ACTIVITY id
+// alongside the object so the caller could admit it afterwards. Both are gone:
+// the mangrove returns one list, and the receipt the caller now emits names the
+// object, which it already had.
+func (s *Server) sharedObject(r *http.Request, key docker.WorkspaceKey, objectID string) (*mangrove.Object, error) {
 	raw, err := s.mangroveClient().Timeline(r.Context(), s.mangroveTuple(key), mangrove.AsPerson, "received")
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	var tl struct {
 		Claims []struct {
 			Object mangrove.Object `json:"object"`
 		} `json:"claims"`
-		Held []struct {
-			ActivityID string          `json:"activityId"`
-			Object     mangrove.Object `json:"object"`
-		} `json:"held"`
 	}
 	if err := json.Unmarshal(raw, &tl); err != nil {
-		return nil, "", err
-	}
-	for _, h := range tl.Held {
-		if h.Object.ID == objectID {
-			o := h.Object
-			return &o, h.ActivityID, nil
-		}
+		return nil, err
 	}
 	for _, c := range tl.Claims {
 		if c.Object.ID == objectID {
 			o := c.Object
-			return &o, "", nil
+			return &o, nil
 		}
 	}
-	return nil, "", nil
+	return nil, nil
 }
 
 // mergeFragment is THREE existing functions in one order, and the order is the

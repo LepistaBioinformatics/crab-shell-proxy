@@ -159,9 +159,12 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "mangrove_timeline",
-		Description: "Read the mangrove. `received` is what others shared with you, " +
-			"including items still held awaiting your person's admission; " +
-			"`published` is what you shared; `pending` is what awaits a decision.",
+		Description: "Read the mangrove. `received` is what others shared with you; " +
+			"`published` is what you shared, with a `readBy` list naming who has " +
+			"opened each one; `pending` is what awaits a decision. " +
+			"What you read here is NOT IN YOUR MEMORY and not in your knowledge " +
+			"graph -- reading the timeline is reading somebody else's mail, not " +
+			"remembering it.",
 		InputSchema: object(map[string]*jsonschema.Schema{
 			"reading": str("received, published or pending"),
 		}, "reading"),
@@ -184,24 +187,15 @@ func (s *server) registerMangroveTools(srv *mcp.Server) {
 		return s.mangrove.React(context.Background(), scopeTuple(sc), mangrove.AsService, in.Kind, in.Ref, in.Undo)
 	}))
 
-	mcp.AddTool(srv, &mcp.Tool{
-		Name: "mangrove_admit",
-		// THIS DESCRIPTION USED TO CLAIM THE TOOL WROTE TO MEMORY. It does not
-		// and never did: admitting emits an Accept and writes nothing anywhere.
-		// It became actively wrong once merging a shared fragment into the graph
-		// shipped as a PERSON's act (AD-031) -- a model told this tool takes
-		// something into its memory will report a merge that did not happen.
-		Description: "Accept something somebody sent you: it stops being held and " +
-			"joins what you can read in mangrove_timeline. " +
-			"THIS DOES NOT WRITE ANYTHING INTO YOUR MEMORY OR YOUR KNOWLEDGE GRAPH. " +
-			"Taking a shared memory-graph fragment into the graph is the member's " +
-			"own act, in their interface -- say so rather than reporting it done.",
-		InputSchema: object(map[string]*jsonschema.Schema{
-			"activityId": str("The held activity id, from mangrove_timeline's `held` list"),
-		}, "activityId"),
-	}, tool(s, func(sc memgraph.Scope, in mangroveAdmitIn) (any, error) {
-		return s.mangrove.Admit(context.Background(), scopeTuple(sc), mangrove.AsService, in.ActivityID)
-	}))
+	// THERE WAS A `mangrove_admit` HERE. Its description already carried the
+	// correction that it wrote nothing anywhere; the tool is gone now because
+	// the hold it cleared is gone. Anything addressed at this member's person or
+	// service is in `received` from the moment it is published.
+	//
+	// Emitting a READ RECEIPT is deliberately not offered as a tool of its own.
+	// `mangrove_react` can do it, signed as the SERVICE, and that is the honest
+	// version: an agent passing over a memory in a turn is not its human opening
+	// their mail, and the author is shown which of the two happened.
 }
 
 // publishSchema offers `file` only where the proxy wired a way to read one.

@@ -578,7 +578,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /v1/mangrove/blob", s.handleMangroveBlob)
 		mux.HandleFunc("POST /v1/mangrove/merge", s.handleMangroveMerge)
 		mux.HandleFunc("POST /v1/mangrove/share", s.handleMangroveShare)
-		mux.HandleFunc("POST /v1/mangrove/admit", s.handleMangroveAdmit)
+		mux.HandleFunc("POST /v1/mangrove/read", s.handleMangroveRead)
 		mux.HandleFunc("POST /v1/mangrove/decide", s.handleMangroveDecide)
 		mux.HandleFunc("POST /v1/mangrove/revoke", s.handleMangroveRevoke)
 		// Finding somebody to share with, and finding yourself. The directory
