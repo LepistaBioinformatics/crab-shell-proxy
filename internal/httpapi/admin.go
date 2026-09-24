@@ -421,7 +421,21 @@ func (s *Server) handleAdminSharedSecretsList(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"secrets": names})
+
+	// WHO IS OVERRIDING WHAT. The dotenv/json cascade is "user wins", so a member
+	// holding the same name replaces this scope's value for themselves -- and the
+	// admin's write returned 200 and reached nobody, with no way to find out.
+	//
+	// Best effort, for the reason the member's half is: an admin asking who is
+	// overriding them is better served by an incomplete answer than by an error
+	// that also loses the listing they came for.
+	shadowed, err := s.Mgr.ShadowedSecrets(scope, r.URL.Query().Get("agent"))
+	if err != nil {
+		s.logf("admin: shadow check failed scope=%+v: %v", scope, err)
+		shadowed = nil
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"secrets": names, "shadowed": shadowed})
 }
 
 func (s *Server) handleAdminSharedSecretsDelete(w http.ResponseWriter, r *http.Request) {
