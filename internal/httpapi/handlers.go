@@ -83,6 +83,12 @@ type Orchestrator interface {
 	WriteSecret(agent config.Agent, key docker.WorkspaceKey, format, name, value string) error
 	// ListSecrets returns the set secret names per format (never values).
 	ListSecrets(key docker.WorkspaceKey) (docker.SecretNames, error)
+	// SharedNamesFor reports which of this member's secret names also exist in a
+	// scope above them -- the ones their own value is silently winning over.
+	SharedNamesFor(key docker.WorkspaceKey) ([]string, error)
+	// ShadowedSecrets reports which of a scope's shared names a member has
+	// overridden, and who. The admin's half of the same collision.
+	ShadowedSecrets(scope docker.Scope, agentRole string) (map[string][]docker.UserRef, error)
 	// DeleteSecret removes one secret from the caller's store.
 	DeleteSecret(key docker.WorkspaceKey, format, name string) error
 	// RestartWorkspace restarts the caller's container so an injected secret
@@ -1360,7 +1366,35 @@ func (s *Server) handleSecretsList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"secrets": names})
+
+	// WHICH FORMATS THIS AGENT'S HARNESS ACTUALLY DELIVERS, because the tab offers
+	// four and they do not all arrive. Under the ganglion, `dotenv` and `json`
+	// become marked environment; `native` is picoclaw's own slot file, and `file`
+	// has never reached any harness at all. A member picking one of the last two
+	// got a 200 and an agent that could not see their credential, with nothing
+	// anywhere saying so.
+	//
+	// The HARNESS rather than a list of formats, so this stays a fact about the
+	// agent and the webapp holds the mapping once.
+	harness := agent.Harness
+	if harness == "" {
+		harness = config.DefaultHarness
+	}
+
+	// The names this member is silently winning with. Best effort: their own
+	// secrets are what they came for, and failing the whole listing over the
+	// advisory half would cost the larger answer to protect the smaller.
+	shadowing, err := s.Mgr.SharedNamesFor(key)
+	if err != nil {
+		s.logf("secrets: shared-name check failed svc=%s user=%s: %v", agent.Key, ident.AccID, err)
+		shadowing = nil
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"secrets":   names,
+		"harness":   harness,
+		"shadowing": shadowing,
+	})
 }
 
 // handleSecretsDelete removes one secret and restarts the container (AC-08).

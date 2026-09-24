@@ -151,6 +151,10 @@ type fakeOrch struct {
 	moved         []string
 	removedFiles  int
 	folderErr     error
+	// What the two shadow queries answer. Nil is "nothing collides", which is
+	// every test that is not about the collision.
+	shadowing []string
+	shadowed  map[string][]docker.UserRef
 }
 
 type personaWrite struct {
@@ -230,6 +234,17 @@ func (f *fakeOrch) WriteSecret(_ config.Agent, key docker.WorkspaceKey, format, 
 
 func (f *fakeOrch) ListSecrets(docker.WorkspaceKey) (docker.SecretNames, error) {
 	return f.listResult, nil
+}
+
+// The two advisory halves of the "user wins" collision. Both default to nothing,
+// which is the ordinary case -- most names collide with no one -- so a test that
+// cares sets the field and every other test is unaffected.
+func (f *fakeOrch) SharedNamesFor(docker.WorkspaceKey) ([]string, error) {
+	return f.shadowing, nil
+}
+
+func (f *fakeOrch) ShadowedSecrets(docker.Scope, string) (map[string][]docker.UserRef, error) {
+	return f.shadowed, nil
 }
 
 func (f *fakeOrch) ListSharedSkills(docker.Scope) ([]docker.SkillMeta, error) { return nil, nil }
@@ -1662,5 +1677,45 @@ func TestTurnsRunningIsScopedToTheCaller(t *testing.T) {
 	h.ServeHTTP(w, turnsRunningReq(t, "tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
 	if !strings.Contains(w.Body.String(), `"turns":[]`) {
 		t.Errorf("another member's turns leaked into this caller's listing: %s", w.Body.String())
+	}
+}
+
+// THE TWO SIDES OF A COLLISION NOBODY COULD SEE.
+//
+// The dotenv/json cascade is "user wins", and `userWins` is computed across BOTH
+// sinks -- a member holding FOO in `.env` drops an admin's FOO from
+// `secrets.json` too. So an admin injected a credential at the subscription, got
+// a 200, and for every member already holding that name it was silently ignored.
+// The admin's listing showed their own store; the member was never told the name
+// was also an admin's. Neither end could find out.
+func TestTheMemberIsToldWhichNamesTheyAreWinningWith(t *testing.T) {
+	orch := &fakeOrch{
+		listResult: docker.SecretNames{Dotenv: []string{"OPENAI_API_KEY", "MINE"}},
+		shadowing:  []string{"OPENAI_API_KEY"},
+	}
+	s := testServer(orch, &fakeTurner{})
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, secretsReq(t, http.MethodGet,
+		"tenant_id="+tenantT+"&subs_acc_id="+subsX, goodHeaders(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Harness   string   `json:"harness"`
+		Shadowing []string `json:"shadowing"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Shadowing) != 1 || body.Shadowing[0] != "OPENAI_API_KEY" {
+		t.Errorf("shadowing = %v, want the one name that collides", body.Shadowing)
+	}
+	// AND THE HARNESS, because the tab offers four formats and they do not all
+	// arrive. `file` has never reached any harness, and `native` is picoclaw's own
+	// slot file -- a member picking either got a 200 and an agent that could not
+	// see their credential.
+	if body.Harness == "" {
+		t.Error("the listing does not say which harness this agent runs")
 	}
 }

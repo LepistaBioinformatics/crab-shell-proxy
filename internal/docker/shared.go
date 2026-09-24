@@ -764,3 +764,112 @@ func ownerEmail(userDir string) string {
 	}
 	return info.Email
 }
+
+// ShadowedSecrets reports which of a scope's shared secret names a member has
+// overridden with one of their own, and who.
+//
+// WHY THIS EXISTS. The dotenv/json cascade is "user wins": a name the member has
+// set in EITHER sink replaces the shared entry, and it replaces it in BOTH sinks
+// -- `userWins` is computed across the pair. So an admin injects a credential at
+// the subscription, gets a 200, and for every member who happens to hold that
+// name it is silently ignored. Neither side can see it: the admin's listing
+// showed their own store, and the member was never told the name was also an
+// admin's.
+//
+// It answers about the ACTUAL MEMBERS of the scope rather than about the disk,
+// and that is not a detail. `StoreDir` is `<root>/user-secrets/<user>/<role>` --
+// no tenant in the path -- so walking it would count a member of some other
+// tenant who happens to hold the same name under the same agent, and report a
+// conflict that does not exist.
+//
+// Best effort per member: a store that cannot be read is skipped rather than
+// failing the listing. An admin asking "who is overriding me" is better served
+// by four of five answers than by an error.
+func (m *Manager) ShadowedSecrets(scope Scope, agentRole string) (map[string][]UserRef, error) {
+	shared, err := m.ListSharedSecrets(scope)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, n := range append(append([]string{}, shared.Dotenv...), shared.JSON...) {
+		names[n] = true
+	}
+	if len(names) == 0 {
+		return map[string][]UserRef{}, nil
+	}
+
+	subs := []string{scope.SubsAccID}
+	if scope.Kind == ScopeTenant {
+		// A tenant's secret cascades into every subscription under it, so the
+		// question is asked of all of them.
+		subs, err = m.ListTenantSubscriptions(scope.TenantID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	out := map[string][]UserRef{}
+	for _, sub := range subs {
+		users, err := m.ListSubscriptionUsers(scope.TenantID, sub)
+		if err != nil {
+			continue
+		}
+		for _, u := range users {
+			role := u.Role
+			if agentRole != "" {
+				// A per-agent shared store only ever reaches that agent.
+				role = agentRole
+			}
+			mine, err := listSecretNames(config.StoreDir(m.cfg.ContainerDataRoot, u.AccID, role))
+			if err != nil {
+				continue
+			}
+			for _, n := range append(append([]string{}, mine.Dotenv...), mine.JSON...) {
+				if names[n] {
+					out[n] = append(out[n], UserRef{AccID: u.AccID, Role: role, Email: u.Email})
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// SharedNamesFor reports which of the names a MEMBER has set also exist in a
+// scope above them -- the same collision as ShadowedSecrets, asked from the other
+// end and answered for the one person who can act on it.
+//
+// The member is the one holding the winning value, so they are the one who can
+// delete it and let the admin's through. Telling them costs one read of the
+// cascade they already have.
+func (m *Manager) SharedNamesFor(key WorkspaceKey) ([]string, error) {
+	mine, err := m.ListSecrets(key)
+	if err != nil {
+		return nil, err
+	}
+	held := map[string]bool{}
+	for _, n := range append(append([]string{}, mine.Dotenv...), mine.JSON...) {
+		held[n] = true
+	}
+	if len(held) == 0 {
+		return nil, nil
+	}
+
+	hit := map[string]bool{}
+	for _, dir := range m.sharedSecretsCascade(key) {
+		shared, err := listSecretNames(dir)
+		if err != nil {
+			continue
+		}
+		for _, n := range append(append([]string{}, shared.Dotenv...), shared.JSON...) {
+			if held[n] {
+				hit[n] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(hit))
+	for n := range hit {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out, nil
+}
