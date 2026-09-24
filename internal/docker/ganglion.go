@@ -289,9 +289,17 @@ func ganglionBindDrift(cfg *config.Config, projects []string, actual []string) b
 // a recreate -- and the proxy has to perform it rather than leave a candidate
 // that can only ever be skipped for "no API key".
 //
-// Only ADDITIONS and CHANGES count. A container holding a key for a model no
-// longer in the chain is carrying a variable nothing reads, which is untidy and
-// not worth destroying a member's running container over.
+// Additions and changes count for everything. REMOVALS COUNT FOR THE MEMBER'S
+// OWN SECRETS AND NOTHING ELSE, and the asymmetry is the point rather than an
+// oversight.
+//
+// A container holding a key for a model no longer in the chain carries a
+// variable nothing reads: untidy, and not worth destroying a member's running
+// container over. A container holding a secret the member has REVOKED is
+// different in kind -- the harness passes `CRAB_SECRET__*` through to the shell,
+// so a deleted credential stays readable by the agent for as long as that
+// container lives. "Untidy" and "still usable after you deleted it" are not the
+// same finding.
 func ganglionSecretDrift(want, actual []string) bool {
 	have := make(map[string]string, len(actual))
 	for _, kv := range actual {
@@ -299,12 +307,19 @@ func ganglionSecretDrift(want, actual []string) bool {
 			have[k] = v
 		}
 	}
+	wanted := make(map[string]bool, len(want))
 	for _, kv := range want {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
+		wanted[k] = true
 		if got, present := have[k]; !present || got != v {
+			return true
+		}
+	}
+	for k := range have {
+		if strings.HasPrefix(k, GanglionSecretPrefix) && !wanted[k] {
 			return true
 		}
 	}
@@ -637,9 +652,19 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 		m.logf("ganglion %s: fallback %q is not active, skipped", ref.Key(), name)
 	}
 
-	web, err := ganglionWebSecrets(config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role))
+	effDir := config.EffectiveSecretsDir(m.cfg.ContainerDataRoot, key.UserAccID, key.Role)
+	web, err := ganglionWebSecrets(effDir)
 	if err != nil {
 		return nil, fmt.Errorf("read search provider secrets: %w", err)
+	}
+
+	// THE TWO SINKS A MEMBER ACTUALLY WRITES TO, and until now nothing read them
+	// for a ganglion. `.env` and `secrets.json` are what the secrets tab offers
+	// and what a picoclaw agent found as files in `.secrets/`; they arrive as
+	// marked environment here, because this harness has no such bind.
+	member, err := ganglionMemberSecrets(effDir)
+	if err != nil {
+		return nil, fmt.Errorf("read member secrets: %w", err)
 	}
 
 	// The memory graph. Minted here rather than in applyMemoryGraphMCP, which is
@@ -692,7 +717,7 @@ func (m *Manager) materializeGanglion(agent config.Agent, key WorkspaceKey, user
 	if err := m.seedGanglionProjects(key, userDir); err != nil {
 		return nil, err
 	}
-	return ganglionSecretEnv(res, web), nil
+	return ganglionSecretEnv(res, web, member), nil
 }
 
 // ganglionProjectDirs are the subtrees the harness resolves under a project

@@ -350,14 +350,36 @@ func ganglionWebBlock(web map[string]string) map[string]any {
 	return out
 }
 
+// GanglionSecretPrefix marks a variable the MEMBER saved, for the harness to let
+// through to a command. It must stay in step with `SecretPrefix` in
+// crab-ganglion-harness's exec tool -- the two halves of one channel, in two
+// repositories, which `TestSecretPrefixMatchesTheHarness` is what holds together.
+//
+// TWO UNDERSCORES, so the boundary between the marker and the member's own name
+// is unmistakable and a secret called `SECRET_FOO` cannot be mistaken for one.
+const GanglionSecretPrefix = "CRAB_SECRET__"
+
 // ganglionSecretEnv is the credential half: one variable per model, one per
-// search provider.
+// search provider, and one per secret the MEMBER saved.
+//
+// THE MEMBER'S OWN HAD NO PATH HERE AT ALL, which is the gap this closes. Under
+// picoclaw the `.env` and `secrets.json` a member wrote were files in a mounted
+// `.secrets/`; the ganglion has no such bind, and nothing read those two sinks --
+// only `native.yml`'s `web.` slots, which are the harness's own search provider
+// and never reach the agent either. A member migrating from picoclaw saved a
+// credential, got a 200 back, and their agent could not see it.
 //
 // Sorted for the same reason the file is: this slice becomes a container's
 // environment, and an unstable order would make every ensure look like drift
 // and recreate the container on every turn.
-func ganglionSecretEnv(res registry.Resolution, web map[string]string) []string {
+func ganglionSecretEnv(res registry.Resolution, web, member map[string]string) []string {
 	vars := map[string]string{}
+	for name, value := range member {
+		if name == "" || value == "" {
+			continue
+		}
+		vars[GanglionSecretPrefix+name] = value
+	}
 	put := func(m registry.Model) {
 		if m.ModelName == "" || m.APIKey == "" {
 			return
@@ -430,6 +452,40 @@ func ganglionWebSecrets(storeDir string) (map[string]string, error) {
 			continue
 		}
 		out[name] = value
+	}
+	return out, nil
+}
+
+// ganglionMemberSecrets reads the two sinks a member writes into, merged.
+//
+// `.env` and `secrets.json` are the same kind of thing said twice -- a NAME and a
+// value -- and which one a member picked is about the tool that will read it, not
+// about who may. Both become marked environment here, so the choice stops
+// mattering for a ganglion; it still decides the FILE a picoclaw agent finds.
+//
+// THE JSON SINK WINS A COLLISION, arbitrarily but stably: the cascade that writes
+// these two has already resolved scope precedence, so a name in both is one
+// member writing the same name twice, and an unstable answer would be worse than
+// either choice. Empty values are dropped, as everywhere else in this path --
+// "set to empty" reads as "unset".
+//
+// Absent files are not an error. No secrets configured is the ordinary case.
+func ganglionMemberSecrets(storeDir string) (map[string]string, error) {
+	out, err := readDotenvMap(storeDir)
+	if err != nil {
+		return nil, err
+	}
+	fromJSON, err := readJSONMap(filepath.Join(storeDir, "secrets.json"))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range fromJSON {
+		out[k] = v
+	}
+	for k, v := range out {
+		if k == "" || v == "" {
+			delete(out, k)
+		}
 	}
 	return out, nil
 }
