@@ -17,18 +17,20 @@ import (
 )
 
 // A stub mangrove that answers `received` with one shared fragment and records
-// whether the proxy admitted it afterwards.
+// whether the proxy sent a read receipt afterwards.
 type fragmentMangrove struct {
-	srv      *httptest.Server
-	admitted []string
-	content  string
-	media    string
-	held     bool
+	srv          *httptest.Server
+	readReceipts []string
+	content      string
+	media        string
 }
 
-func newFragmentMangrove(t *testing.T, content, media string, held bool) *fragmentMangrove {
+// THE `held` PARAMETER IS GONE with the bucket it named. Every shared object
+// this member can see is in `claims` now, whether or not they have opened it,
+// so there is no second shape for a caller to choose between.
+func newFragmentMangrove(t *testing.T, content, media string) *fragmentMangrove {
 	t.Helper()
-	fm := &fragmentMangrove{content: content, media: media, held: held}
+	fm := &fragmentMangrove{content: content, media: media}
 	fm.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/internal/v1/timeline":
@@ -36,19 +38,20 @@ func newFragmentMangrove(t *testing.T, content, media string, held bool) *fragme
 				"id": "mangrove:obj:frag", "type": "MemoryNote",
 				"cell": "graph:abc", "content": fm.content, "mediaType": fm.media,
 			}
-			out := map[string]any{"reading": "received", "claims": []any{}, "held": []any{}}
-			if fm.held {
-				out["held"] = []any{map[string]any{"activityId": "mangrove:act:7", "object": obj}}
-			} else {
-				out["claims"] = []any{map[string]any{"object": obj}}
+			out := map[string]any{
+				"reading": "received",
+				"claims":  []any{map[string]any{"object": obj}},
 			}
 			_ = json.NewEncoder(w).Encode(out)
-		case "/internal/v1/admit":
+		case "/internal/v1/react":
 			var body struct {
-				ActivityID string `json:"activityId"`
+				Kind string `json:"kind"`
+				Ref  string `json:"ref"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			fm.admitted = append(fm.admitted, body.ActivityID)
+			if body.Kind == "read" {
+				fm.readReceipts = append(fm.readReceipts, body.Ref)
+			}
 			_, _ = io.WriteString(w, `{"ok":true}`)
 		default:
 			_, _ = io.WriteString(w, `{}`)
@@ -106,7 +109,7 @@ func TestAPersonMergingAFragmentChangesTheirGraph(t *testing.T) {
 		},
 		[]memgraph.Relation{{From: "Rhizophora", To: "Mangrove", RelationType: "grows in"}},
 	)
-	fm := newFragmentMangrove(t, frag, mangrove.GraphFragmentMediaType, true)
+	fm := newFragmentMangrove(t, frag, mangrove.GraphFragmentMediaType)
 	s, store, sc := mergeServer(t, fm)
 
 	w := merge(t, s, "mangrove:obj:frag")
@@ -148,34 +151,39 @@ func TestAPersonMergingAFragmentChangesTheirGraph(t *testing.T) {
 			}
 		}
 	}
-	// Taking it also admits it: leaving it held would go on offering an Admit
+	// Taking it is certainly reading it: an inbox that still showed the fragment
 	// for something already in the member's graph.
-	if len(fm.admitted) != 1 || fm.admitted[0] != "mangrove:act:7" {
-		t.Errorf("admitted = %v, want the held activity", fm.admitted)
+	if len(fm.readReceipts) != 1 || fm.readReceipts[0] != "mangrove:obj:frag" {
+		t.Errorf("readReceipts = %v, want one naming the merged object", fm.readReceipts)
 	}
 }
 
 // THE HALF THAT KEEPS IT SAFE, and neither proves the property alone.
 //
-// `mangrove_admit` lets an agent admit for itself with no human in the loop. If
-// admitting merged, an agent steered by untrusted text could publish entities,
-// address a peer agent, and have that peer write them into its own graph -- and
-// the graph is what steers later turns.
+// AN AGENT REACTING TO A FRAGMENT WRITES NO GRAPH, which is the same claim this
+// test always made under a different verb.
 //
-// There is no agent path to the merge route at all: it is a member route behind
-// the gateway, and an agent has no profile to present. This asserts the part
-// that could silently change -- that the agent's own admit still writes nothing.
-func TestAnAgentAdmittingTheSameFragmentChangesNoGraph(t *testing.T) {
+// It used to be about `mangrove_admit`, and admit is gone -- the hold it cleared
+// never held anything, since held items travelled with their objects and the
+// agent could admit itself anyway. `mangrove_react` is what an agent has now,
+// and the claim is unchanged and still the one that matters: AD-031 says only a
+// PERSON merges, because the graph steers later turns and an agent steered by
+// untrusted text must not be able to write a peer's.
+//
+// There is no agent path to the merge route at all -- it is a member route
+// behind the gateway, and an agent has no profile to present. This asserts the
+// part that could silently change.
+func TestAnAgentReactingToTheSameFragmentChangesNoGraph(t *testing.T) {
 	frag := fragmentJSON(t,
 		[]memgraph.Entity{{Name: "Rhizophora", EntityType: "species"}}, nil)
-	fm := newFragmentMangrove(t, frag, mangrove.GraphFragmentMediaType, true)
+	fm := newFragmentMangrove(t, frag, mangrove.GraphFragmentMediaType)
 	s, store, sc := mergeServer(t, fm)
 
-	// The agent's admit, exactly as mangrove_admit performs it.
+	// The agent's receipt, exactly as mangrove_react performs it.
 	key := docker.WorkspaceKey{TenantID: tenantT, SubsAccID: subsX, Role: "alpha", UserAccID: accAlice}
-	if _, err := s.mangroveClient().Admit(context.Background(),
-		s.mangroveTuple(key), mangrove.AsService, "mangrove:act:7"); err != nil {
-		t.Fatalf("admit: %v", err)
+	if _, err := s.mangroveClient().React(context.Background(),
+		s.mangroveTuple(key), mangrove.AsService, "read", "mangrove:obj:frag", false); err != nil {
+		t.Fatalf("react: %v", err)
 	}
 
 	g, err := store.Load(sc)
@@ -183,14 +191,14 @@ func TestAnAgentAdmittingTheSameFragmentChangesNoGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(g.Entities) != 0 {
-		t.Fatalf("an agent's admit wrote %d entities into the graph; only a person may merge", len(g.Entities))
+		t.Fatalf("an agent's receipt wrote %d entities into the graph; only a person may merge", len(g.Entities))
 	}
 }
 
 // FR-D1: the request body cannot carry an entity. That is the whole reason this
 // route is allowed to exist beside a file that says the graph has no write route.
 func TestTheMergeRouteWillNotTakeGraphContentFromTheCaller(t *testing.T) {
-	fm := newFragmentMangrove(t, fragmentJSON(t, nil, nil), mangrove.GraphFragmentMediaType, false)
+	fm := newFragmentMangrove(t, fragmentJSON(t, nil, nil), mangrove.GraphFragmentMediaType)
 	s, store, sc := mergeServer(t, fm)
 
 	w := httptest.NewRecorder()
@@ -214,7 +222,7 @@ func TestMergingSomethingThatIsNotAFragmentIsRefused(t *testing.T) {
 	// DELIBERATELY VALID JSON that would parse into an empty fragment. Prose
 	// would be refused by the JSON decoder instead, and the test would pass
 	// while the media-type check did nothing -- which is what mutation caught.
-	fm := newFragmentMangrove(t, `{"entities":[{"name":"Sneaky"}]}`, "text/markdown", false)
+	fm := newFragmentMangrove(t, `{"entities":[{"name":"Sneaky"}]}`, "text/markdown")
 	s, store, sc := mergeServer(t, fm)
 
 	w := merge(t, s, "mangrove:obj:frag")
@@ -233,7 +241,7 @@ func TestMergingSomethingThatIsNotAFragmentIsRefused(t *testing.T) {
 // Something the member cannot see is not mergeable, and says so the same way an
 // object that never existed does.
 func TestMergingSomethingNotSharedWithYouIsNotFound(t *testing.T) {
-	fm := newFragmentMangrove(t, fragmentJSON(t, nil, nil), mangrove.GraphFragmentMediaType, false)
+	fm := newFragmentMangrove(t, fragmentJSON(t, nil, nil), mangrove.GraphFragmentMediaType)
 	s, _, _ := mergeServer(t, fm)
 	if w := merge(t, s, "mangrove:obj:somebody-elses"); w.Code != http.StatusNotFound {
 		t.Fatalf("code = %d, want 404", w.Code)
@@ -255,7 +263,7 @@ func TestMergingReachesAnEntityTheRecipientAlreadyHas(t *testing.T) {
 				{Content: "prop roots"},
 			},
 		}}, nil)
-	fm := newFragmentMangrove(t, frag, mangrove.GraphFragmentMediaType, false)
+	fm := newFragmentMangrove(t, frag, mangrove.GraphFragmentMediaType)
 	s, store, sc := mergeServer(t, fm)
 
 	// The recipient already holds it, with an observation of their own and one

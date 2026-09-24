@@ -50,7 +50,12 @@ func callPublish() *mcp.CallToolParams {
 // mangroveNames is the surface this feature adds. Pinned as a list rather than
 // counted, so adding a tool without deciding to is a failing test.
 var mangroveNames = []string{
-	"mangrove_publish", "mangrove_share", "mangrove_timeline", "mangrove_react", "mangrove_admit",
+	// FOUR, NOT FIVE. `mangrove_admit` is gone with the hold it cleared -- which
+	// was never a hold on anything, since a held item travelled with its object
+	// and this tool let an agent clear its own. Emitting a read receipt is
+	// `mangrove_react` with kind `read`, signed as the SERVICE, which is a
+	// different fact from its person having opened the thing.
+	"mangrove_publish", "mangrove_share", "mangrove_timeline", "mangrove_react",
 }
 
 // listToolNames drives the real MCP client against a handler built with the
@@ -315,15 +320,17 @@ func TestPublishingEntitiesNobodyHasIsRefused(t *testing.T) {
 // WHAT THE TOOL SAYS IT DOES IS WHAT THE MODEL WILL REPORT HAVING DONE.
 //
 // `mangrove_admit`'s description claimed for months that it took a memory "into
-// your own memory". It never did -- admitting emits an Accept and writes nothing
-// anywhere -- and the claim became actively harmful once merging a shared
-// fragment into the graph shipped as a PERSON's act (AD-031): a model told this
-// tool writes to its memory will report a merge that did not happen.
+// your own memory". It never did, and the claim became actively harmful once
+// merging a shared fragment into the graph shipped as a PERSON's act (AD-031):
+// a model told a tool writes to its memory will report a merge that did not
+// happen. The tool is gone now, and the trap it fell into has simply moved to
+// the tool beside it -- `mangrove_timeline` is what an agent calls to see
+// somebody else's memory, and reading is the thing most easily mistaken for
+// remembering.
 //
 // Prose is the one part of a tool nothing else checks, which is how it stayed
-// wrong. This pins the correction rather than the wording: the description has to
-// keep saying, in as many words, that it does not write.
-func TestAdmitDoesNotClaimToWriteMemory(t *testing.T) {
+// wrong for months. This pins the correction rather than the wording.
+func TestTheTimelineDoesNotClaimToWriteMemory(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{}`)
 	}))
@@ -335,20 +342,27 @@ func TestAdmitDoesNotClaimToWriteMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var admit string
+	var timeline string
 	for _, tl := range tools.Tools {
 		if tl.Name == "mangrove_admit" {
-			admit = tl.Description
+			t.Error("mangrove_admit is advertised again; the hold it cleared no longer exists")
+		}
+		if tl.Name == "mangrove_timeline" {
+			timeline = tl.Description
 		}
 	}
-	if admit == "" {
-		t.Fatal("mangrove_admit is not advertised")
+	if timeline == "" {
+		t.Fatal("mangrove_timeline is not advertised")
 	}
-	if !strings.Contains(admit, "DOES NOT WRITE ANYTHING INTO YOUR MEMORY") {
-		t.Errorf("the disclaimer is gone; a model will report a merge it did not do:\n%s", admit)
+	if !strings.Contains(strings.ToLower(timeline), "not in your memory") {
+		t.Errorf("the disclaimer is gone; a model will report remembering what it only read:\n%s", timeline)
 	}
-	if strings.Contains(strings.ToLower(admit), "into your own memory.") {
-		t.Errorf("the old claim is back:\n%s", admit)
+	// AND NOTHING LEFT SAYS THE OLD THING. The phrase is what the deleted tool
+	// claimed, and it must not reappear on whatever inherits the job.
+	for _, tl := range tools.Tools {
+		if strings.Contains(strings.ToLower(tl.Description), "into your own memory") {
+			t.Errorf("%s makes the claim mangrove_admit was deleted for:\n%s", tl.Name, tl.Description)
+		}
 	}
 }
 

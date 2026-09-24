@@ -227,19 +227,6 @@ func (c *Client) React(ctx context.Context, t Tuple, as Actor, kind, ref string,
 	})
 }
 
-type admitReq struct {
-	base
-	ActivityID string `json:"activityId"`
-}
-
-// Admit lets a held object into this workspace's own memory.
-func (c *Client) Admit(ctx context.Context, t Tuple, as Actor, activityID string) (json.RawMessage, error) {
-	return c.post(ctx, "/internal/v1/admit", admitReq{
-		base:       base{Tuple: t, As: as},
-		ActivityID: activityID,
-	})
-}
-
 type timelineReq struct {
 	base
 	Reading string `json:"reading"`
@@ -252,6 +239,11 @@ func (c *Client) Timeline(ctx context.Context, t Tuple, as Actor, reading string
 		Reading: reading,
 	})
 }
+
+// ADMIT IS GONE, with the hold it cleared and the endpoint that served it.
+// A person opening something emits a Read receipt instead -- React, above,
+// with kind "read" -- which is the verb the mangrove was already emitting and
+// nothing was reading.
 
 type decideReq struct {
 	base

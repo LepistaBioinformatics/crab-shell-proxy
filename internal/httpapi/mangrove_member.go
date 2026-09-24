@@ -25,9 +25,11 @@ import (
 //	           never presents.
 //	revoke  -- the human's authority over their own bot. An agent that could
 //	           revoke could un-revoke, and the whole point is that it cannot.
-//	admit   -- an agent CAN admit (it has mangrove_admit), but only for itself; the
-//	           person admitting on their own behalf is the same operation signed
-//	           by the other actor.
+//	read    -- a read receipt says a PERSON opened something. An agent has
+//	           `mangrove_react` and can emit one as ITSELF, which is a different
+//	           actor and reads as a different fact; what it must not do is
+//	           answer for its human. Signing is what keeps the two apart, so
+//	           this route is `AsPerson` and nothing lets a caller choose.
 //
 // TWO FACTS THE MANGROVE CANNOT WORK OUT AND THIS FILE MUST: whether the caller
 // governs the scope, and whether they are licensed on the tenant. Both come
@@ -151,21 +153,37 @@ func (s *Server) handleMangroveTimeline(w http.ResponseWriter, r *http.Request) 
 	s.writeMangroveResult(w, raw, err)
 }
 
-// handleMangroveAdmit serves POST /v1/mangrove/admit -- the person letting an object
-// somebody sent them into their own agent's memory (FR-B7).
-func (s *Server) handleMangroveAdmit(w http.ResponseWriter, r *http.Request) {
+// handleMangroveRead serves POST /v1/mangrove/read -- the person opening something
+// somebody sent them.
+//
+// IT REPLACES ADMIT, and the replacement is smaller than it looks: the mangrove
+// has emitted AS2's Read from its react endpoint since before anything consumed
+// it, so this route only had to point at the verb that was already there.
+//
+// What admit claimed to be (FR-B7: content does not reach the agent until its
+// human takes it) it never was -- the held item went out with its object and the
+// agent had an admit of its own. What it was actually doing for members was
+// inbox bookkeeping, which is what a receipt is, so that is what this is.
+//
+// `ref` is the OBJECT id, not the activity id. A receipt outlives the author
+// correcting their memory: somebody who read a thing has read it, and an Update
+// does not make that untrue.
+func (s *Server) handleMangroveRead(w http.ResponseWriter, r *http.Request) {
 	key, _, ok := s.mangroveCaller(w, r, true)
 	if !ok {
 		return
 	}
 	var body struct {
-		ActivityID string `json:"activityId"`
+		ObjectID string `json:"objectId"`
+		Undo     bool   `json:"undo"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil || body.ActivityID == "" {
-		writeJSON(w, http.StatusBadRequest, errBody(`"activityId" is required`))
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil || body.ObjectID == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"objectId" is required`))
 		return
 	}
-	raw, err := s.mangroveClient().Admit(r.Context(), s.mangroveTuple(key), mangrove.AsPerson, body.ActivityID)
+	raw, err := s.mangroveClient().React(
+		r.Context(), s.mangroveTuple(key), mangrove.AsPerson, "read", body.ObjectID, body.Undo,
+	)
 	s.writeMangroveResult(w, raw, err)
 }
 

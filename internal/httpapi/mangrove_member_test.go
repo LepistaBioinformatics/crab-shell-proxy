@@ -195,13 +195,13 @@ func TestTenantManagerIsTenantLicensed(t *testing.T) {
 	}
 }
 
-func TestAdmitAndRevokeValidateTheirBodies(t *testing.T) {
+func TestReadAndRevokeValidateTheirBodies(t *testing.T) {
 	stub := newStubMangrove(t)
 	s := memberMangroveServer(stub.srv.URL)
 	profile := licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true)
 
 	for _, tc := range []struct{ path, body string }{
-		{"/v1/mangrove/admit", `{}`},
+		{"/v1/mangrove/read", `{}`},
 		{"/v1/mangrove/revoke", `{"objectId":"mangrove:obj:1"}`},
 		{"/v1/mangrove/revoke", `{"cell":"soil-ph"}`},
 	} {
@@ -240,9 +240,9 @@ func TestMangroveRefusalIsForwardedIntact(t *testing.T) {
 	s := memberMangroveServer(mangroveSrv.URL)
 
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/mangrove/admit"+mangroveScope,
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodPost, "/v1/mangrove/read"+mangroveScope,
 		licensedProfile(accAlice, tenantT, subsX, "alpha", "write", true),
-		`{"activityId":"mangrove:act:1"}`))
+		`{"objectId":"mangrove:obj:1"}`))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("answered %d, want the mangrove's own 403", w.Code)
 	}
