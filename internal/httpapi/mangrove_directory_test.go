@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -237,5 +238,97 @@ func TestDirectoryPrefixModeRefusesAShortNeedle(t *testing.T) {
 	s.Handler().ServeHTTP(w, directoryReq(t, "bo"))
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("answered %d for a two-character needle, want 400", w.Code)
+	}
+}
+
+// RESOLVE NAMES WHAT THE MEMBER IS ALREADY LOOKING AT, and it does so in STRICT
+// mode -- where a search would not have handed the id over. That is the whole
+// distinction the route rests on: the id came from a card the mangrove already
+// served this member, so naming it discloses nobody they were not already being
+// shown.
+func TestDirectoryResolvesIDsTheMemberAlreadyHolds(t *testing.T) {
+	s := memberMangroveServer("http://mangrove:8090")
+	s.Mgr = rosterOrch()
+
+	bob := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	ids := strings.Join([]string{
+		mangroveServiceID(bob),
+		mangrovePersonID(bob),
+		// Somebody outside this subscription. Absent from the answer rather than
+		// an error: a card may name an actor who has left, or one from another
+		// deployment, and neither is a malfunction.
+		"mangrove:actor:dddddddd-dddd-dddd-dddd-dddddddddddd:person",
+	}, ",")
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet,
+		"/v1/mangrove/directory"+mangroveScope+"&ids="+ids,
+		licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("answered %d: %s", w.Code, w.Body.String())
+	}
+
+	var got resolveResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v -- body %s", err, w.Body.String())
+	}
+	byID := map[string]string{}
+	for _, e := range got.Resolved {
+		byID[e.ID] = e.Email
+	}
+	// BOTH ACTORS NAME THE SAME PERSON, which is the answer a card needs when it
+	// says an AGENT sent something: whose agent.
+	for _, id := range []string{mangroveServiceID(bob), mangrovePersonID(bob)} {
+		if byID[id] != "bob@example.test" {
+			t.Errorf("%s resolved to %q", id, byID[id])
+		}
+	}
+	if len(got.Resolved) != 2 {
+		t.Errorf("resolved %d entries, want exactly the two that are members: %+v", len(got.Resolved), got.Resolved)
+	}
+}
+
+// The subscription is the boundary, and it is the SAME boundary search has. An
+// id from another tenant's account is not found here either.
+func TestDirectoryResolveReachesNoFurtherThanTheSubscription(t *testing.T) {
+	s := memberMangroveServer("http://mangrove:8090")
+	o := newFakeOrch()
+	// Alice's subscription has only alice in it.
+	o.users = []docker.UserRef{{AccID: accAlice, Role: "alpha", Email: "alice@example.test"}}
+	s.Mgr = o
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet,
+		"/v1/mangrove/directory"+mangroveScope+"&ids="+mangrovePersonID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+		licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("answered %d: %s", w.Code, w.Body.String())
+	}
+	var got resolveResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if len(got.Resolved) != 0 {
+		t.Errorf("named somebody outside the caller's subscription: %+v", got.Resolved)
+	}
+}
+
+// A call that named a thousand ids would be a sweep in one request. The
+// subscription is what stops it mattering; this stops it being cheap.
+func TestDirectoryResolveRefusesTooManyIDs(t *testing.T) {
+	s := memberMangroveServer("http://mangrove:8090")
+	s.Mgr = rosterOrch()
+
+	// DISTINCT ids, because the limit counts the SET: a caller repeating one id a
+	// thousand times is asking about one account, and refusing that would be the
+	// test passing for the wrong reason.
+	ids := make([]string, maxResolveIDs+1)
+	for i := range ids {
+		ids[i] = mangrovePersonID(fmt.Sprintf("acc-%04d", i))
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, memberReq(t, http.MethodGet,
+		"/v1/mangrove/directory"+mangroveScope+"&ids="+strings.Join(ids, ","),
+		licensedProfile(accAlice, tenantT, subsX, "alpha", "read", true), ""))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("answered %d, want 400", w.Code)
 	}
 }

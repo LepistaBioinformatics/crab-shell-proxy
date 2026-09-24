@@ -38,6 +38,22 @@ type directoryEntry struct {
 	ActorID string `json:"actorId,omitempty"`
 }
 
+// resolvedEntry names an id the caller ALREADY HAS. See handleMangroveDirectory.
+type resolvedEntry struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}
+
+type resolveResponse struct {
+	Resolved []resolvedEntry `json:"resolved"`
+}
+
+// How many ids one call will name. Not a security boundary -- the boundary is the
+// subscription, below -- but a call that named a thousand would be a sweep with
+// one request instead of many, and nothing legitimate asks for more than a
+// screenful of cards' worth.
+const maxResolveIDs = 60
+
 type directoryResponse struct {
 	// Mode is echoed so the UI can say which question it is able to answer,
 	// rather than leaving the member to infer it from the shape of the results.
@@ -65,10 +81,30 @@ func (s *Server) prefixSearchAllowed(key docker.WorkspaceKey) bool {
 	return allowed
 }
 
-// handleMangroveDirectory serves GET /v1/mangrove/directory?q=<email or part>.
+// handleMangroveDirectory serves GET /v1/mangrove/directory, two ways:
+//
+//	?q=<email or part>  -- SEARCH: who is there, subject to the mode above.
+//	?ids=<id>,<id>,...  -- RESOLVE: name ids the caller is already holding.
+//
+// RESOLVE IS NOT SEARCH TURNED AROUND, and the difference is what makes it safe
+// to answer in strict mode where search will not hand an id out. Search starts
+// from a needle the member typed and ends at somebody they had not named; resolve
+// starts at an id the mangrove ALREADY PUT ON THEIR SCREEN -- the author of a
+// post they can read, or a recipient of one -- and only says who it is. The
+// member gains a name for a row they are already looking at.
+//
+// It reaches no further than search does: both are answered from
+// ListSubscriptionUsers over the caller's own (tenant, subscription), so an id
+// belonging to anybody else simply is not found. There is no sweep in it either,
+// because the input is an account uuid: you cannot guess your way to one, and the
+// only place they come from is content this member may already read.
 func (s *Server) handleMangroveDirectory(w http.ResponseWriter, r *http.Request) {
 	key, _, ok := s.mangroveCaller(w, r, false)
 	if !ok {
+		return
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("ids")); raw != "" {
+		s.resolveActorIDs(w, key, raw)
 		return
 	}
 	q := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("q")))
@@ -116,6 +152,50 @@ func (s *Server) handleMangroveDirectory(w http.ResponseWriter, r *http.Request)
 			e.ActorID = mangroveServiceID(u.AccID)
 		}
 		out.Results = append(out.Results, e)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// resolveActorIDs answers the names for actor ids the caller already holds.
+//
+// UNKNOWN IDS ARE ABSENT, NOT AN ERROR. A card may name somebody who has since
+// left the subscription, or an actor from another deployment entirely, and
+// neither is a malfunction the member should be shown -- the row simply keeps
+// the id it was already showing.
+func (s *Server) resolveActorIDs(w http.ResponseWriter, key docker.WorkspaceKey, raw string) {
+	wanted := map[string]bool{}
+	for _, id := range strings.Split(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = true
+		}
+	}
+	if len(wanted) > maxResolveIDs {
+		writeJSON(w, http.StatusBadRequest, errBody("too many ids in one call"))
+		return
+	}
+
+	users, err := s.Mgr.ListSubscriptionUsers(key.TenantID, key.SubsAccID)
+	if err != nil {
+		s.logf("mangrove: resolve: %v", err)
+		writeJSON(w, http.StatusBadGateway, errBody("could not read the subscription's members"))
+		return
+	}
+
+	out := resolveResponse{Resolved: []resolvedEntry{}}
+	for _, u := range users {
+		if strings.TrimSpace(u.Email) == "" {
+			continue
+		}
+		// BOTH OF THE MEMBER'S ACTORS RESOLVE TO THE SAME PERSON, because they
+		// are the same person: the agent is theirs, and a card saying an agent
+		// sent something is answering "whose agent". The two ids are what
+		// differs, so both are offered and whichever the caller asked for is
+		// what comes back.
+		for _, id := range []string{mangroveServiceID(u.AccID), mangrovePersonID(u.AccID)} {
+			if wanted[id] {
+				out.Resolved = append(out.Resolved, resolvedEntry{ID: id, Email: u.Email})
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
