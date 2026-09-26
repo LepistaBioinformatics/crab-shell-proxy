@@ -73,6 +73,14 @@ type Event struct {
 	Arguments string `json:"arguments,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	// AuditID names this call's record under .tool-audit, which
+	// /v1/sessions/tool-call serves. Passed through like everything else here:
+	// this package decides what is served, not what any of it means.
+	//
+	// Absent on every event that is not a ganglion tool call -- a transcript
+	// written before the harness minted these, a picoclaw one, a model fallback.
+	// The client tells "nothing to open" from "empty" by its absence.
+	AuditID string `json:"audit_id,omitempty"`
 	// Count is how many of something the event is about -- for EventCompact,
 	// the messages compaction dropped. A number rather than a sentence for the
 	// reason the rest of this struct is codes: the harness has no locale, so
@@ -212,7 +220,7 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	// is not reconstructing a mapping the proxy already owns. So the marker
 	// scan below, which is how picoclaw's hashed filenames are found, would
 	// never match it. Try the direct name first; it costs one stat.
-	if base := harnessBasename(sessionKey); existsIn(r, base+".jsonl") {
+	if base := HarnessBasename(sessionKey); existsIn(r, base+".jsonl") {
 		harness, err := readMessages(r, "", base)
 		if err != nil {
 			return nil, err
@@ -233,7 +241,14 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 	return readMessages(r, "", basename)
 }
 
-// harnessBasename is the name a ganglion transcript actually has on disk.
+// HarnessBasename is the name a ganglion transcript actually has on disk.
+//
+// EXPORTED because it is not only the transcript's rule. Every file the harness
+// writes for a conversation is named this way -- the window, the partial
+// sidecar, and now the .tool-audit directory -- so /v1/sessions/tool-call
+// composes its path with this rather than with a second copy that happens to
+// agree today. A private duplicate is how a conversation's records become
+// unreachable while its history still loads.
 //
 // The harness names a transcript after the conversation id, SANITISED: its jsonl
 // store replaces every character outside [A-Za-z0-9_-] with "_"
@@ -254,7 +269,7 @@ func Read(sessionsDir, sessionKey string) ([]Message, error) {
 // Deliberately NOT applied to the durable transcript beside it: that file is the
 // proxy's own, written and read here under the key itself, and renaming it would
 // orphan every one already on disk.
-func harnessBasename(sessionKey string) string {
+func HarnessBasename(sessionKey string) string {
 	out := make([]rune, 0, len(sessionKey))
 	for _, r := range sessionKey {
 		switch {

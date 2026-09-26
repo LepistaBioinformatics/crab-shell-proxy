@@ -29,6 +29,7 @@ import (
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/projects"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/registry"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/restart"
+	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/toolaudit"
 	"github.com/LepistaBioinformatics/crab-shell-proxy/internal/turn"
 	"github.com/google/uuid"
 )
@@ -362,6 +363,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/subscriptions", s.handleSubscriptions)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/sessions/history", s.handleSessionsHistory)
+	// The full command and output behind ONE tool call, fetched when the member
+	// opens it and never with the history. The 200-rune cap on an event's
+	// arguments exists so a transcript does not carry this weight; serving it
+	// inline would undo that.
+	mux.HandleFunc("GET /v1/sessions/tool-call", s.handleSessionsToolCall)
 	// resume-turn-after-reload: lets a client that lost its stream (a page reload)
 	// find out whether the turn is still running, instead of guessing from silence.
 	mux.HandleFunc("GET /v1/turns/active", s.handleTurnsActive)
@@ -1083,38 +1089,62 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
+// sessionScope is WHOSE conversation a request is about, resolved once.
+//
+// Every field here is derived from the identity header and the agent, never
+// from a caller-supplied path — which is what makes it safe to compose a
+// directory out of it. `SessionKey` is already project-qualified.
+type sessionScope struct {
+	TenantID  string
+	SubsAccID string
+	Role      string
+	UserAccID string
+	Segment   string
+	// SessionKey is the conversation, after projectSessionID.
+	SessionKey string
+}
+
+// resolveSessionScope performs the identity, tenant and workspace resolution
+// that every per-conversation route needs, answering the client itself on any
+// failure.
+//
+// EXTRACTED RATHER THAN COPIED when the tool-call route arrived. Two routes
+// reading one member's directory must not be able to disagree about whose
+// directory it is, and a second derivation that merely looks equivalent is how
+// they start to: the account-switching guard, the project segment and the
+// session key are three chances to diverge, each silent.
+func (s *Server) resolveSessionScope(w http.ResponseWriter, r *http.Request) (sessionScope, bool) {
 	agent, status, msg := s.resolveAgent(r)
 	if status != 0 {
 		writeJSON(w, status, errBody(msg))
-		return
+		return sessionScope{}, false
 	}
 	ident, ok := s.Resolver.Resolve(r.Header.Get(identity.ProfileHeader))
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized,
 			errBody("missing or invalid "+identity.ProfileHeader+" header"))
-		return
+		return sessionScope{}, false
 	}
 	sessionKey := identity.SessionKey(ident.AccID, r.URL.Query().Get("session_id"))
 	if sessionKey == "" {
 		writeJSON(w, http.StatusBadRequest, errBody(`"session_id" query parameter is required`))
-		return
+		return sessionScope{}, false
 	}
 	tenantID, err := uuid.Parse(r.URL.Query().Get("tenant_id"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"tenant_id" query parameter is required and must be a UUID`))
-		return
+		return sessionScope{}, false
 	}
 	subsAccID, err := uuid.Parse(r.URL.Query().Get("subs_acc_id"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(`"subs_acc_id" query parameter is required and must be a UUID`))
-		return
+		return sessionScope{}, false
 	}
 	// Account-switching guard (full authz filtering is deferred — CTX-TSW-09).
 	if ident.Profile.AccID == subsAccID {
 		writeJSON(w, http.StatusForbidden,
 			errBody("profile account id must differ from subs_acc_id (act as an individual member)"))
-		return
+		return sessionScope{}, false
 	}
 	// A project's transcripts live under its OWN workspace, because each picoclaw
 	// agent keeps sessions beside itself. Reading the main workspace for a project
@@ -1125,21 +1155,86 @@ func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	segment, projectID, ok := s.workspaceSegmentFor(w, r, agent.Harness, key)
 	if !ok {
+		return sessionScope{}, false
+	}
+	return sessionScope{
+		TenantID:   tenantID.String(),
+		SubsAccID:  subsAccID.String(),
+		Role:       agent.Key,
+		UserAccID:  ident.AccID,
+		Segment:    segment,
+		SessionKey: projectSessionID(projectID, sessionKey),
+	}, true
+}
+
+func (s *Server) handleSessionsHistory(w http.ResponseWriter, r *http.Request) {
+	scope, ok := s.resolveSessionScope(w, r)
+	if !ok {
 		return
 	}
-	sessionKey = projectSessionID(projectID, sessionKey)
-	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, tenantID.String(), subsAccID.String(), agent.Key, ident.AccID, segment)
+	sessionsDir := config.SessionsDir(s.Cfg.ContainerDataRoot, scope.TenantID, scope.SubsAccID,
+		scope.Role, scope.UserAccID, scope.Segment)
 	// Fold in any just-completed turn before reading, then serve the durable
 	// transcript (survives picoclaw's live-file rewrites across restarts).
-	if syncErr := history.SyncDurable(sessionsDir, sessionKey); syncErr != nil {
+	if syncErr := history.SyncDurable(sessionsDir, scope.SessionKey); syncErr != nil {
 		s.logf("history: sync durable failed: %v", syncErr)
 	}
-	messages, err := history.Read(sessionsDir, sessionKey)
+	messages, err := history.Read(sessionsDir, scope.SessionKey)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
+}
+
+// handleSessionsToolCall serves one tool call's durable record.
+//
+// IT BORROWS handleSessionsHistory'S RESOLUTION VERBATIM -- the same identity
+// header, the same SessionKey, the same tenant/subs parameters, the same
+// account-switching guard and the same project segment. Two routes reading one
+// member's directory must not be able to disagree about whose directory it is,
+// and the way to guarantee that is to derive it the same way rather than to
+// write a second derivation that looks equivalent.
+//
+// THE DIRECTORY COMES FROM THE IDENTITY, the id comes from the URL. That split
+// is the whole of the authorization here: a caller chooses which of their own
+// records to read and cannot choose whose.
+func (s *Server) handleSessionsToolCall(w http.ResponseWriter, r *http.Request) {
+	scope, ok := s.resolveSessionScope(w, r)
+	if !ok {
+		return
+	}
+	id := r.URL.Query().Get("audit_id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errBody(`"audit_id" query parameter is required`))
+		return
+	}
+	dir := filepath.Join(
+		config.ToolAuditDir(s.Cfg.ContainerDataRoot, scope.TenantID, scope.SubsAccID,
+			scope.Role, scope.UserAccID, scope.Segment),
+		// THE SAME NAME THE TRANSCRIPT HAS. The harness sanitises the conversation
+		// id before it names anything, so a project chat whose key is
+		// "p.<project>.<hex>" has its files under "p_<project>_<hex>". History
+		// learned this the hard way -- it asked for the unsanitised name, found
+		// nothing, and served an empty conversation that plainly existed. The
+		// same mistake here would open every row onto "not recorded".
+		history.HarnessBasename(scope.SessionKey),
+	)
+	rec, err := toolaudit.Read(dir, id)
+	if err != nil {
+		if errors.Is(err, toolaudit.ErrNotRecorded) {
+			// NOT AN ERROR, and not a 404 either. Every call made before the
+			// harness minted these has no record, every picoclaw call has none,
+			// and a turn whose disk was full has none -- all ordinary, and the
+			// client says "not recorded" rather than showing a failure.
+			writeJSON(w, http.StatusOK, map[string]any{"recorded": false})
+			return
+		}
+		s.logf("tool-call: read failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("could not read the tool call record"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recorded": true, "record": rec})
 }
 
 // handleSessionsResolve resolves the session identifiers behind a conversation:
