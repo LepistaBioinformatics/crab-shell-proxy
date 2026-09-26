@@ -871,6 +871,34 @@ func SessionsDir(root, tenantID, subsAccID, role, userAccID, segment string) str
 		segment, "sessions")
 }
 
+// ToolAuditDirName is where the ganglion keeps one record per tool call: the
+// full command, and the output it produced.
+//
+// THIS NAME IS HALF OF A CONTRACT NO COMPILER CHECKS. The other half is the
+// harness's `toolaudit.DirName`, and the JSON field names in `toolaudit.Record`.
+// Drift would not fail a build or a test on either side -- it would serve an
+// empty sheet forever -- which is why `tool_audit_contract_test.go` reads the
+// harness's source and compares.
+const ToolAuditDirName = ".tool-audit"
+
+// ToolAuditDir is where a user's tool-call records live, under
+// UserWorkspace/<segment>/.tool-audit.
+//
+// It takes a segment for the reason SessionsDir does: a project's agent keeps
+// its own workspace, so its records are not reachable by asking for the main
+// one.
+//
+// A DIFFERENT DIRECTORY FROM .tool-output, which sits beside it and holds the
+// same bytes for results over 8 KiB. That one is the agent's scratch: the
+// harness names its paths to the model and prunes it past a cap, so it can
+// neither be compressed nor relied on to still be there. This one is written
+// for the member, never named to the model, never deleted, and compressed once
+// old. Reading the wrong one would serve a file that vanishes.
+func ToolAuditDir(root, tenantID, subsAccID, role, userAccID, segment string) string {
+	return filepath.Join(UserWorkspace(root, tenantID, subsAccID, role, userAccID),
+		segment, ToolAuditDirName)
+}
+
 // CronFile is the path to a user's picoclaw scheduled-job store (used by
 // /v1/cron/tasks), under UserWorkspace/MainWorkspace/cron/jobs.json. picoclaw
 // owns the file; the proxy only reads it. It is absent until the agent creates

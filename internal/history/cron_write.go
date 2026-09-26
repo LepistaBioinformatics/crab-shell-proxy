@@ -39,7 +39,7 @@ func CronSessionID(jobID, runID string) string {
 // The harness derives the transcript's name from the conversation id with its own
 // sanitiser, so the meta has to be named by the same rule or the two never pair up.
 func CronBasename(sessionID string) string {
-	return harnessBasename(sessionID)
+	return HarnessBasename(sessionID)
 }
 
 // WriteCronMeta writes the meta for one run, so CronRuns can find it.
