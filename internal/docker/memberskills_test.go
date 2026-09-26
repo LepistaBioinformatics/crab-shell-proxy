@@ -564,3 +564,34 @@ func TestEditingSomethingThatWasDeletedConflicts(t *testing.T) {
 		t.Errorf("err = %v, want ErrSkillConflict — an edit must not resurrect a deleted skill", err)
 	}
 }
+
+// The two proxy-owned layers are confined too, and this is what says so.
+//
+// Nothing can plant a link in them TODAY -- an admin upload is unpacked by
+// hardened zip code, the operator's tree is embedded in the binary -- so this
+// pins the guarantee rather than a live hole. `name` and `path` come from the
+// request, and the validators that refuse traversal are the message; os.Root is
+// the guarantee, which is the division media_root.go draws for the member's own
+// tree and had no reason to stop at.
+func TestAReadOnlyLayerCannotBeWalkedOutOfBySymlink(t *testing.T) {
+	m, key, _ := memberSkillFixture(t)
+	shared := config.EffectiveSkillsDir(m.cfg.ContainerDataRoot, key.TenantID, key.SubsAccID, key.Role)
+	if err := os.MkdirAll(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, "SKILL.md"), []byte("someone else's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(shared, "house-style")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	content, _, _, err := m.ReadMemberSkillFile(key, config.HarnessGanglion, "house-style", "")
+	if err == nil && strings.Contains(content, "someone else's") {
+		t.Error("the read followed a link out of the administrator's layer")
+	}
+	if files, _, err := m.ListMemberSkillFiles(key, config.HarnessGanglion, "house-style"); err == nil && len(files) > 0 {
+		t.Errorf("the listing walked out of the layer: %v", files)
+	}
+}

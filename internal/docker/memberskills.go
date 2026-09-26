@@ -368,8 +368,8 @@ func (m *Manager) ListMemberSkillFiles(key WorkspaceKey, harness, rawName string
 	if err != nil {
 		return nil, "", err
 	}
-	if dir, origin, ok := m.readOnlySkillDir(key, harness, name); ok {
-		files, err := listPlainSkillFiles(dir)
+	if base, origin, ok := m.readOnlySkillRoot(name); ok {
+		files, err := listSkillFilesUnder(base, name)
 		return files, origin, err
 	}
 
@@ -415,26 +415,6 @@ func skillFileLess(a, b string) bool {
 	return a < b
 }
 
-func listPlainSkillFiles(dir string) ([]SkillFile, error) {
-	out := []SkillFile{}
-	err := fs.WalkDir(os.DirFS(dir), ".", func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() || p == "." || len(out) >= skillFileMaxCount {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		out = append(out, SkillFile{Path: p, Size: info.Size(), ModifiedAt: modTime(info)})
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool { return skillFileLess(out[i].Path, out[j].Path) })
-	return out, nil
-}
-
 // skillFileRel validates a path INSIDE a skill.
 //
 // The kernel is the guarantee -- every read and write below goes through the
@@ -461,21 +441,87 @@ func skillFileRel(raw string) (string, error) {
 	return clean, nil
 }
 
-// readOnlySkillDir resolves a name in the two layers the member cannot write,
-// managed first -- the same precedence the binds produce, since a managed skill
-// is mounted over the workspace copy.
-func (m *Manager) readOnlySkillDir(key WorkspaceKey, harness, name string) (string, string, bool) {
+// readOnlySkillRoot names the PARENT directory of a skill in the one layer that
+// takes precedence over the member's own -- the operator's, which is mounted
+// over the workspace copy.
+//
+// The PARENT, not the skill: everything below resolves the caller-supplied name
+// BENEATH a confined root, so the boundary has to sit above the part that came
+// from the request.
+func (m *Manager) readOnlySkillRoot(name string) (string, string, bool) {
 	if isManagedSkillName(name) {
-		for _, src := range m.managedSkillDirs(harness) {
-			if path.Base(src) == name {
-				return src, SkillOriginManaged, true
-			}
-		}
-		// Reserved but not bound on this harness: still not the member's to write.
-		return path.Join(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), SkillsDirName, name),
+		return path.Join(config.ManagedSkillsDir(m.cfg.ContainerDataRoot), SkillsDirName),
 			SkillOriginManaged, true
 	}
 	return "", "", false
+}
+
+// The two proxy-owned layers are read through os.Root as well, and not because
+// anything can plant a symlink in them today -- an admin upload is unpacked by
+// hardened zip code and the operator's tree is embedded in this binary.
+//
+// It is that `name` and `path` come from the request. `sanitizeSkillName` and
+// `skillFileRel` already refuse traversal, but that is the VALIDATOR, and
+// media_root.go states this repository's division: the kernel is the guarantee,
+// the validator is the message. A defence resting on "and nobody can place a
+// link there" is one deployment decision away from being wrong, silently.
+//
+// CodeQL caught this as go/path-injection on the plain os.ReadFile these
+// replaced, which is the same observation arrived at mechanically.
+func listSkillFilesUnder(base, name string) ([]SkillFile, error) {
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrMediaNotFound
+		}
+		return nil, err
+	}
+	defer root.Close()
+	if _, err := root.Stat(name); err != nil {
+		if escaped(err) {
+			return nil, ErrMediaName
+		}
+		return nil, ErrMediaNotFound
+	}
+	out := []SkillFile{}
+	_ = fs.WalkDir(root.FS(), name, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() || len(out) >= skillFileMaxCount {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		out = append(out, SkillFile{
+			Path:       strings.TrimPrefix(p, name+"/"),
+			Size:       info.Size(),
+			ModifiedAt: modTime(info),
+		})
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool { return skillFileLess(out[i].Path, out[j].Path) })
+	return out, nil
+}
+
+func readSkillFileUnder(base, name, rel, origin string) (string, SkillFile, string, error) {
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", SkillFile{}, "", ErrMediaNotFound
+		}
+		return "", SkillFile{}, "", err
+	}
+	defer root.Close()
+	sub := path.Join(name, rel)
+	raw, err := root.ReadFile(sub)
+	if err != nil {
+		if escaped(err) {
+			return "", SkillFile{}, "", ErrMediaName
+		}
+		return "", SkillFile{}, "", err
+	}
+	info, _ := root.Stat(sub)
+	return decodeSkillFile(raw, rel, info, origin)
 }
 
 // ReadMemberSkillFile returns one file's text from whichever layer holds the
@@ -493,8 +539,8 @@ func (m *Manager) ReadMemberSkillFile(key WorkspaceKey, harness, rawName, rawPat
 		return "", SkillFile{}, "", err
 	}
 
-	if dir, origin, ok := m.readOnlySkillDir(key, harness, name); ok {
-		return readPlainSkillFile(path.Join(dir, rel), rel, origin)
+	if base, origin, ok := m.readOnlySkillRoot(name); ok {
+		return readSkillFileUnder(base, name, rel, origin)
 	}
 
 	tree, openErr := openTreeIfExists(m.memberSkillsRoot(key, harness))
@@ -516,16 +562,7 @@ func (m *Manager) ReadMemberSkillFile(key WorkspaceKey, harness, rawName, rawPat
 	}
 
 	// Not the member's; the administrator's cascade is the remaining layer.
-	return readPlainSkillFile(path.Join(m.sharedSkillsDirFor(key), name, rel), rel, SkillOriginShared)
-}
-
-func readPlainSkillFile(full, rel, origin string) (string, SkillFile, string, error) {
-	raw, err := os.ReadFile(full)
-	if err != nil {
-		return "", SkillFile{}, "", err
-	}
-	info, _ := os.Stat(full)
-	return decodeSkillFile(raw, rel, info, origin)
+	return readSkillFileUnder(m.sharedSkillsDirFor(key), name, rel, SkillOriginShared)
 }
 
 // decodeSkillFile labels a file the panel cannot edit rather than handing back

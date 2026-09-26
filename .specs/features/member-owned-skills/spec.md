@@ -180,6 +180,18 @@ The pattern to copy is `internal/docker/memory.go` — `workspaceDir` + `openTre
 file already records: a named component (`memory`, and here `skills`) is itself something
 the agent can replace.
 
+**All three layers, not only the member's.** The first implementation read the
+administrator's and the operator's trees with plain `os.ReadFile` on the grounds that
+they are proxy-owned and nothing can plant a link in them — an admin upload is unpacked
+by hardened zip code and the operator's tree is embedded in the binary. CodeQL flagged
+both as `go/path-injection`, and it was right to: `name` and `path` come from the
+request, `sanitizeSkillName` and `skillFileRel` are the *validators*, and `media_root.go`
+states this repository's own division — the kernel is the guarantee, the validator is the
+message. A defence resting on "and nobody can place a link there" is one deployment
+decision away from being silently wrong. Every layer now resolves the request-supplied
+name beneath an `os.Root` opened on the layer's parent directory, pinned by
+`TestAReadOnlyLayerCannotBeWalkedOutOfBySymlink`.
+
 ## DEC-5 — Main workspace only; the routes take no `project`
 
 `Loader.Workspace` in the harness is the main workspace, fixed at boot. A skill written
