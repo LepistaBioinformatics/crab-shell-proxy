@@ -247,6 +247,18 @@ type Orchestrator interface {
 	// scope change affects, so the RO mount reflects it on the next stop/start.
 	SyncEffectiveSkillsForScope(scope docker.Scope) error
 
+	// --- member-owned-skills (the member's OWN layer; never an admin scope) ---
+	//
+	// Keyed by WorkspaceKey, not Scope, and that is the whole distinction: these
+	// reach one member's workspace, which no admin route may touch (FR-7 above).
+	// No project argument -- the harness's loader reads the main workspace only.
+
+	ListMemberSkills(key docker.WorkspaceKey, harness string) ([]docker.MemberSkill, error)
+	ListMemberSkillFiles(key docker.WorkspaceKey, harness, name string) ([]docker.SkillFile, string, error)
+	ReadMemberSkillFile(key docker.WorkspaceKey, harness, name, path string) (string, docker.SkillFile, string, error)
+	WriteMemberSkillFile(key docker.WorkspaceKey, harness, name, path, content, ifModifiedAt string) (docker.SkillFile, error)
+	DeleteMemberSkill(key docker.WorkspaceKey, harness, name string) error
+
 	// --- persona (the read-only identity files at the workspace root) ---
 
 	ListPersona(scope docker.Scope) ([]docker.PersonaEntry, error)
@@ -423,6 +435,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/projects/{id}", s.handleProjectsDelete)
 	mux.HandleFunc("GET /v1/memory", s.handleMemoryGet)
 	mux.HandleFunc("PUT /v1/memory", s.handleMemoryPut)
+	// member-owned-skills: the member's OWN skills, and a read-only view of the
+	// two layers they cannot write. Distinct from /v1/admin/skills below, which
+	// is the administrator's cascade and never reaches member content.
+	mux.HandleFunc("GET /v1/skills", s.handleSkillsList)
+	mux.HandleFunc("GET /v1/skills/doc", s.handleSkillsDoc)
+	mux.HandleFunc("GET /v1/skills/files", s.handleSkillsFiles)
+	mux.HandleFunc("PUT /v1/skills", s.handleSkillsPut)
+	mux.HandleFunc("DELETE /v1/skills", s.handleSkillsDelete)
 	// memory-graph-mcp: the knowledge graph. READ ONLY — the bot writes through
 	// /v1/mcp below, and there is deliberately no write route here (FR-6.5).
 	// Distinct paths from /v1/memory on purpose: that is MEMORY_CUSTOM.md, a

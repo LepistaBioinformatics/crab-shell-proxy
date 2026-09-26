@@ -33,6 +33,16 @@ const (
 )
 
 type fakeOrch struct {
+	// member-owned-skills
+	memberSkills     []docker.MemberSkill
+	memberSkillFiles []docker.SkillFile
+	memberSkillPath  string
+	memberSkillKey   docker.WorkspaceKey
+	memberSkillName  string
+	memberSkillDoc   string
+	memberSkillIfMod string
+	memberSkillErr   error
+
 	projects   []projects.Project
 	projectErr error
 	ensureErr  error
@@ -256,6 +266,31 @@ func (f *fakeOrch) WriteSharedSkillZip(docker.Scope, string, io.Reader) error { 
 func (f *fakeOrch) ArchiveSharedSkill(docker.Scope, string, io.Writer) error  { return nil }
 func (f *fakeOrch) DeleteSharedSkill(docker.Scope, string) error              { return nil }
 func (f *fakeOrch) SyncEffectiveSkillsForScope(docker.Scope) error            { return nil }
+
+// member-owned-skills. Recorded rather than ignored: the routes' whole point is
+// that they never carry a project and never reach another member's workspace, and
+// a fake that discards its arguments cannot show either.
+func (f *fakeOrch) ListMemberSkills(key docker.WorkspaceKey, harness string) ([]docker.MemberSkill, error) {
+	f.memberSkillKey = key
+	return f.memberSkills, f.memberSkillErr
+}
+func (f *fakeOrch) ListMemberSkillFiles(key docker.WorkspaceKey, harness, name string) ([]docker.SkillFile, string, error) {
+	f.memberSkillKey, f.memberSkillName = key, name
+	return f.memberSkillFiles, docker.SkillOriginMember, f.memberSkillErr
+}
+func (f *fakeOrch) ReadMemberSkillFile(key docker.WorkspaceKey, harness, name, p string) (string, docker.SkillFile, string, error) {
+	f.memberSkillKey, f.memberSkillName, f.memberSkillPath = key, name, p
+	return f.memberSkillDoc, docker.SkillFile{Path: p}, docker.SkillOriginMember, f.memberSkillErr
+}
+func (f *fakeOrch) WriteMemberSkillFile(key docker.WorkspaceKey, harness, name, p, content, ifModifiedAt string) (docker.SkillFile, error) {
+	f.memberSkillKey, f.memberSkillName, f.memberSkillPath = key, name, p
+	f.memberSkillDoc, f.memberSkillIfMod = content, ifModifiedAt
+	return docker.SkillFile{Path: p}, f.memberSkillErr
+}
+func (f *fakeOrch) DeleteMemberSkill(key docker.WorkspaceKey, harness, name string) error {
+	f.memberSkillKey, f.memberSkillName = key, name
+	return f.memberSkillErr
+}
 
 func (f *fakeOrch) ListPersona(docker.Scope) ([]docker.PersonaEntry, error) {
 	return nil, nil
