@@ -35,6 +35,19 @@ const KindCompact = "compaction"
 // (crab-ganglion-harness internal/domain, EventCompact).
 const EventCompact = "compact"
 
+// KindApproval marks the harness's record of a member being asked whether a
+// tool call may run, and what they answered.
+//
+// Separated from KindStep for the reason KindCompact is: it arrives in the same
+// shape -- an events-only assistant entry -- and filing it under "ran three
+// tools" would collapse it into a run of narration. It is also the only entry
+// in a transcript whose subject is the MEMBER rather than the agent.
+const KindApproval = "approval"
+
+// EventApproval is the harness's event kind for that record
+// (crab-ganglion-harness internal/domain, EventApproval).
+const EventApproval = "approval"
+
 // Message is one conversational turn returned to the client.
 type Message struct {
 	Role      string `json:"role"`
@@ -652,6 +665,11 @@ func readMessages(r *os.Root, dir, basename string) ([]Message, error) {
 		if e.Role == "assistant" && hasCompact(m.Events) {
 			m.Kind = KindCompact
 		}
+		// Same rule, same reason, and the two cannot collide: the harness
+		// writes each record as its own entry carrying one event.
+		if e.Role == "assistant" && hasApproval(m.Events) {
+			m.Kind = KindApproval
+		}
 		messages = append(messages, m)
 		// Held, not applied. A frame that already carries real events needs no
 		// stand-in for them.
@@ -781,6 +799,16 @@ func callEvents(e jsonlEntry) []Event {
 func hasCompact(events []Event) bool {
 	for _, e := range events {
 		if e.Kind == EventCompact {
+			return true
+		}
+	}
+	return false
+}
+
+// hasApproval reports whether an entry is the harness's approval record.
+func hasApproval(events []Event) bool {
+	for _, e := range events {
+		if e.Kind == EventApproval {
 			return true
 		}
 	}

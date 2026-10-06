@@ -219,3 +219,45 @@ func TestRead_ATranscriptWithNoCompactionIsUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// THE OTHER RECORD WHOSE SUBJECT IS THE MEMBER. A gated tool call stops the
+// agent and asks a person; until the harness wrote this, the answer lived only
+// in an audit file no screen reads, and a request nobody answered in time left
+// nothing behind at all. Same shape as a step, so told apart here.
+func TestRead_AnApprovalRecordIsServedAsItsOwnKind(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"agenda isso"}
+{"role":"assistant","content":"","events":[{"kind":"approval","name":"schedule_create","arguments":"{\"message\":\"regar\"}","status":"denied","detail":"nao quero"}]}
+{"role":"assistant","content":"tudo bem, nao agendei"}
+`)
+	if len(msgs) != 3 {
+		t.Fatalf("got %d messages, want the question, the decision and the answer: %+v", len(msgs), msgs)
+	}
+	rec := msgs[1]
+	if rec.Kind != KindApproval {
+		t.Errorf("kind = %q, want %q: it is not work the agent did inside the turn", rec.Kind, KindApproval)
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %+v, want the one decision", rec.Events)
+	}
+	// Every field the row is drawn from, passed through: the outcome is a code
+	// the client renders in the member's language, and the detail is the
+	// member's own words.
+	e := rec.Events[0]
+	if e.Name != "schedule_create" || e.Status != "denied" || e.Detail != "nao quero" || e.Arguments == "" {
+		t.Errorf("event = %+v, want the tool, the outcome, the reason and the arguments", e)
+	}
+}
+
+// Every transcript written before the harness recorded approvals has no such
+// entry, and must be served exactly as it was.
+func TestRead_ATranscriptWithNoApprovalIsUnchanged(t *testing.T) {
+	msgs := readOne(t, `{"role":"user","content":"oi"}
+{"role":"assistant","content":"","events":[{"kind":"tool","name":"sh","status":"ok"}]}
+{"role":"assistant","content":"pronto"}
+`)
+	for _, m := range msgs {
+		if m.Kind == KindApproval {
+			t.Errorf("a transcript with no approval served one: %+v", m)
+		}
+	}
+}
