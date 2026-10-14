@@ -139,6 +139,32 @@ func TestARefusalCarriesItsReasonBackToTheAgent(t *testing.T) {
 	}
 }
 
+// A REFUSAL WITH NO REASON STAYS EMPTY. This route used to substitute
+// "refused by the member", which was harmless while the model was the only
+// reader. The harness now records the refusal in the transcript, where the
+// reason is rendered as the member's OWN WORDS -- and a member who refused in
+// Portuguese without typing anything would have found an English sentence
+// quoted back at them as what they said. The harness composes its own sentence
+// for the model when this is empty.
+func TestARefusalWithNoReasonInventsNone(t *testing.T) {
+	s, _ := approvalServer(t)
+	sc := callerScope()
+	done := ask(t, s, scopeToken(t, sc), `{"session_id":"s1","tool":"schedule_create"}`)
+	pending := waitPending(t, s, sc)
+
+	cronWrite(t, s, http.MethodPost, "/v1/approvals/answer?"+cronQuery,
+		`{"id":"`+pending[0].ID+`","allowed":false}`)
+
+	var dec approvalDecision
+	_ = json.Unmarshal((<-done).Body.Bytes(), &dec)
+	if dec.Allowed {
+		t.Fatal("a refusal was reported as allowed")
+	}
+	if dec.Reason != "" {
+		t.Fatalf("reason = %q, want nothing: the member typed nothing", dec.Reason)
+	}
+}
+
 // The security property this endpoint exists to hold: the id is the only thing an
 // answer names, so without the scope check a member who learned another member's
 // id could answer on their behalf.

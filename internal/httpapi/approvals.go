@@ -309,10 +309,16 @@ func (s *Server) handleApprovalsAnswer(w http.ResponseWriter, r *http.Request) {
 	// BY IS THE PROXY'S, never the request's. It is the account id mycelium
 	// vouched for on this call, which is the only fact here the container did
 	// not influence.
+	// THE REASON IS THE MEMBER'S OR IT IS NOTHING. This used to substitute
+	// "refused by the member" for an empty one, which was harmless while the
+	// only reader was the model -- and stopped being harmless when the harness
+	// began recording the refusal in the transcript, where Detail is rendered
+	// as the member's own words. A member refusing in Portuguese, without
+	// typing anything, would have found an English sentence quoted back at them
+	// as what they said. The harness composes its own sentence for the model
+	// when this is empty (runtime.refusalText), so nothing downstream lost a
+	// word.
 	dec := approvalDecision{Allowed: body.Allowed, Reason: body.Reason, By: key.UserAccID}
-	if dec.Reason == "" && !dec.Allowed {
-		dec.Reason = "refused by the member"
-	}
 	if !s.Approvals.answer(body.ID, scopeOfKey(key), dec) {
 		writeJSON(w, http.StatusNotFound, errBody("no approval request is waiting with that id"))
 		return
